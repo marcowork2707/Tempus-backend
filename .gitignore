@@ -6,5 +6,6 @@ dist/
 build/
 .DS_Store
 *.log
+debug/
 .idea/
 .vscode/
