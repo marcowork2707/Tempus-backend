@@ -11,6 +11,8 @@ const Checklist = require('../models/Checklist');
 const ErrorHandler = require('../utils/errorHandler');
 const catchAsyncErrors = require('../utils/catchAsyncErrors');
 
+const hasResolvedUser = (record) => Boolean(record?.user && record.user._id);
+
 // Public centers list for registration flow
 exports.getPublicCenters = catchAsyncErrors(async (req, res, next) => {
   const centers = await Center.find({ active: true }).sort({ name: 1 });
@@ -296,7 +298,10 @@ exports.getWorkerShifts = catchAsyncErrors(async (req, res, next) => {
     .populate('shift', 'name startTime endTime')
     .sort('date');
 
-  res.status(200).json({ success: true, workerShifts });
+  res.status(200).json({
+    success: true,
+    workerShifts: workerShifts.filter((item) => item.user && item.shift),
+  });
 });
 
 // Assign a worker to a shift on a date
@@ -439,7 +444,10 @@ exports.getVacationRequests = catchAsyncErrors(async (req, res, next) => {
     .populate('reviewedBy', 'name email')
     .sort({ createdAt: -1, startDate: -1 });
 
-  res.status(200).json({ success: true, requests });
+  res.status(200).json({
+    success: true,
+    requests: requests.filter((request) => request.user),
+  });
 });
 
 exports.createVacationRequest = catchAsyncErrors(async (req, res, next) => {
@@ -569,7 +577,10 @@ exports.getVacationConflictRules = catchAsyncErrors(async (req, res, next) => {
     .populate('blockedUser', 'name email')
     .sort({ createdAt: -1 });
 
-  res.status(200).json({ success: true, rules });
+  res.status(200).json({
+    success: true,
+    rules: rules.filter((rule) => rule.primaryUser && rule.blockedUser),
+  });
 });
 
 exports.createVacationConflictRule = catchAsyncErrors(async (req, res, next) => {
@@ -667,6 +678,7 @@ function computeOccurrences(patterns, from, to) {
 
   for (const pattern of patterns) {
     if (!pattern.active) continue;
+    if (!pattern.user?._id) continue;
 
     const patStart = _startOfDay(pattern.startDate);
     const patEnd = pattern.endDate ? _startOfDay(pattern.endDate) : null;
@@ -748,6 +760,7 @@ function applyOverrides(baseOccurrences, overrides) {
   }
 
   for (const override of overrides) {
+    if (!override.user?._id) continue;
     const date = _formatLocalDate(override.date);
     const userId = override.user._id.toString();
     const key = `${userId}|${date}`;
@@ -793,7 +806,7 @@ exports.getShiftPatterns = catchAsyncErrors(async (req, res, next) => {
     .populate('shift', 'name startTime endTime')
     .sort('-createdAt');
 
-  res.status(200).json({ success: true, patterns });
+  res.status(200).json({ success: true, patterns: patterns.filter(hasResolvedUser) });
 });
 
 // Create a shift pattern (admin only)
@@ -992,7 +1005,10 @@ exports.getShiftCalendar = catchAsyncErrors(async (req, res, next) => {
 
   const overrides = await ShiftOverride.find(overrideFilter).populate('user', 'name email');
 
-  let occurrences = applyOverrides(computeOccurrences(patterns, fromDate, toDate), overrides);
+  let occurrences = applyOverrides(
+    computeOccurrences(patterns.filter(hasResolvedUser), fromDate, toDate),
+    overrides.filter(hasResolvedUser)
+  );
   if (roleName === 'coach') {
     occurrences = occurrences.filter((occ) => occ.userId === req.user.id || occ.reasonType === 'vacation');
   }

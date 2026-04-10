@@ -81,6 +81,7 @@ function computeOccurrences(patterns, from, to) {
 
   for (const pattern of patterns) {
     if (!pattern.active) continue;
+    if (!pattern.user?._id) continue;
 
     const patStart = startOfDay(pattern.startDate);
     const patEnd = pattern.endDate ? startOfDay(pattern.endDate) : null;
@@ -143,6 +144,7 @@ function applyOverrides(baseOccurrences, overrides) {
   }
 
   for (const override of overrides) {
+    if (!override.user?._id) continue;
     const date = formatLocalDate(override.date);
     const userId = override.user._id.toString();
     byKey.set(`${userId}|${date}`, {
@@ -180,7 +182,10 @@ const getPlannedOccurrencesMap = async (centerId, from, to, userId) => {
     ShiftOverride.find(overrideFilter).populate('user', 'name email'),
   ]);
 
-  const occurrences = applyOverrides(computeOccurrences(patterns, from, to), overrides);
+  const occurrences = applyOverrides(
+    computeOccurrences(patterns.filter((pattern) => pattern.user && pattern.user._id), from, to),
+    overrides.filter((override) => override.user && override.user._id)
+  );
   return new Map(occurrences.map((occ) => [`${occ.userId}|${occ.date}`, occ]));
 };
 
@@ -311,14 +316,16 @@ exports.getTimeEntries = catchAsyncErrors(async (req, res, next) => {
     .populate('center', 'name type')
     .sort({ date: -1, entryTime: -1 });
 
+  const validEntries = entries.filter((entry) => entry.user && entry.center);
+
   let plannedMap = new Map();
-  if (filter.center && entries.length > 0) {
-    const rangeStart = req.query.startDate ? new Date(req.query.startDate) : entries[entries.length - 1].date;
-    const rangeEnd = req.query.endDate ? new Date(req.query.endDate) : entries[0].date;
+  if (filter.center && validEntries.length > 0) {
+    const rangeStart = req.query.startDate ? new Date(req.query.startDate) : validEntries[validEntries.length - 1].date;
+    const rangeEnd = req.query.endDate ? new Date(req.query.endDate) : validEntries[0].date;
     plannedMap = await getPlannedOccurrencesMap(filter.center, rangeStart, rangeEnd, req.query.userId);
   }
 
-  const enrichedEntries = entries.map((entry) => {
+  const enrichedEntries = validEntries.map((entry) => {
     const dateKey = formatLocalDate(entry.date);
     const planned = plannedMap.get(`${entry.user._id.toString()}|${dateKey}`);
     const plannedMinutes = planned?.isOff
@@ -415,12 +422,14 @@ exports.exportToExcel = catchAsyncErrors(async (req, res, next) => {
     .populate('center', 'name')
     .sort({ date: 1, entryTime: 1 });
 
+  const validEntries = entries.filter((entry) => entry.user && entry.center);
+
   let plannedMap = new Map();
-  if (filter.center && entries.length > 0) {
+  if (filter.center && validEntries.length > 0) {
     plannedMap = await getPlannedOccurrencesMap(
       filter.center,
-      req.query.startDate ? new Date(req.query.startDate) : entries[0].date,
-      req.query.endDate ? new Date(req.query.endDate) : entries[entries.length - 1].date,
+      req.query.startDate ? new Date(req.query.startDate) : validEntries[0].date,
+      req.query.endDate ? new Date(req.query.endDate) : validEntries[validEntries.length - 1].date,
       req.query.userId
     );
   }
@@ -428,7 +437,7 @@ exports.exportToExcel = catchAsyncErrors(async (req, res, next) => {
   // Generate CSV
   let csv = 'Instructor,Día,Turno planificado,Hora de entrada,Hora de salida,Tiempo trabajado,Horas extra,Motivo\n';
 
-  entries.forEach((entry) => {
+  validEntries.forEach((entry) => {
     const date = entry.date.toLocaleDateString('es-ES');
     const planned = plannedMap.get(`${entry.user._id.toString()}|${formatLocalDate(entry.date)}`);
     const plannedMinutes = planned?.isOff

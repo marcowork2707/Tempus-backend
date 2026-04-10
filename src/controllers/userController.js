@@ -2,10 +2,22 @@ const User = require('../models/User');
 const Center = require('../models/Center');
 const UserCenterRole = require('../models/UserCenterRole');
 const Role = require('../models/Role');
+const TimeEntry = require('../models/TimeEntry');
+const WorkerShift = require('../models/WorkerShift');
+const ShiftPattern = require('../models/ShiftPattern');
+const ShiftOverride = require('../models/ShiftOverride');
+const VacationRequest = require('../models/VacationRequest');
+const VacationConflictRule = require('../models/VacationConflictRule');
+const Checklist = require('../models/Checklist');
+const ClassReport = require('../models/ClassReport');
+const Notification = require('../models/Notification');
+const AuditLog = require('../models/AuditLog');
+const TaskInstance = require('../models/TaskInstance');
 const ErrorHandler = require('../utils/errorHandler');
 const catchAsyncErrors = require('../utils/catchAsyncErrors');
 const { createInvitation } = require('./authController');
 const { sendInvitationEmail } = require('../utils/email');
+const crypto = require('crypto');
 
 const ROLE_LABEL_BY_NAME = {
   coach: 'coach',
@@ -249,8 +261,67 @@ exports.deleteUser = catchAsyncErrors(async (req, res, next) => {
     return next(new ErrorHandler('User not found', 404));
   }
 
-  // Delete user center roles
+  const userId = user._id;
+
+  // Delete or detach all user-linked records
   await UserCenterRole.deleteMany({ user: user._id });
+  await TimeEntry.deleteMany({ user: userId });
+  await WorkerShift.deleteMany({ user: userId });
+  await ShiftPattern.deleteMany({ user: userId });
+  await ShiftOverride.deleteMany({ user: userId });
+  await VacationRequest.deleteMany({ user: userId });
+  await VacationConflictRule.deleteMany({
+    $or: [{ primaryUser: userId }, { blockedUser: userId }],
+  });
+  await Notification.deleteMany({ user: userId });
+  await AuditLog.deleteMany({ user: userId });
+  await TaskInstance.deleteMany({
+    $or: [{ assignedTo: userId }, { completedBy: userId }],
+  });
+
+  await Checklist.updateMany(
+    { assignedUser: userId },
+    { $set: { assignedUser: null } }
+  );
+  await Checklist.updateMany(
+    { reviewedBy: userId },
+    { $unset: { reviewedBy: '', reviewedAt: '' } }
+  );
+  await Checklist.updateMany(
+    { 'items.doneBy': userId },
+    {
+      $set: {
+        'items.$[item].doneBy': null,
+        'items.$[item].doneAt': null,
+        'items.$[item].done': false,
+      },
+    },
+    {
+      arrayFilters: [{ 'item.doneBy': userId }],
+    }
+  );
+
+  await ClassReport.updateMany(
+    { instructorUser: userId },
+    { $set: { instructorUser: null } }
+  );
+  await ClassReport.updateMany(
+    { updatedBy: userId },
+    { $set: { updatedBy: null } }
+  );
+  await ClassReport.updateMany(
+    { 'items.handoffDoneBy': userId },
+    {
+      $set: {
+        'items.$[item].handoffDoneBy': null,
+        'items.$[item].handoffDoneAt': null,
+        'items.$[item].handoffDone': false,
+      },
+    },
+    {
+      arrayFilters: [{ 'item.handoffDoneBy': userId }],
+    }
+  );
 
   // Delete user
   await User.findByIdAndDelete(req.params.id);
