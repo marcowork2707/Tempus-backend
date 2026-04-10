@@ -8,6 +8,7 @@ const {
   updateUser,
   deleteUser,
   assignUserToCenter,
+  resendInvitation,
 } = require('../controllers/userController');
 
 const { isAuthenticatedUser, authorizeRoles } = require('../middleware/auth');
@@ -26,6 +27,9 @@ router.post('/', authorizeRoles('admin'), createUser);
 
 // Update user
 router.put('/:id', authorizeRoles('admin'), updateUser);
+
+// Resend invitation / reset password by invitation
+router.post('/:id/resend-invitation', authorizeRoles('admin'), resendInvitation);
 
 // Delete user
 router.delete('/:id', authorizeRoles('admin'), deleteUser);
