@@ -814,6 +814,26 @@ function extractContactFromOnclick(onclick) {
   };
 }
 
+function isCancelledWaitlistEntry($athlete, athleteText = '') {
+  const normalizedText = String(athleteText).replace(/\s+/g, ' ').trim();
+  const athleteHtml = ($athlete.html() || '').toLowerCase();
+
+  const hasCancelText =
+    /cancelad[oa]s?/i.test(normalizedText) ||
+    /anulad[oa]s?/i.test(normalizedText) ||
+    /\bcancel(ar|ada|ado|aci[oó]n)\b/i.test(normalizedText);
+
+  const hasCancelIcon =
+    $athlete.find('.checkAthlete img[src*="delete2.svg"], .checkAthlete img[src*="delete"], .checkAthlete img[src*="cancel"]').length > 0;
+
+  const hasCancelMarker =
+    athleteHtml.includes('cancel') ||
+    athleteHtml.includes('anulad') ||
+    athleteHtml.includes('delete2.svg');
+
+  return hasCancelText || hasCancelIcon || hasCancelMarker;
+}
+
 async function parseReservationsHtml(page, targetDate) {
   const cheerio = require('cheerio');
   const html = await page.content();
@@ -931,6 +951,7 @@ async function parseReservationsHtmlForOccupancy(page) {
         /lista de espera/i.test(athleteText);
 
       if (!isWaitlist) return;
+      if (isCancelledWaitlistEntry($athlete, athleteText)) return;
 
       const memberName = $athlete.find('.atletaNom').first().text().replace(/\s+/g, ' ').trim();
       if (memberName && !waitlistMembers.includes(memberName)) {
