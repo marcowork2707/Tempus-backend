@@ -940,6 +940,7 @@ async function parseReservationsHtmlForOccupancy(page) {
       extractInstructorNameFromText(text);
 
     const bookedMatch = parseNumberMatch(text, /Plazas ocupadas\s*(\d+)\s*\/\s*(\d+)/i);
+    const waitlistHeaderMatch = text.match(/Plazas ocupadas\s*\d+\s*\/\s*\d+\s*\((\d+)\)/i);
     const attendanceMatch = parseNumberMatch(text, /Asistencia\s*(\d+)\s*\/\s*(\d+)/i);
     const athleteCards = $class.find('.atletaClase');
     const bookedCount = bookedMatch?.[0] ?? athleteCards.length;
@@ -1018,6 +1019,9 @@ async function parseReservationsHtmlForOccupancy(page) {
       noShowCount = bookedCount - attendanceCount;
     }
 
+    const waitlistCountFromHeader = waitlistHeaderMatch ? Number(waitlistHeaderMatch[1]) || 0 : 0;
+    const waitlistCount = Math.max(waitlistMembers.length, waitlistCountFromHeader);
+
     if (!className && !classTime) return;
 
     classes.push({
@@ -1028,7 +1032,7 @@ async function parseReservationsHtmlForOccupancy(page) {
       bookedCount,
       attendanceCount,
       noShowCount,
-      waitlistCount: waitlistMembers.length,
+      waitlistCount,
       waitlistMembers,
       capacity,
       occupancyRate: formatPercent(bookedCount, capacity),
