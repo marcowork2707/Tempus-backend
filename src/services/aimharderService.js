@@ -834,6 +834,14 @@ function isCancelledWaitlistEntry($athlete, athleteText = '') {
   return hasCancelText || hasCancelIcon || hasCancelMarker;
 }
 
+function pushUniqueWaitlistMember(target, memberName) {
+  const normalized = String(memberName || '').replace(/\s+/g, ' ').trim();
+  if (!normalized) return;
+  if (!target.includes(normalized)) {
+    target.push(normalized);
+  }
+}
+
 async function parseReservationsHtml(page, targetDate) {
   const cheerio = require('cheerio');
   const html = await page.content();
@@ -954,9 +962,48 @@ async function parseReservationsHtmlForOccupancy(page) {
       if (isCancelledWaitlistEntry($athlete, athleteText)) return;
 
       const memberName = $athlete.find('.atletaNom').first().text().replace(/\s+/g, ' ').trim();
-      if (memberName && !waitlistMembers.includes(memberName)) {
-        waitlistMembers.push(memberName);
+      pushUniqueWaitlistMember(waitlistMembers, memberName);
+    });
+
+    let inWaitlistSection = false;
+    $class.children().each((__, childEl) => {
+      const $child = $(childEl);
+      const childText = $child.text().replace(/\s+/g, ' ').trim();
+
+      if (!childText) return;
+
+      if (/en lista de espera/i.test(childText)) {
+        inWaitlistSection = true;
+        return;
       }
+
+      if (/cancelaciones/i.test(childText)) {
+        inWaitlistSection = false;
+        return;
+      }
+
+      if (!inWaitlistSection) return;
+
+      const waitlistCards = $child.hasClass('atletaClase')
+        ? $child
+        : $child.find('.atletaClase');
+
+      if (!waitlistCards.length) return;
+
+      waitlistCards.each((___, waitlistEl) => {
+        const $waitlistAthlete = $(waitlistEl);
+        const waitlistText = $waitlistAthlete.text().replace(/\s+/g, ' ').trim();
+        if (isCancelledWaitlistEntry($waitlistAthlete, waitlistText)) return;
+
+        const memberName = $waitlistAthlete
+          .find('.atletaNom')
+          .first()
+          .text()
+          .replace(/\s+/g, ' ')
+          .trim();
+
+        pushUniqueWaitlistMember(waitlistMembers, memberName);
+      });
     });
 
     if (!attendanceCount && bookedCount >= noShowCount) {
