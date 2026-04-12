@@ -11,6 +11,7 @@ const {
   getClassReportContext,
   saveClassReport,
   setClassReportHandoffStatus,
+  getPendingPaymentsWithTPVError,
 } = require('../services/aimharderService');
 const UserCenterRole = require('../models/UserCenterRole');
 const User = require('../models/User');
@@ -332,6 +333,32 @@ exports.setClassReportHandoff = async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Error al marcar el reporte como pasado a AimHarder.',
+      detail: process.env.NODE_ENV === 'development' ? err.message : undefined,
+    });
+  }
+};
+
+/**
+ * GET /api/aimharder/tpv-redsys-payments?centerId=xxx
+ * Devuelve los pagos pendientes de AimHarder con fallo TPV Redsys.
+ */
+exports.getTpvRedsysPayments = async (req, res) => {
+  try {
+    const { centerId } = req.query;
+    if (!centerId) {
+      return res.status(400).json({ success: false, message: 'centerId es obligatorio' });
+    }
+
+    const payments = await getPendingPaymentsWithTPVError(centerId);
+    res.json({ success: true, count: payments.length, payments });
+  } catch (err) {
+    console.error('[AimHarder Controller] Error TPV Redsys:', err.message);
+    if (err.message.includes('credenciales')) {
+      return res.status(503).json({ success: false, message: err.message });
+    }
+    res.status(500).json({
+      success: false,
+      message: 'Error al obtener los pagos con fallo TPV de AimHarder.',
       detail: process.env.NODE_ENV === 'development' ? err.message : undefined,
     });
   }

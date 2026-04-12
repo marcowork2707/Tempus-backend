@@ -10,6 +10,7 @@ const {
   getClassReports,
   saveClassReport,
   setClassReportHandoff,
+  getTpvRedsysPayments,
 } = require('../controllers/aimharderController');
 const { isAuthenticatedUser, authorizeRoles } = require('../middleware/auth');
 
@@ -30,5 +31,6 @@ router.put('/integration/:centerId', isAuthenticatedUser, authorizeRoles('admin'
 router.get('/class-reports', isAuthenticatedUser, getClassReports);
 router.put('/class-reports', isAuthenticatedUser, saveClassReport);
 router.put('/class-reports/handoff', isAuthenticatedUser, setClassReportHandoff);
+router.get('/tpv-redsys-payments', isAuthenticatedUser, getTpvRedsysPayments);
 
 module.exports = router;

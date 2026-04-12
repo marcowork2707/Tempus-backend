@@ -1859,6 +1859,161 @@ async function seedAimHarderIntegrationsFromEnv() {
   }
 }
 
+// ─────────────────────────────────────────────────────
+// Pagos con fallo TPV Redsys
+// ─────────────────────────────────────────────────────
+
+const KNOWN_TARIFFS = ['TEMPUS +65', 'CONGELACION', 'STARTER', 'IRON', 'SILVER', 'GOLD'];
+
+function extractTarifa(concept) {
+  const upper = concept.toUpperCase();
+  for (const t of KNOWN_TARIFFS) {
+    if (upper.includes(t)) return t;
+  }
+  // Fallback: first sequence of uppercase letters before " -" or digit
+  const m = concept.match(/^([A-ZÁÉÍÓÚÑ][A-ZÁÉÍÓÚÑ\s+65]*?)(?:\s+-|\s+\d|\s+\()/);
+  return m ? m[1].trim() : concept.split(/[\s-]/)[0];
+}
+
+async function parsePaymentsPageForTPVErrors(page) {
+  const cheerio = require('cheerio');
+  const html = await page.content();
+  const $ = cheerio.load(html);
+  const payments = [];
+
+  $('table tr').each((_, row) => {
+    const cells = $(row).find('td');
+    if (cells.length < 3) return;
+
+    // Find the cell that contains the TPV/Redsys keyword (any column)
+    let conceptCellIdx = -1;
+    cells.each((idx, cell) => {
+      if (/falla\s*tpv|redsys/i.test($(cell).text())) {
+        conceptCellIdx = idx;
+      }
+    });
+    if (conceptCellIdx === -1) return;
+
+    const concept = $(cells.eq(conceptCellIdx)).text().trim();
+    const tarifa = extractTarifa(concept);
+
+    // Name: prefer cell at index 1, but also try 0 and 2 as fallback
+    let memberName = '';
+    for (const nameIdx of [1, 2, 0]) {
+      const candidate = $(cells.eq(nameIdx)).text().replace(/\s+/g, ' ').trim();
+      // Skip very short strings, numbers-only, or the concept cell itself
+      if (candidate.length > 3 && !/^\d/.test(candidate) && nameIdx !== conceptCellIdx) {
+        memberName = candidate;
+        break;
+      }
+    }
+
+    // Amount: look for a cell that contains a currency pattern (€ or digits with comma/dot)
+    let amount = '';
+    cells.each((idx, cell) => {
+      if (idx === conceptCellIdx) return;
+      const txt = $(cell).text().trim();
+      if (/[\d,.]+(€|\s*EUR)?/.test(txt) && /\d/.test(txt) && txt.length < 20) {
+        amount = txt;
+      }
+    });
+
+    // Date: look for a cell with a date pattern DD/MM/YYYY or similar
+    let date = '';
+    cells.each((idx, cell) => {
+      if (idx === conceptCellIdx) return;
+      const txt = $(cell).text().trim();
+      if (/\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4}/.test(txt)) {
+        date = txt;
+      }
+    });
+
+    if (!memberName) return;
+    payments.push({ memberName, concept, tarifa, amount, date });
+  });
+
+  // If 0 found, save debug HTML unconditionally so we can inspect the page structure
+  if (payments.length === 0) {
+    try {
+      const ts = Date.now();
+      const htmlPath = require('path').join(__dirname, '../../debug', `${ts}_payments_tpv_debug.html`);
+      require('fs').mkdirSync(require('path').dirname(htmlPath), { recursive: true });
+      require('fs').writeFileSync(htmlPath, html, 'utf8');
+      console.warn(`[AimHarder TPV] 0 pagos con fallo encontrados. HTML guardado en debug/${ts}_payments_tpv_debug.html para inspección.`);
+    } catch (e) {
+      console.warn('[AimHarder TPV] No se pudo guardar HTML de debug:', e.message);
+    }
+  }
+
+  return payments;
+}
+
+async function enrichPaymentsWithPhone(payments, centerId) {
+  if (!payments.length) return payments;
+  const clients = await ActiveClient.find({ center: centerId })
+    .select('name normalizedName phone')
+    .lean();
+
+  return payments.map((p) => {
+    const normalizedTarget = normalizeName(p.memberName);
+    const match = clients.find((c) =>
+      namesLikelyMatch(c.normalizedName || normalizeName(c.name || ''), normalizedTarget)
+    );
+    return { ...p, phone: match?.phone || '' };
+  });
+}
+
+async function getPendingPaymentsWithTPVError(centerId) {
+  const config = await getCenterAimHarderConfig(centerId);
+
+  if (!config.username || !config.password) {
+    throw new Error(
+      `Faltan credenciales de AimHarder para ${config.centerName}. Configura las credenciales en la integración del centro.`
+    );
+  }
+
+  console.log('[AimHarder] ===== Scraping pagos con fallo TPV =====');
+  const browser = await chromium.launch({ headless: true, slowMo: 0 });
+  try {
+    const context = await browser.newContext({
+      userAgent:
+        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+    });
+
+    const sessionCache = getSessionCache(config);
+    if (sessionCache.cookies && sessionCache.expiry && Date.now() < sessionCache.expiry) {
+      await context.addCookies(sessionCache.cookies);
+      console.log('[AimHarder] Sesión restaurada desde caché');
+    }
+
+    const page = await context.newPage();
+    await ensureAuthenticatedSession(page, config);
+
+    setSessionCache(config, {
+      cookies: await context.cookies(),
+      expiry: Date.now() + SESSION_TTL_MS,
+    });
+
+    const paymentsUrl = `${config.baseUrl}/payments`;
+    console.log('[AimHarder] Navegando a pagos pendientes:', paymentsUrl);
+    await page.goto(paymentsUrl, { waitUntil: 'domcontentloaded', timeout: 45000 });
+    await page.waitForTimeout(2000).catch(() => {});
+    await dismissCookies(page);
+    await page.waitForLoadState('networkidle', { timeout: 20000 }).catch(() => {});
+
+    await saveDebugSnapshot(page, 'payments_tpv');
+
+    const payments = await parsePaymentsPageForTPVErrors(page);
+    console.log(`[AimHarder] ${payments.length} pagos con fallo TPV encontrados`);
+
+    const enriched = await enrichPaymentsWithPhone(payments, centerId);
+    return enriched;
+  } finally {
+    await browser.close();
+    console.log('[AimHarder] ===== Fin scraping TPV =====');
+  }
+}
+
 module.exports = {
   getAbsences,
   getStoredAbsences,
@@ -1874,6 +2029,7 @@ module.exports = {
   getClassReportContext,
   saveClassReport,
   setClassReportHandoffStatus,
+  getPendingPaymentsWithTPVError,
   getYesterday,
   toDateString,
 };
