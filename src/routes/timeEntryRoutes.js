@@ -8,12 +8,13 @@ const {
   getActiveCheckIn,
   exportToExcel,
   updateTimeEntry,
+  deleteTimeEntry,
 } = require('../controllers/timeEntryController');
 
 router.use(isAuthenticatedUser);
 
 router.route('/').get(getTimeEntries);
-router.route('/:id').put(updateTimeEntry);
+router.route('/:id').put(updateTimeEntry).delete(deleteTimeEntry);
 router.route('/check-in').post(checkIn);
 router.route('/active').get(getActiveCheckIn);
 router.route('/:id/check-out').post(checkOut);

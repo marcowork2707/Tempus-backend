@@ -520,3 +520,22 @@ exports.updateTimeEntry = catchAsyncErrors(async (req, res, next) => {
 
   res.status(200).json({ success: true, entry: updatedEntry });
 });
+
+exports.deleteTimeEntry = catchAsyncErrors(async (req, res, next) => {
+  const entry = await TimeEntry.findById(req.params.id).populate('center', 'name');
+
+  if (!entry) {
+    return next(new ErrorHandler('Time entry not found', 404));
+  }
+
+  const userRoleInCenter = await getUserRoleForCenter(req.user.id, entry.center._id);
+  const canManageEntry = canReviewCenterEntries(userRoleInCenter) || req.user.role === 'admin';
+
+  if (!canManageEntry) {
+    return next(new ErrorHandler('Unauthorized', 403));
+  }
+
+  await TimeEntry.findByIdAndDelete(req.params.id);
+
+  res.status(200).json({ success: true, message: 'Fichaje eliminado correctamente' });
+});
