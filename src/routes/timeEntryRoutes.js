@@ -9,11 +9,12 @@ const {
   exportToExcel,
   updateTimeEntry,
   deleteTimeEntry,
+  adminCreateTimeEntry,
 } = require('../controllers/timeEntryController');
 
 router.use(isAuthenticatedUser);
 
-router.route('/').get(getTimeEntries);
+router.route('/').get(getTimeEntries).post(adminCreateTimeEntry);
 router.route('/:id').put(updateTimeEntry).delete(deleteTimeEntry);
 router.route('/check-in').post(checkIn);
 router.route('/active').get(getActiveCheckIn);

@@ -539,3 +539,45 @@ exports.deleteTimeEntry = catchAsyncErrors(async (req, res, next) => {
 
   res.status(200).json({ success: true, message: 'Fichaje eliminado correctamente' });
 });
+
+// Admin creates a time entry on behalf of a user
+exports.adminCreateTimeEntry = catchAsyncErrors(async (req, res, next) => {
+  if (req.user.role !== 'admin') {
+    return next(new ErrorHandler('Unauthorized', 403));
+  }
+
+  const { centerId, userId, date, entryTime, exitTime, notes } = req.body;
+
+  if (!centerId || !userId || !date || !entryTime) {
+    return next(new ErrorHandler('centerId, userId, date and entryTime are required', 400));
+  }
+
+  const entryDate = startOfDay(date);
+  const entryTimestamp = new Date(`${formatLocalDate(entryDate)}T${entryTime}:00`);
+  const exitTimestamp = exitTime ? new Date(`${formatLocalDate(entryDate)}T${exitTime}:00`) : null;
+
+  if (exitTimestamp && exitTimestamp < entryTimestamp) {
+    return next(new ErrorHandler('exitTime cannot be earlier than entryTime', 400));
+  }
+
+  const duration = exitTimestamp
+    ? Math.round((exitTimestamp - entryTimestamp) / (1000 * 60))
+    : null;
+
+  const entry = await TimeEntry.create({
+    user: userId,
+    center: centerId,
+    date: entryDate,
+    entryTime: entryTimestamp,
+    exitTime: exitTimestamp,
+    status: exitTimestamp ? 'completed' : 'active',
+    duration,
+    notes: notes || undefined,
+  });
+
+  const populated = await TimeEntry.findById(entry._id)
+    .populate('user', 'name email')
+    .populate('center', 'name type');
+
+  res.status(201).json({ success: true, entry: populated });
+});
