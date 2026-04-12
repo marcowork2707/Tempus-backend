@@ -34,6 +34,13 @@ const shiftOverrideSchema = new mongoose.Schema(
       type: String,
       match: [/^\d{2}:\d{2}$/, 'endTime must be HH:MM'],
     },
+    segments: [
+      {
+        startTime: { type: String, match: [/^\d{2}:\d{2}$/, 'startTime must be HH:MM'] },
+        endTime:   { type: String, match: [/^\d{2}:\d{2}$/, 'endTime must be HH:MM'] },
+        _id: false,
+      },
+    ],
     isOff: {
       type: Boolean,
       default: false,

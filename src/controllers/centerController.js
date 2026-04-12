@@ -776,7 +776,13 @@ function applyOverrides(baseOccurrences, overrides) {
       shiftName: override.label || (override.isOff ? 'No laborable' : 'Turno'),
       startTime: override.isOff ? '' : override.startTime || '',
       endTime: override.isOff ? '' : override.endTime || '',
-      timeSegments: override.isOff ? [] : override.startTime && override.endTime ? [{ startTime: override.startTime, endTime: override.endTime }] : [],
+      timeSegments: override.isOff
+        ? []
+        : override.segments?.length
+          ? override.segments
+          : override.startTime && override.endTime
+            ? [{ startTime: override.startTime, endTime: override.endTime }]
+            : [],
       recurrence: 'override',
       cycleLengthWeeks: 1,
       cycleWeeks: [1],
@@ -918,13 +924,19 @@ exports.deleteShiftPattern = catchAsyncErrors(async (req, res, next) => {
 });
 
 exports.upsertShiftOverride = catchAsyncErrors(async (req, res, next) => {
-  const { userId, date, endDate, label, startTime, endTime, isOff, notes, reasonType } = req.body;
+  const { userId, date, endDate, label, startTime, endTime, segments, isOff, notes, reasonType } = req.body;
 
   if (!userId || !date) {
     return next(new ErrorHandler('userId and date are required', 400));
   }
 
-  if (!isOff && (!label || !startTime || !endTime)) {
+  const effectiveSegments = Array.isArray(segments)
+    ? segments.filter((s) => s.startTime && s.endTime)
+    : [];
+  const effectiveStartTime = effectiveSegments.length > 0 ? effectiveSegments[0].startTime : startTime;
+  const effectiveEndTime = effectiveSegments.length > 0 ? effectiveSegments[effectiveSegments.length - 1].endTime : endTime;
+
+  if (!isOff && (!label || (!effectiveStartTime || !effectiveEndTime))) {
     return next(new ErrorHandler('label, startTime and endTime are required unless the day is marked off', 400));
   }
 
@@ -952,8 +964,9 @@ exports.upsertShiftOverride = catchAsyncErrors(async (req, res, next) => {
         user: userId,
         date: dateOnly,
         label: label || (normalizedReasonType === 'vacation' ? 'Vacaciones' : normalizedReasonType === 'holiday' ? 'Festivo' : undefined),
-        startTime: isOff ? undefined : startTime,
-        endTime: isOff ? undefined : endTime,
+        startTime: isOff ? undefined : effectiveStartTime,
+        endTime: isOff ? undefined : effectiveEndTime,
+        segments: isOff ? [] : effectiveSegments,
         isOff: !!isOff,
         reasonType: normalizedReasonType,
         notes: notes || undefined,
