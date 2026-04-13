@@ -1863,104 +1863,17 @@ async function seedAimHarderIntegrationsFromEnv() {
 // Pagos con fallo TPV Redsys
 // ─────────────────────────────────────────────────────
 
-const KNOWN_TARIFFS = ['TEMPUS +65', 'CONGELACION', 'STARTER', 'IRON', 'SILVER', 'GOLD'];
+const KNOWN_TARIFFS = ['TEMPUS +65', 'CONGELACION', 'CONGELACIÓN', 'TARIFA CONGELACION', 'TARIFA CONGELACIÓN', 'STARTER', 'IRON', 'SILVER', 'GOLD', 'ON RAMP'];
 
 function extractTarifa(concept) {
-  const upper = concept.toUpperCase();
-  for (const t of KNOWN_TARIFFS) {
-    if (upper.includes(t)) return t;
+  const upper = concept.toUpperCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+  const NORMALIZED_TARIFFS = KNOWN_TARIFFS.map(t => t.toUpperCase().normalize('NFD').replace(/[\u0300-\u036f]/g, ''));
+  for (let i = 0; i < NORMALIZED_TARIFFS.length; i++) {
+    if (upper.includes(NORMALIZED_TARIFFS[i])) return KNOWN_TARIFFS[i];
   }
   // Fallback: first sequence of uppercase letters before " -" or digit
   const m = concept.match(/^([A-ZÁÉÍÓÚÑ][A-ZÁÉÍÓÚÑ\s+65]*?)(?:\s+-|\s+\d|\s+\()/);
   return m ? m[1].trim() : concept.split(/[\s-]/)[0];
-}
-
-async function parsePaymentsPageForTPVErrors(page) {
-  const cheerio = require('cheerio');
-  const html = await page.content();
-  const $ = cheerio.load(html);
-  const payments = [];
-
-  $('table tr').each((_, row) => {
-    const cells = $(row).find('td');
-    if (cells.length < 3) return;
-
-    // Find the cell that contains the TPV/Redsys keyword (any column)
-    let conceptCellIdx = -1;
-    cells.each((idx, cell) => {
-      if (/falla\s*tpv|redsys/i.test($(cell).text())) {
-        conceptCellIdx = idx;
-      }
-    });
-    if (conceptCellIdx === -1) return;
-
-    const concept = $(cells.eq(conceptCellIdx)).text().trim();
-    const tarifa = extractTarifa(concept);
-
-    // Name: prefer cell at index 1, but also try 0 and 2 as fallback
-    let memberName = '';
-    for (const nameIdx of [1, 2, 0]) {
-      const candidate = $(cells.eq(nameIdx)).text().replace(/\s+/g, ' ').trim();
-      // Skip very short strings, numbers-only, or the concept cell itself
-      if (candidate.length > 3 && !/^\d/.test(candidate) && nameIdx !== conceptCellIdx) {
-        memberName = candidate;
-        break;
-      }
-    }
-
-    // Amount: look for a cell that contains a currency pattern (€ or digits with comma/dot)
-    let amount = '';
-    cells.each((idx, cell) => {
-      if (idx === conceptCellIdx) return;
-      const txt = $(cell).text().trim();
-      if (/[\d,.]+(€|\s*EUR)?/.test(txt) && /\d/.test(txt) && txt.length < 20) {
-        amount = txt;
-      }
-    });
-
-    // Date: look for a cell with a date pattern DD/MM/YYYY or similar
-    let date = '';
-    cells.each((idx, cell) => {
-      if (idx === conceptCellIdx) return;
-      const txt = $(cell).text().trim();
-      if (/\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4}/.test(txt)) {
-        date = txt;
-      }
-    });
-
-    if (!memberName) return;
-    payments.push({ memberName, concept, tarifa, amount, date });
-  });
-
-  // If 0 found, save debug HTML unconditionally so we can inspect the page structure
-  if (payments.length === 0) {
-    try {
-      const ts = Date.now();
-      const htmlPath = require('path').join(__dirname, '../../debug', `${ts}_payments_tpv_debug.html`);
-      require('fs').mkdirSync(require('path').dirname(htmlPath), { recursive: true });
-      require('fs').writeFileSync(htmlPath, html, 'utf8');
-      console.warn(`[AimHarder TPV] 0 pagos con fallo encontrados. HTML guardado en debug/${ts}_payments_tpv_debug.html para inspección.`);
-    } catch (e) {
-      console.warn('[AimHarder TPV] No se pudo guardar HTML de debug:', e.message);
-    }
-  }
-
-  return payments;
-}
-
-async function enrichPaymentsWithPhone(payments, centerId) {
-  if (!payments.length) return payments;
-  const clients = await ActiveClient.find({ center: centerId })
-    .select('name normalizedName phone')
-    .lean();
-
-  return payments.map((p) => {
-    const normalizedTarget = normalizeName(p.memberName);
-    const match = clients.find((c) =>
-      namesLikelyMatch(c.normalizedName || normalizeName(c.name || ''), normalizedTarget)
-    );
-    return { ...p, phone: match?.phone || '' };
-  });
 }
 
 async function getPendingPaymentsWithTPVError(centerId) {
@@ -1994,20 +1907,46 @@ async function getPendingPaymentsWithTPVError(centerId) {
       expiry: Date.now() + SESSION_TTL_MS,
     });
 
+    // The pending payments are loaded via AJAX to /api/pendingPayments on page load.
+    // Set up the response interceptor BEFORE navigating so we don't miss it.
     const paymentsUrl = `${config.baseUrl}/payments`;
+    const pendingApiUrl = `${config.baseUrl}/api/pendingPayments`;
     console.log('[AimHarder] Navegando a pagos pendientes:', paymentsUrl);
+
+    const pendingResponsePromise = page.waitForResponse(
+      (resp) => resp.url().startsWith(pendingApiUrl),
+      { timeout: 45000 }
+    );
+
     await page.goto(paymentsUrl, { waitUntil: 'domcontentloaded', timeout: 45000 });
-    await page.waitForTimeout(2000).catch(() => {});
     await dismissCookies(page);
-    await page.waitForLoadState('networkidle', { timeout: 20000 }).catch(() => {});
 
-    await saveDebugSnapshot(page, 'payments_tpv');
+    let pending = [];
+    try {
+      const pendingResponse = await pendingResponsePromise;
+      const raw = await pendingResponse.text();
+      // The server returns {"pending": [...]} — jQuery's $.parseJSON unwraps it client-side
+      const data = JSON.parse(raw);
+      pending = data.pending || [];
+      console.log(`[AimHarder] /api/pendingPayments devolvió ${pending.length} pagos pendientes`);
+    } catch (e) {
+      console.warn('[AimHarder TPV] No se pudo capturar /api/pendingPayments:', e.message);
+    }
 
-    const payments = await parsePaymentsPageForTPVErrors(page);
-    console.log(`[AimHarder] ${payments.length} pagos con fallo TPV encontrados`);
+    // Keep only payments that have a TPV RedsYs error code (tpverrcode != null)
+    const tpvFailures = pending.filter((p) => p.tpverrcode != null);
+    console.log(`[AimHarder] ${tpvFailures.length} pagos con fallo TPV encontrados`);
 
-    const enriched = await enrichPaymentsWithPhone(payments, centerId);
-    return enriched;
+    const payments = tpvFailures.map((p) => ({
+      memberName: (p.name || '').replace(/\s+/g, ' ').trim(),
+      concept: p.concept || '',
+      tarifa: extractTarifa(p.concept || ''),
+      amount: p.amount || '',
+      date: p.since || '',
+      phone: p.movil || '',
+    }));
+
+    return payments;
   } finally {
     await browser.close();
     console.log('[AimHarder] ===== Fin scraping TPV =====');
