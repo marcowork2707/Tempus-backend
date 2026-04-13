@@ -33,10 +33,52 @@ const PLAYWRIGHT_DEBUG = false;
 // ── Asegurarse de que el directorio de debug existe ──
 if (PLAYWRIGHT_DEBUG && !fs.existsSync(DEBUG_DIR)) fs.mkdirSync(DEBUG_DIR, { recursive: true });
 
+// ── Directorio para persistir sesiones entre reinicios del servidor ──
+const SESSIONS_DIR = path.join(__dirname, '../../.sessions');
+if (!fs.existsSync(SESSIONS_DIR)) fs.mkdirSync(SESSIONS_DIR, { recursive: true });
+
 // Cache de sesión por centro (cookies de AimHarder, no de Tempus)
 const sessionCacheByCenter = new Map();
-const SESSION_TTL_MS = 25 * 60 * 1000; // 25 min
+const SESSION_TTL_MS = 4 * 60 * 60 * 1000; // 4 horas (antes: 25 min)
 const apiTokenCacheByCenter = new Map();
+
+function sessionFilePath(cacheKey) {
+  // Usar solo caracteres seguros para el nombre de archivo
+  const safeKey = String(cacheKey).replace(/[^a-zA-Z0-9_-]/g, '_');
+  return path.join(SESSIONS_DIR, `${safeKey}.json`);
+}
+
+function loadSessionFromDisk(cacheKey) {
+  try {
+    const filePath = sessionFilePath(cacheKey);
+    if (!fs.existsSync(filePath)) return null;
+    const raw = fs.readFileSync(filePath, 'utf8');
+    const parsed = JSON.parse(raw);
+    if (!parsed || !parsed.cookies || !parsed.expiry) return null;
+    if (Date.now() >= parsed.expiry) {
+      fs.unlinkSync(filePath); // expirada → borrar
+      return null;
+    }
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function saveSessionToDisk(cacheKey, value) {
+  try {
+    fs.writeFileSync(sessionFilePath(cacheKey), JSON.stringify(value), 'utf8');
+  } catch (e) {
+    console.warn('[AimHarder] No se pudo guardar sesión en disco:', e.message);
+  }
+}
+
+function deleteSessionFromDisk(cacheKey) {
+  try {
+    const filePath = sessionFilePath(cacheKey);
+    if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+  } catch { /* ignorar */ }
+}
 
 // ─────────────────────────────────────────────────────
 // Helpers de fecha
@@ -187,11 +229,23 @@ async function getCenterAimHarderConfig(centerId) {
 }
 
 function getSessionCache(config) {
-  return sessionCacheByCenter.get(config.cacheKey) || { cookies: null, expiry: null };
+  // 1. Intentar desde memoria (más rápido)
+  const memCache = sessionCacheByCenter.get(config.cacheKey);
+  if (memCache && memCache.cookies && memCache.expiry && Date.now() < memCache.expiry) {
+    return memCache;
+  }
+  // 2. Intentar desde disco (sobrevive reinicios del servidor)
+  const diskCache = loadSessionFromDisk(config.cacheKey);
+  if (diskCache) {
+    sessionCacheByCenter.set(config.cacheKey, diskCache); // hot-load en memoria
+    return diskCache;
+  }
+  return { cookies: null, expiry: null };
 }
 
 function setSessionCache(config, value) {
   sessionCacheByCenter.set(config.cacheKey, value);
+  saveSessionToDisk(config.cacheKey, value);
 }
 
 function getApiTokenCache(config) {
@@ -490,6 +544,9 @@ async function login(page, config) {
   console.log('[AimHarder] URL post-login:', page.url());
 
   if (!isAuthenticatedAimHarderUrl(page.url())) {
+    // Eliminar sesión en disco para no reutilizar cookies corruptas en el siguiente intento
+    deleteSessionFromDisk(config.cacheKey);
+    sessionCacheByCenter.delete(config.cacheKey);
     throw new Error(`Login de AimHarder incompleto. URL final: ${page.url()}`);
   }
 }
