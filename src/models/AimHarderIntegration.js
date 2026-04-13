@@ -49,6 +49,17 @@ const aimHarderIntegrationSchema = new mongoose.Schema(
       default: null,
       select: false,
     },
+    // Cookies de sesión Playwright persistidas para evitar logins innecesarios
+    sessionCookies: {
+      type: mongoose.Schema.Types.Mixed,
+      default: null,
+      select: false,
+    },
+    sessionExpiresAt: {
+      type: Date,
+      default: null,
+      select: false,
+    },
   },
   { timestamps: true }
 );

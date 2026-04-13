@@ -33,50 +33,47 @@ const PLAYWRIGHT_DEBUG = false;
 // ── Asegurarse de que el directorio de debug existe ──
 if (PLAYWRIGHT_DEBUG && !fs.existsSync(DEBUG_DIR)) fs.mkdirSync(DEBUG_DIR, { recursive: true });
 
-// ── Directorio para persistir sesiones entre reinicios del servidor ──
-const SESSIONS_DIR = path.join(__dirname, '../../.sessions');
-if (!fs.existsSync(SESSIONS_DIR)) fs.mkdirSync(SESSIONS_DIR, { recursive: true });
-
 // Cache de sesión por centro (cookies de AimHarder, no de Tempus)
+// La fuente de verdad es MongoDB Atlas (persistente en Railway).
+// La memoria actúa como cache L1 para evitar round-trips a DB en cada petición.
 const sessionCacheByCenter = new Map();
-const SESSION_TTL_MS = 4 * 60 * 60 * 1000; // 4 horas (antes: 25 min)
+const SESSION_TTL_MS = 4 * 60 * 60 * 1000; // 4 horas
 const apiTokenCacheByCenter = new Map();
 
-function sessionFilePath(cacheKey) {
-  // Usar solo caracteres seguros para el nombre de archivo
-  const safeKey = String(cacheKey).replace(/[^a-zA-Z0-9_-]/g, '_');
-  return path.join(SESSIONS_DIR, `${safeKey}.json`);
-}
-
-function loadSessionFromDisk(cacheKey) {
+async function loadSessionFromDB(config) {
+  if (!config.integrationId) return null;
   try {
-    const filePath = sessionFilePath(cacheKey);
-    if (!fs.existsSync(filePath)) return null;
-    const raw = fs.readFileSync(filePath, 'utf8');
-    const parsed = JSON.parse(raw);
-    if (!parsed || !parsed.cookies || !parsed.expiry) return null;
-    if (Date.now() >= parsed.expiry) {
-      fs.unlinkSync(filePath); // expirada → borrar
-      return null;
-    }
-    return parsed;
+    const integration = await AimHarderIntegration.findById(config.integrationId)
+      .select('+sessionCookies +sessionExpiresAt')
+      .lean();
+    if (!integration || !integration.sessionCookies || !integration.sessionExpiresAt) return null;
+    if (Date.now() >= new Date(integration.sessionExpiresAt).getTime()) return null;
+    return { cookies: integration.sessionCookies, expiry: new Date(integration.sessionExpiresAt).getTime() };
   } catch {
     return null;
   }
 }
 
-function saveSessionToDisk(cacheKey, value) {
+async function saveSessionToDB(config, value) {
+  if (!config.integrationId) return;
   try {
-    fs.writeFileSync(sessionFilePath(cacheKey), JSON.stringify(value), 'utf8');
+    await AimHarderIntegration.findByIdAndUpdate(config.integrationId, {
+      $set: {
+        sessionCookies: value.cookies,
+        sessionExpiresAt: new Date(value.expiry),
+      },
+    });
   } catch (e) {
-    console.warn('[AimHarder] No se pudo guardar sesión en disco:', e.message);
+    console.warn('[AimHarder] No se pudo guardar sesión en MongoDB:', e.message);
   }
 }
 
-function deleteSessionFromDisk(cacheKey) {
+async function deleteSessionFromDB(config) {
+  if (!config.integrationId) return;
   try {
-    const filePath = sessionFilePath(cacheKey);
-    if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+    await AimHarderIntegration.findByIdAndUpdate(config.integrationId, {
+      $set: { sessionCookies: null, sessionExpiresAt: null },
+    });
   } catch { /* ignorar */ }
 }
 
@@ -228,24 +225,24 @@ async function getCenterAimHarderConfig(centerId) {
   return config;
 }
 
-function getSessionCache(config) {
-  // 1. Intentar desde memoria (más rápido)
+async function getSessionCache(config) {
+  // 1. Cache en memoria (L1 — evita round-trip a DB)
   const memCache = sessionCacheByCenter.get(config.cacheKey);
   if (memCache && memCache.cookies && memCache.expiry && Date.now() < memCache.expiry) {
     return memCache;
   }
-  // 2. Intentar desde disco (sobrevive reinicios del servidor)
-  const diskCache = loadSessionFromDisk(config.cacheKey);
-  if (diskCache) {
-    sessionCacheByCenter.set(config.cacheKey, diskCache); // hot-load en memoria
-    return diskCache;
+  // 2. MongoDB Atlas (L2 — persiste entre reinicios/deploys de Railway)
+  const dbCache = await loadSessionFromDB(config);
+  if (dbCache) {
+    sessionCacheByCenter.set(config.cacheKey, dbCache);
+    return dbCache;
   }
   return { cookies: null, expiry: null };
 }
 
-function setSessionCache(config, value) {
+async function setSessionCache(config, value) {
   sessionCacheByCenter.set(config.cacheKey, value);
-  saveSessionToDisk(config.cacheKey, value);
+  await saveSessionToDB(config, value);
 }
 
 function getApiTokenCache(config) {
@@ -544,9 +541,9 @@ async function login(page, config) {
   console.log('[AimHarder] URL post-login:', page.url());
 
   if (!isAuthenticatedAimHarderUrl(page.url())) {
-    // Eliminar sesión en disco para no reutilizar cookies corruptas en el siguiente intento
-    deleteSessionFromDisk(config.cacheKey);
+    // Eliminar sesión para no reutilizar cookies corruptas en el siguiente intento
     sessionCacheByCenter.delete(config.cacheKey);
+    await deleteSessionFromDB(config);
     throw new Error(`Login de AimHarder incompleto. URL final: ${page.url()}`);
   }
 }
@@ -1222,7 +1219,7 @@ async function getClassReportContext(dateStr = null, centerId, userName = '', is
         'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
     });
 
-    const sessionCache = getSessionCache(config);
+    const sessionCache = await getSessionCache(config);
     if (sessionCache.cookies && sessionCache.expiry && Date.now() < sessionCache.expiry) {
       await context.addCookies(sessionCache.cookies);
     }
@@ -1230,7 +1227,7 @@ async function getClassReportContext(dateStr = null, centerId, userName = '', is
     const page = await context.newPage();
     await ensureAuthenticatedSession(page, config);
 
-    setSessionCache(config, {
+    await setSessionCache(config, {
       cookies: await context.cookies(),
       expiry: Date.now() + SESSION_TTL_MS,
     });
@@ -1626,7 +1623,7 @@ async function getAbsences(dateStr = null, centerId) {
     });
 
     // Restaurar sesión si está en caché
-    const sessionCache = getSessionCache(config);
+    const sessionCache = await getSessionCache(config);
     if (sessionCache.cookies && sessionCache.expiry && Date.now() < sessionCache.expiry) {
       await context.addCookies(sessionCache.cookies);
       console.log('[AimHarder] Sesión restaurada desde caché');
@@ -1657,7 +1654,7 @@ async function getAbsences(dateStr = null, centerId) {
     }
 
     // Guardar cookies actualizadas
-    setSessionCache(config, {
+    await setSessionCache(config, {
       cookies: await context.cookies(),
       expiry: Date.now() + SESSION_TTL_MS,
     });
@@ -1731,7 +1728,7 @@ async function getOccupancy(dateStr = null, centerId) {
         'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
     });
 
-    const sessionCache = getSessionCache(config);
+    const sessionCache = await getSessionCache(config);
     if (sessionCache.cookies && sessionCache.expiry && Date.now() < sessionCache.expiry) {
       await context.addCookies(sessionCache.cookies);
       console.log('[AimHarder] Sesión restaurada desde caché');
@@ -1740,7 +1737,7 @@ async function getOccupancy(dateStr = null, centerId) {
     const page = await context.newPage();
     await ensureAuthenticatedSession(page, config);
 
-    setSessionCache(config, {
+    await setSessionCache(config, {
       cookies: await context.cookies(),
       expiry: Date.now() + SESSION_TTL_MS,
     });
@@ -1950,7 +1947,7 @@ async function getPendingPaymentsWithTPVError(centerId) {
         'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
     });
 
-    const sessionCache = getSessionCache(config);
+    const sessionCache = await getSessionCache(config);
     if (sessionCache.cookies && sessionCache.expiry && Date.now() < sessionCache.expiry) {
       await context.addCookies(sessionCache.cookies);
       console.log('[AimHarder] Sesión restaurada desde caché');
@@ -1959,7 +1956,7 @@ async function getPendingPaymentsWithTPVError(centerId) {
     const page = await context.newPage();
     await ensureAuthenticatedSession(page, config);
 
-    setSessionCache(config, {
+    await setSessionCache(config, {
       cookies: await context.cookies(),
       expiry: Date.now() + SESSION_TTL_MS,
     });

@@ -7,6 +7,5 @@ build/
 .DS_Store
 *.log
 debug/
-.sessions/
 .idea/
 .vscode/
