@@ -5,6 +5,8 @@ const {
   upsertStockConfig,
   submitStockReport,
   getStockReports,
+  getActiveStockAlerts,
+  dismissStockAlert,
 } = require('../controllers/stockController');
 const { isAuthenticatedUser, authorizeRoles } = require('../middleware/auth');
 
@@ -19,5 +21,14 @@ router
   .route('/:centerId/reports')
   .get(isAuthenticatedUser, authorizeRoles('admin', 'encargado', 'coach'), getStockReports)
   .post(isAuthenticatedUser, authorizeRoles('admin', 'encargado', 'coach'), submitStockReport);
+
+// Active alerts routes (shared management)
+router
+  .route('/:centerId/alerts')
+  .get(isAuthenticatedUser, authorizeRoles('admin', 'encargado'), getActiveStockAlerts);
+
+router
+  .route('/:centerId/alerts/:alertId')
+  .delete(isAuthenticatedUser, authorizeRoles('admin', 'encargado'), dismissStockAlert);
 
 module.exports = router;

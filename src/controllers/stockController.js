@@ -1,5 +1,6 @@
 const StockConfig = require('../models/StockConfig');
 const StockReport = require('../models/StockReport');
+const StockAlert = require('../models/StockAlert');
 const ErrorHandler = require('../utils/errorHandler');
 const catchAsyncErrors = require('../utils/catchAsyncErrors');
 
@@ -8,6 +9,72 @@ const AMB_ORDER = ['A', 'M', 'B'];
 
 function isAmbAtOrBelow(value, threshold) {
   return AMB_ORDER.indexOf(value) >= AMB_ORDER.indexOf(threshold);
+}
+
+function normalizeConcept(concept) {
+  return String(concept || '').trim().toLowerCase();
+}
+
+async function seedActiveAlertsFromReports(centerId) {
+  const existingAlert = await StockAlert.exists({ center: centerId });
+  if (existingAlert) return;
+
+  const reports = await StockReport.find({ center: centerId })
+    .sort({ date: -1 })
+    .select('date submittedBy entries alertsTriggered')
+    .limit(180)
+    .lean();
+
+  if (!reports.length) return;
+
+  const seenConcepts = new Set();
+  const alertsToCreate = [];
+
+  for (const report of reports) {
+    const alertsByConcept = new Map(
+      (report.alertsTriggered || []).map((alert) => [normalizeConcept(alert.concept), alert])
+    );
+
+    for (const entry of report.entries || []) {
+      const conceptKey = normalizeConcept(entry.concept);
+      if (!conceptKey || seenConcepts.has(conceptKey)) continue;
+
+      seenConcepts.add(conceptKey);
+      const alert = alertsByConcept.get(conceptKey);
+
+      if (alert) {
+        alertsToCreate.push({
+          center: centerId,
+          concept: entry.concept,
+          controlType: alert.controlType,
+          value: alert.value,
+          threshold: alert.threshold,
+          status: 'active',
+          lastReportDate: report.date,
+          lastReportedBy: report.submittedBy,
+        });
+      }
+    }
+  }
+
+  if (alertsToCreate.length) {
+    await StockAlert.insertMany(alertsToCreate, { ordered: false });
+  }
+}
+
+function isStockImproved(controlType, previousValue, currentValue) {
+  if (previousValue === undefined || previousValue === null) return false;
+
+  if (controlType === 'AMB') {
+    if (!AMB_ORDER.includes(previousValue) || !AMB_ORDER.includes(currentValue)) return false;
+    const score = { A: 3, M: 2, B: 1 };
+    return score[currentValue] > score[previousValue];
+  }
+
+  const prevNum = parseFloat(previousValue);
+  const currNum = parseFloat(currentValue);
+  if (isNaN(prevNum) || isNaN(currNum)) return false;
+  return currNum > prevNum;
 }
 
 function computeAlerts(items, entries) {
@@ -114,6 +181,20 @@ exports.submitStockReport = catchAsyncErrors(async (req, res, next) => {
   const config = await StockConfig.findOne({ center: centerId });
   const configItems = config ? config.items : [];
 
+  const previousReport = await StockReport.findOne({
+    center: centerId,
+    date: { $lt: date },
+  })
+    .sort({ date: -1 })
+    .lean();
+
+  const previousValueByConcept = new Map();
+  if (previousReport?.entries?.length) {
+    for (const previousEntry of previousReport.entries) {
+      previousValueByConcept.set(normalizeConcept(previousEntry.concept), previousEntry.value);
+    }
+  }
+
   const normalizedEntries = entries.map((entry) => ({
     concept: entry.concept,
     controlType: entry.controlType,
@@ -122,6 +203,7 @@ exports.submitStockReport = catchAsyncErrors(async (req, res, next) => {
   }));
 
   const alertsTriggered = computeAlerts(configItems, normalizedEntries);
+  const alertByConcept = new Map(alertsTriggered.map((alert) => [normalizeConcept(alert.concept), alert]));
 
   // Upsert: one report per center per day
   const report = await StockReport.findOneAndUpdate(
@@ -135,6 +217,103 @@ exports.submitStockReport = catchAsyncErrors(async (req, res, next) => {
     },
     { upsert: true, new: true, runValidators: true }
   );
+
+  // Keep one active alert per concept and replace old values with the latest report.
+  const now = new Date();
+  const activeAlerts = await StockAlert.find({ center: centerId, status: 'active' }).sort({ updatedAt: -1 });
+  const activeAlertsByConcept = new Map();
+
+  for (const activeAlert of activeAlerts) {
+    const key = normalizeConcept(activeAlert.concept);
+    if (!activeAlertsByConcept.has(key)) {
+      activeAlertsByConcept.set(key, [activeAlert]);
+    } else {
+      activeAlertsByConcept.get(key).push(activeAlert);
+    }
+  }
+
+  for (const entry of normalizedEntries) {
+    const conceptKey = normalizeConcept(entry.concept);
+    const conceptAlerts = activeAlertsByConcept.get(conceptKey) || [];
+    const keepAlert = conceptAlerts[0] || null;
+    const duplicatedAlerts = conceptAlerts.slice(1);
+    const matchingTriggeredAlert = alertByConcept.get(conceptKey) || null;
+    const previousValue = previousValueByConcept.get(conceptKey);
+    const improved = isStockImproved(entry.controlType, previousValue, entry.value);
+
+    if (!matchingTriggeredAlert) {
+      if (keepAlert) {
+        await StockAlert.updateOne(
+          { _id: keepAlert._id },
+          {
+            $set: {
+              status: 'resolved',
+              resolutionReason: improved ? 'restocked' : 'back_to_safe_level',
+              resolvedAt: now,
+            },
+          }
+        );
+      }
+
+      if (duplicatedAlerts.length) {
+        await StockAlert.updateMany(
+          { _id: { $in: duplicatedAlerts.map((alert) => alert._id) } },
+          {
+            $set: {
+              status: 'resolved',
+              resolutionReason: 'replaced',
+              resolvedAt: now,
+            },
+          }
+        );
+      }
+      continue;
+    }
+
+    if (keepAlert) {
+      await StockAlert.updateOne(
+        { _id: keepAlert._id },
+        {
+          $set: {
+            controlType: matchingTriggeredAlert.controlType,
+            value: matchingTriggeredAlert.value,
+            threshold: matchingTriggeredAlert.threshold,
+            status: 'active',
+            lastReportDate: date,
+            lastReportedBy: req.user.id,
+            resolutionReason: null,
+            resolvedAt: null,
+            dismissedAt: null,
+            dismissedBy: null,
+          },
+        }
+      );
+    } else {
+      await StockAlert.create({
+        center: centerId,
+        concept: entry.concept,
+        controlType: matchingTriggeredAlert.controlType,
+        value: matchingTriggeredAlert.value,
+        threshold: matchingTriggeredAlert.threshold,
+        status: 'active',
+        lastReportDate: date,
+        lastReportedBy: req.user.id,
+      });
+    }
+
+    if (duplicatedAlerts.length) {
+      await StockAlert.updateMany(
+        { _id: { $in: duplicatedAlerts.map((alert) => alert._id) } },
+        {
+          $set: {
+            status: 'resolved',
+            resolutionReason: 'replaced',
+            resolvedAt: now,
+          },
+        }
+      );
+    }
+  }
 
   const populated = await report.populate('submittedBy', 'name nickname');
 
@@ -161,4 +340,34 @@ exports.getStockReports = catchAsyncErrors(async (req, res, next) => {
     .limit(60);
 
   res.status(200).json({ success: true, reports });
+});
+
+// GET /api/stock/:centerId/alerts
+exports.getActiveStockAlerts = catchAsyncErrors(async (req, res, next) => {
+  const { centerId } = req.params;
+
+  await seedActiveAlertsFromReports(centerId);
+
+  const alerts = await StockAlert.find({ center: centerId, status: 'active' })
+    .populate('lastReportedBy', 'name nickname')
+    .sort({ updatedAt: -1 });
+
+  res.status(200).json({ success: true, alerts });
+});
+
+// DELETE /api/stock/:centerId/alerts/:alertId
+exports.dismissStockAlert = catchAsyncErrors(async (req, res, next) => {
+  const { centerId, alertId } = req.params;
+
+  const alert = await StockAlert.findOne({ _id: alertId, center: centerId, status: 'active' });
+  if (!alert) {
+    return next(new ErrorHandler('Alerta no encontrada o ya gestionada', 404));
+  }
+
+  alert.status = 'dismissed';
+  alert.dismissedAt = new Date();
+  alert.dismissedBy = req.user.id;
+  await alert.save();
+
+  res.status(200).json({ success: true });
 });
