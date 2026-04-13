@@ -435,9 +435,15 @@ exports.getVacationRequests = catchAsyncErrors(async (req, res, next) => {
   }
 
   const filter = { center: req.params.id };
-  if (req.query.status) filter.status = req.query.status;
-  if (canManage && req.query.userId) filter.user = req.query.userId;
-  if (req.query.mine === 'true') filter.user = req.user.id;
+  if (canManage) {
+    if (req.query.status) filter.status = req.query.status;
+    if (req.query.userId) filter.user = req.query.userId;
+  } else {
+    filter.$or = [
+      { user: req.user.id },
+      { user: { $ne: req.user.id }, status: 'approved' },
+    ];
+  }
 
   const requests = await VacationRequest.find(filter)
     .populate('user', 'name email')
