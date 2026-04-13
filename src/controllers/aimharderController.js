@@ -12,6 +12,7 @@ const {
   saveClassReport,
   setClassReportHandoffStatus,
   getPendingPaymentsWithTPVError,
+  getPendingPaymentsWithoutTPVError,
 } = require('../services/aimharderService');
 const UserCenterRole = require('../models/UserCenterRole');
 const User = require('../models/User');
@@ -359,6 +360,32 @@ exports.getTpvRedsysPayments = async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Error al obtener los pagos con fallo TPV de AimHarder.',
+      detail: process.env.NODE_ENV === 'development' ? err.message : undefined,
+    });
+  }
+};
+
+/**
+ * GET /api/aimharder/pending-payments-no-tpv?centerId=xxx
+ * Devuelve los pagos pendientes de AimHarder sin fallo TPV.
+ */
+exports.getPendingPaymentsNoTpv = async (req, res) => {
+  try {
+    const { centerId } = req.query;
+    if (!centerId) {
+      return res.status(400).json({ success: false, message: 'centerId es obligatorio' });
+    }
+
+    const payments = await getPendingPaymentsWithoutTPVError(centerId);
+    res.json({ success: true, count: payments.length, payments });
+  } catch (err) {
+    console.error('[AimHarder Controller] Error pagos pendientes sin TPV:', err.message);
+    if (err.message.includes('credenciales')) {
+      return res.status(503).json({ success: false, message: err.message });
+    }
+    res.status(500).json({
+      success: false,
+      message: 'Error al obtener los pagos pendientes sin fallo TPV de AimHarder.',
       detail: process.env.NODE_ENV === 'development' ? err.message : undefined,
     });
   }

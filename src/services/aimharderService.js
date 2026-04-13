@@ -1940,6 +1940,29 @@ async function getPendingPaymentsWithTPVError(centerId) {
   }
 
   console.log('[AimHarder] ===== Scraping pagos con fallo TPV =====');
+  try {
+    const pending = await getPendingPaymentsRaw(config);
+
+    // Keep only payments that have a TPV RedsYs error code (tpverrcode != null)
+    const tpvFailures = pending.filter((p) => p.tpverrcode != null);
+    console.log(`[AimHarder] ${tpvFailures.length} pagos con fallo TPV encontrados`);
+
+    const payments = tpvFailures.map((p) => ({
+      memberName: (p.name || '').replace(/\s+/g, ' ').trim(),
+      concept: p.concept || '',
+      tarifa: extractTarifa(p.concept || ''),
+      amount: p.amount || '',
+      date: p.since || '',
+      phone: p.movil || '',
+    }));
+
+    return payments;
+  } finally {
+    console.log('[AimHarder] ===== Fin scraping TPV =====');
+  }
+}
+
+async function getPendingPaymentsRaw(config) {
   const browser = await chromium.launch({ headless: true, slowMo: 0 });
   try {
     const context = await browser.newContext({
@@ -1961,8 +1984,6 @@ async function getPendingPaymentsWithTPVError(centerId) {
       expiry: Date.now() + SESSION_TTL_MS,
     });
 
-    // The pending payments are loaded via AJAX to /api/pendingPayments on page load.
-    // Set up the response interceptor BEFORE navigating so we don't miss it.
     const paymentsUrl = `${config.baseUrl}/payments`;
     const pendingApiUrl = `${config.baseUrl}/api/pendingPayments`;
     console.log('[AimHarder] Navegando a pagos pendientes:', paymentsUrl);
@@ -1979,19 +2000,36 @@ async function getPendingPaymentsWithTPVError(centerId) {
     try {
       const pendingResponse = await pendingResponsePromise;
       const raw = await pendingResponse.text();
-      // The server returns {"pending": [...]} — jQuery's $.parseJSON unwraps it client-side
       const data = JSON.parse(raw);
       pending = data.pending || [];
       console.log(`[AimHarder] /api/pendingPayments devolvió ${pending.length} pagos pendientes`);
     } catch (e) {
-      console.warn('[AimHarder TPV] No se pudo capturar /api/pendingPayments:', e.message);
+      console.warn('[AimHarder] No se pudo capturar /api/pendingPayments:', e.message);
     }
 
-    // Keep only payments that have a TPV RedsYs error code (tpverrcode != null)
-    const tpvFailures = pending.filter((p) => p.tpverrcode != null);
-    console.log(`[AimHarder] ${tpvFailures.length} pagos con fallo TPV encontrados`);
+    return pending;
+  } finally {
+    await browser.close();
+  }
+}
 
-    const payments = tpvFailures.map((p) => ({
+async function getPendingPaymentsWithoutTPVError(centerId) {
+  const config = await getCenterAimHarderConfig(centerId);
+
+  if (!config.username || !config.password) {
+    throw new Error(
+      `Faltan credenciales de AimHarder para ${config.centerName}. Configura las credenciales en la integración del centro.`
+    );
+  }
+
+  console.log('[AimHarder] ===== Scraping pagos pendientes sin fallo TPV =====');
+  try {
+    const pending = await getPendingPaymentsRaw(config);
+
+    const pendingWithoutTpvError = pending.filter((p) => p.tpverrcode == null || String(p.tpverrcode).trim() === '');
+    console.log(`[AimHarder] ${pendingWithoutTpvError.length} pagos pendientes sin fallo TPV encontrados`);
+
+    return pendingWithoutTpvError.map((p) => ({
       memberName: (p.name || '').replace(/\s+/g, ' ').trim(),
       concept: p.concept || '',
       tarifa: extractTarifa(p.concept || ''),
@@ -1999,11 +2037,8 @@ async function getPendingPaymentsWithTPVError(centerId) {
       date: p.since || '',
       phone: p.movil || '',
     }));
-
-    return payments;
   } finally {
-    await browser.close();
-    console.log('[AimHarder] ===== Fin scraping TPV =====');
+    console.log('[AimHarder] ===== Fin scraping pagos pendientes sin TPV =====');
   }
 }
 
@@ -2023,6 +2058,7 @@ module.exports = {
   saveClassReport,
   setClassReportHandoffStatus,
   getPendingPaymentsWithTPVError,
+  getPendingPaymentsWithoutTPVError,
   getYesterday,
   toDateString,
 };
