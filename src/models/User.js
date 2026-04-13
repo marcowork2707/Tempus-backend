@@ -21,6 +21,11 @@ const userSchema = new mongoose.Schema(
       required: [true, 'Please provide a name'],
       maxLength: [60, 'Name cannot exceed 60 characters'],
     },
+    nickname: {
+      type: String,
+      maxLength: [30, 'Nickname cannot exceed 30 characters'],
+      default: '',
+    },
     email: {
       type: String,
       required: [true, 'Please provide an email'],
@@ -67,9 +72,9 @@ const userSchema = new mongoose.Schema(
 );
 
 // Hash password before saving
-userSchema.pre('save', async function (next) {
+userSchema.pre('save', async function () {
   if (!this.isModified('password')) {
-    return next();
+    return;
   }
 
   const salt = await bcrypt.genSalt(10);

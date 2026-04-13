@@ -222,6 +222,7 @@ exports.updateUser = catchAsyncErrors(async (req, res, next) => {
   if (email) user.email = email.toLowerCase().trim();
   if (dni) user.dni = dni.toUpperCase().trim();
   if (active !== undefined) user.active = active;
+  if (req.body.nickname !== undefined) user.nickname = req.body.nickname;
 
   await user.save();
 

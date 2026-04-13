@@ -68,6 +68,7 @@ exports.loginUser = catchAsyncErrors(async (req, res, next) => {
       name: user.name,
       email: user.email,
       role: userRole,
+      nickname: user.nickname || '',
     },
     token,
   });

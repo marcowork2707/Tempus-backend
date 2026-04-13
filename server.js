@@ -48,6 +48,7 @@ app.use('/api/checklists', require('./src/routes/checklistRoutes'));
 app.use('/api/time-entries', require('./src/routes/timeEntryRoutes'));
 app.use('/api/aimharder', require('./src/routes/aimharderRoutes'));
 app.use('/api/settings', require('./src/routes/settingsRoutes'));
+app.use('/api/stock', require('./src/routes/stockRoutes'));
 
 // 404 handler
 app.use((req, res) => {
