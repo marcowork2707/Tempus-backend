@@ -832,6 +832,10 @@ exports.createShiftPattern = catchAsyncErrors(async (req, res, next) => {
     return next(new ErrorHandler('userId, daysOfWeek and startDate are required', 400));
   }
 
+  if (endDate && _startOfDay(endDate) < _startOfDay(startDate)) {
+    return next(new ErrorHandler('endDate cannot be earlier than startDate', 400));
+  }
+
   if (recurrence === 'custom_cycle') {
     if (!cycleLengthWeeks || cycleLengthWeeks < 1) {
       return next(new ErrorHandler('cycleLengthWeeks is required for custom cycle patterns', 400));
@@ -877,6 +881,12 @@ exports.createShiftPattern = catchAsyncErrors(async (req, res, next) => {
 exports.updateShiftPattern = catchAsyncErrors(async (req, res, next) => {
   const pattern = await ShiftPattern.findOne({ _id: req.params.patternId, center: req.params.id });
   if (!pattern) return next(new ErrorHandler('Pattern not found', 404));
+
+  const nextStartDate = req.body.startDate !== undefined ? req.body.startDate : pattern.startDate;
+  const nextEndDate = req.body.endDate !== undefined ? req.body.endDate : pattern.endDate;
+  if (nextEndDate && _startOfDay(nextEndDate) < _startOfDay(nextStartDate)) {
+    return next(new ErrorHandler('endDate cannot be earlier than startDate', 400));
+  }
 
   const fields = [
     'daysOfWeek', 'recurrence', 'startDate', 'endDate',
