@@ -7,6 +7,7 @@ const ShiftPattern = require('../models/ShiftPattern');
 const ShiftOverride = require('../models/ShiftOverride');
 const VacationRequest = require('../models/VacationRequest');
 const VacationConflictRule = require('../models/VacationConflictRule');
+const ExtraIncentive = require('../models/ExtraIncentive');
 const Checklist = require('../models/Checklist');
 const ErrorHandler = require('../utils/errorHandler');
 const catchAsyncErrors = require('../utils/catchAsyncErrors');
@@ -229,6 +230,82 @@ exports.removeUserFromCenter = catchAsyncErrors(async (req, res, next) => {
   if (!deleted) return next(new ErrorHandler('Assignment not found', 404));
 
   res.status(200).json({ success: true, message: 'User removed from center' });
+});
+
+exports.getCenterExtraIncentives = catchAsyncErrors(async (req, res, next) => {
+  const center = await Center.findById(req.params.id);
+  if (!center) return next(new ErrorHandler('Center not found', 404));
+
+  const month = typeof req.query.month === 'string' ? req.query.month : '';
+  if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(month)) {
+    return next(new ErrorHandler('month is required in format YYYY-MM', 400));
+  }
+
+  const incentives = await ExtraIncentive.find({ center: req.params.id, month })
+    .populate('user', 'name email active')
+    .populate('createdBy', 'name email')
+    .sort({ createdAt: -1 });
+
+  res.status(200).json({
+    success: true,
+    incentives: incentives.filter((incentive) => Boolean(incentive.user)),
+  });
+});
+
+exports.createCenterExtraIncentive = catchAsyncErrors(async (req, res, next) => {
+  const center = await Center.findById(req.params.id);
+  if (!center) return next(new ErrorHandler('Center not found', 404));
+
+  const { userId, month, concept, amount } = req.body;
+
+  if (!userId || !month || !concept || amount === undefined) {
+    return next(new ErrorHandler('userId, month, concept and amount are required', 400));
+  }
+
+  if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(month)) {
+    return next(new ErrorHandler('month must be in format YYYY-MM', 400));
+  }
+
+  const parsedAmount = Number(amount);
+  if (!Number.isFinite(parsedAmount) || parsedAmount <= 0) {
+    return next(new ErrorHandler('amount must be a number greater than 0', 400));
+  }
+
+  const assignment = await UserCenterRole.findOne({
+    center: req.params.id,
+    user: userId,
+    active: true,
+  });
+
+  if (!assignment) {
+    return next(new ErrorHandler('User is not assigned to this center', 400));
+  }
+
+  const incentive = await ExtraIncentive.create({
+    center: req.params.id,
+    user: userId,
+    month,
+    concept: String(concept).trim(),
+    amount: Number(parsedAmount.toFixed(2)),
+    createdBy: req.user.id,
+  });
+
+  const populated = await ExtraIncentive.findById(incentive._id)
+    .populate('user', 'name email active')
+    .populate('createdBy', 'name email');
+
+  res.status(201).json({ success: true, incentive: populated });
+});
+
+exports.deleteCenterExtraIncentive = catchAsyncErrors(async (req, res, next) => {
+  const incentive = await ExtraIncentive.findOneAndDelete({
+    _id: req.params.incentiveId,
+    center: req.params.id,
+  });
+
+  if (!incentive) return next(new ErrorHandler('Extra incentive not found', 404));
+
+  res.status(200).json({ success: true, message: 'Extra incentive deleted' });
 });
 
 // ─── SHIFT DEFINITIONS ──────────────────────────────────────────────────────

@@ -13,6 +13,9 @@ const {
   addUserToCenter,
   updateUserCenterRole,
   removeUserFromCenter,
+  getCenterExtraIncentives,
+  createCenterExtraIncentive,
+  deleteCenterExtraIncentive,
   getCenterShifts,
   createShift,
   updateShift,
@@ -68,6 +71,9 @@ router.get('/:id/users', authorizeRoles('admin'), getCenterUsers);
 router.post('/:id/users', authorizeRoles('admin'), addUserToCenter);
 router.put('/:id/users/:userId', authorizeRoles('admin'), updateUserCenterRole);
 router.delete('/:id/users/:userId', authorizeRoles('admin'), removeUserFromCenter);
+router.get('/:id/extra-incentives', authorizeRoles('admin'), getCenterExtraIncentives);
+router.post('/:id/extra-incentives', authorizeRoles('admin'), createCenterExtraIncentive);
+router.delete('/:id/extra-incentives/:incentiveId', authorizeRoles('admin'), deleteCenterExtraIncentive);
 
 // ─── Shift definitions ──────────────────────────────────────────────────────
 router.get('/:id/shifts', authorizeRoles('admin'), getCenterShifts);
