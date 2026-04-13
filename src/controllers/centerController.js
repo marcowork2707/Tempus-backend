@@ -8,6 +8,8 @@ const ShiftOverride = require('../models/ShiftOverride');
 const VacationRequest = require('../models/VacationRequest');
 const VacationConflictRule = require('../models/VacationConflictRule');
 const ExtraIncentive = require('../models/ExtraIncentive');
+const RecurringIncentiveRule = require('../models/RecurringIncentiveRule');
+const PayrollEntry = require('../models/PayrollEntry');
 const Checklist = require('../models/Checklist');
 const ErrorHandler = require('../utils/errorHandler');
 const catchAsyncErrors = require('../utils/catchAsyncErrors');
@@ -237,14 +239,30 @@ exports.getCenterExtraIncentives = catchAsyncErrors(async (req, res, next) => {
   if (!center) return next(new ErrorHandler('Center not found', 404));
 
   const month = typeof req.query.month === 'string' ? req.query.month : '';
-  if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(month)) {
-    return next(new ErrorHandler('month is required in format YYYY-MM', 400));
+  const year = typeof req.query.year === 'string' ? req.query.year : '';
+  const userId = typeof req.query.userId === 'string' ? req.query.userId : '';
+
+  const filter = { center: req.params.id };
+  if (month) {
+    if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(month)) {
+      return next(new ErrorHandler('month must be in format YYYY-MM', 400));
+    }
+    filter.month = month;
+  } else if (year) {
+    if (!/^\d{4}$/.test(year)) {
+      return next(new ErrorHandler('year must be in format YYYY', 400));
+    }
+    filter.month = new RegExp(`^${year}-`);
+  } else {
+    return next(new ErrorHandler('Provide month (YYYY-MM) or year (YYYY)', 400));
   }
 
-  const incentives = await ExtraIncentive.find({ center: req.params.id, month })
+  if (userId) filter.user = userId;
+
+  const incentives = await ExtraIncentive.find(filter)
     .populate('user', 'name email active')
     .populate('createdBy', 'name email')
-    .sort({ createdAt: -1 });
+    .sort({ month: -1, createdAt: -1 });
 
   res.status(200).json({
     success: true,
@@ -306,6 +324,263 @@ exports.deleteCenterExtraIncentive = catchAsyncErrors(async (req, res, next) => 
   if (!incentive) return next(new ErrorHandler('Extra incentive not found', 404));
 
   res.status(200).json({ success: true, message: 'Extra incentive deleted' });
+});
+
+exports.getCenterRecurringIncentiveRules = catchAsyncErrors(async (req, res, next) => {
+  const center = await Center.findById(req.params.id);
+  if (!center) return next(new ErrorHandler('Center not found', 404));
+
+  const rules = await RecurringIncentiveRule.find({ center: req.params.id })
+    .populate('user', 'name email active')
+    .populate('createdBy', 'name email')
+    .sort({ active: -1, createdAt: -1 });
+
+  res.status(200).json({
+    success: true,
+    rules: rules.filter((rule) => Boolean(rule.user)),
+  });
+});
+
+exports.createCenterRecurringIncentiveRule = catchAsyncErrors(async (req, res, next) => {
+  const center = await Center.findById(req.params.id);
+  if (!center) return next(new ErrorHandler('Center not found', 404));
+
+  const { userId, concept, amount, startMonth, endMonth, active } = req.body;
+
+  if (!userId || !concept || amount === undefined || !startMonth) {
+    return next(new ErrorHandler('userId, concept, amount and startMonth are required', 400));
+  }
+
+  if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(startMonth)) {
+    return next(new ErrorHandler('startMonth must be in format YYYY-MM', 400));
+  }
+  if (endMonth && !/^\d{4}-(0[1-9]|1[0-2])$/.test(endMonth)) {
+    return next(new ErrorHandler('endMonth must be in format YYYY-MM', 400));
+  }
+
+  const parsedAmount = Number(amount);
+  if (!Number.isFinite(parsedAmount) || parsedAmount <= 0) {
+    return next(new ErrorHandler('amount must be a number greater than 0', 400));
+  }
+
+  const assignment = await UserCenterRole.findOne({
+    center: req.params.id,
+    user: userId,
+    active: true,
+  });
+  if (!assignment) {
+    return next(new ErrorHandler('User is not assigned to this center', 400));
+  }
+
+  const rule = await RecurringIncentiveRule.create({
+    center: req.params.id,
+    user: userId,
+    concept: String(concept).trim(),
+    amount: Number(parsedAmount.toFixed(2)),
+    startMonth,
+    endMonth: endMonth || undefined,
+    active: active !== false,
+    createdBy: req.user.id,
+  });
+
+  const populated = await RecurringIncentiveRule.findById(rule._id)
+    .populate('user', 'name email active')
+    .populate('createdBy', 'name email');
+
+  res.status(201).json({ success: true, rule: populated });
+});
+
+exports.updateCenterRecurringIncentiveRule = catchAsyncErrors(async (req, res, next) => {
+  const rule = await RecurringIncentiveRule.findOne({
+    _id: req.params.ruleId,
+    center: req.params.id,
+  });
+  if (!rule) return next(new ErrorHandler('Recurring incentive rule not found', 404));
+
+  const { concept, amount, startMonth, endMonth, active } = req.body;
+
+  if (concept !== undefined) rule.concept = String(concept).trim();
+  if (amount !== undefined) {
+    const parsed = Number(amount);
+    if (!Number.isFinite(parsed) || parsed <= 0) {
+      return next(new ErrorHandler('amount must be a number greater than 0', 400));
+    }
+    rule.amount = Number(parsed.toFixed(2));
+  }
+  if (startMonth !== undefined) {
+    if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(startMonth)) {
+      return next(new ErrorHandler('startMonth must be in format YYYY-MM', 400));
+    }
+    rule.startMonth = startMonth;
+  }
+  if (endMonth !== undefined) {
+    if (endMonth && !/^\d{4}-(0[1-9]|1[0-2])$/.test(endMonth)) {
+      return next(new ErrorHandler('endMonth must be in format YYYY-MM', 400));
+    }
+    rule.endMonth = endMonth || undefined;
+  }
+  if (active !== undefined) rule.active = !!active;
+
+  await rule.save();
+
+  const populated = await RecurringIncentiveRule.findById(rule._id)
+    .populate('user', 'name email active')
+    .populate('createdBy', 'name email');
+
+  res.status(200).json({ success: true, rule: populated });
+});
+
+exports.deleteCenterRecurringIncentiveRule = catchAsyncErrors(async (req, res, next) => {
+  const deleted = await RecurringIncentiveRule.findOneAndDelete({
+    _id: req.params.ruleId,
+    center: req.params.id,
+  });
+
+  if (!deleted) return next(new ErrorHandler('Recurring incentive rule not found', 404));
+
+  res.status(200).json({ success: true, message: 'Recurring incentive rule deleted' });
+});
+
+function monthInRange(month, startMonth, endMonth) {
+  if (month < startMonth) return false;
+  if (endMonth && month > endMonth) return false;
+  return true;
+}
+
+exports.applyRecurringIncentivesForMonth = catchAsyncErrors(async (req, res, next) => {
+  const center = await Center.findById(req.params.id);
+  if (!center) return next(new ErrorHandler('Center not found', 404));
+
+  const { month } = req.body;
+  if (!month || !/^\d{4}-(0[1-9]|1[0-2])$/.test(month)) {
+    return next(new ErrorHandler('month is required in format YYYY-MM', 400));
+  }
+
+  const rules = await RecurringIncentiveRule.find({ center: req.params.id, active: true });
+  const applicable = rules.filter((rule) => monthInRange(month, rule.startMonth, rule.endMonth));
+
+  let createdCount = 0;
+  for (const rule of applicable) {
+    const exists = await ExtraIncentive.findOne({
+      center: req.params.id,
+      user: rule.user,
+      month,
+      concept: rule.concept,
+      amount: rule.amount,
+    });
+    if (exists) continue;
+
+    await ExtraIncentive.create({
+      center: req.params.id,
+      user: rule.user,
+      month,
+      concept: rule.concept,
+      amount: rule.amount,
+      createdBy: req.user.id,
+    });
+    createdCount += 1;
+  }
+
+  res.status(200).json({ success: true, createdCount, totalRules: applicable.length });
+});
+
+exports.getCenterPayroll = catchAsyncErrors(async (req, res, next) => {
+  const center = await Center.findById(req.params.id);
+  if (!center) return next(new ErrorHandler('Center not found', 404));
+
+  const filter = { center: req.params.id };
+  if (typeof req.query.userId === 'string' && req.query.userId) filter.user = req.query.userId;
+  if (typeof req.query.year === 'string' && /^\d{4}$/.test(req.query.year)) {
+    filter.month = new RegExp(`^${req.query.year}-`);
+  }
+
+  const entries = await PayrollEntry.find(filter)
+    .populate('user', 'name email active')
+    .populate('createdBy', 'name email')
+    .sort({ month: 1, createdAt: -1 });
+
+  const safeEntries = entries.filter((entry) => Boolean(entry.user));
+  const totalsByUser = {};
+  for (const entry of safeEntries) {
+    const userId = entry.user._id.toString();
+    const gross = Number(entry.grossSalary ?? entry.baseAmount ?? 0);
+    const net = Number(entry.netSalary ?? entry.variableAmount ?? 0);
+    const total = gross + net;
+    if (!totalsByUser[userId]) {
+      totalsByUser[userId] = { userId, userName: entry.user.name, total: 0, count: 0 };
+    }
+    totalsByUser[userId].total += total;
+    totalsByUser[userId].count += 1;
+  }
+
+  res.status(200).json({
+    success: true,
+    entries: safeEntries,
+    totalsByUser: Object.values(totalsByUser).sort((a, b) => b.total - a.total),
+  });
+});
+
+exports.upsertCenterPayrollEntry = catchAsyncErrors(async (req, res, next) => {
+  const center = await Center.findById(req.params.id);
+  if (!center) return next(new ErrorHandler('Center not found', 404));
+
+  const { userId, month, grossSalary, netSalary, baseAmount, variableAmount, notes } = req.body;
+  const hasGross = grossSalary !== undefined || baseAmount !== undefined;
+  if (!userId || !month || !hasGross) {
+    return next(new ErrorHandler('userId, month and grossSalary are required', 400));
+  }
+  if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(month)) {
+    return next(new ErrorHandler('month must be in format YYYY-MM', 400));
+  }
+
+  const parsedGross = Number(grossSalary ?? baseAmount);
+  const parsedNet = netSalary === undefined
+    ? (variableAmount === undefined ? parsedGross : Number(variableAmount))
+    : Number(netSalary);
+
+  if (!Number.isFinite(parsedGross) || parsedGross < 0) {
+    return next(new ErrorHandler('grossSalary must be a valid number >= 0', 400));
+  }
+  if (!Number.isFinite(parsedNet) || parsedNet < 0) {
+    return next(new ErrorHandler('netSalary must be a valid number >= 0', 400));
+  }
+
+  const assignment = await UserCenterRole.findOne({ center: req.params.id, user: userId, active: true });
+  if (!assignment) {
+    return next(new ErrorHandler('User is not assigned to this center', 400));
+  }
+
+  const entry = await PayrollEntry.findOneAndUpdate(
+    { center: req.params.id, user: userId, month },
+    {
+      center: req.params.id,
+      user: userId,
+      month,
+      grossSalary: Number(parsedGross.toFixed(2)),
+      netSalary: Number(parsedNet.toFixed(2)),
+      // Keep legacy fields synchronized
+      baseAmount: Number(parsedGross.toFixed(2)),
+      variableAmount: Number(parsedNet.toFixed(2)),
+      notes: notes ? String(notes).trim() : undefined,
+      createdBy: req.user.id,
+    },
+    { new: true, upsert: true, setDefaultsOnInsert: true }
+  )
+    .populate('user', 'name email active')
+    .populate('createdBy', 'name email');
+
+  res.status(200).json({ success: true, entry });
+});
+
+exports.deleteCenterPayrollEntry = catchAsyncErrors(async (req, res, next) => {
+  const deleted = await PayrollEntry.findOneAndDelete({
+    _id: req.params.entryId,
+    center: req.params.id,
+  });
+
+  if (!deleted) return next(new ErrorHandler('Payroll entry not found', 404));
+
+  res.status(200).json({ success: true, message: 'Payroll entry deleted' });
 });
 
 // ─── SHIFT DEFINITIONS ──────────────────────────────────────────────────────

@@ -16,6 +16,14 @@ const {
   getCenterExtraIncentives,
   createCenterExtraIncentive,
   deleteCenterExtraIncentive,
+  getCenterRecurringIncentiveRules,
+  createCenterRecurringIncentiveRule,
+  updateCenterRecurringIncentiveRule,
+  deleteCenterRecurringIncentiveRule,
+  applyRecurringIncentivesForMonth,
+  getCenterPayroll,
+  upsertCenterPayrollEntry,
+  deleteCenterPayrollEntry,
   getCenterShifts,
   createShift,
   updateShift,
@@ -74,6 +82,14 @@ router.delete('/:id/users/:userId', authorizeRoles('admin'), removeUserFromCente
 router.get('/:id/extra-incentives', authorizeRoles('admin'), getCenterExtraIncentives);
 router.post('/:id/extra-incentives', authorizeRoles('admin'), createCenterExtraIncentive);
 router.delete('/:id/extra-incentives/:incentiveId', authorizeRoles('admin'), deleteCenterExtraIncentive);
+router.get('/:id/recurring-incentive-rules', authorizeRoles('admin'), getCenterRecurringIncentiveRules);
+router.post('/:id/recurring-incentive-rules', authorizeRoles('admin'), createCenterRecurringIncentiveRule);
+router.put('/:id/recurring-incentive-rules/:ruleId', authorizeRoles('admin'), updateCenterRecurringIncentiveRule);
+router.delete('/:id/recurring-incentive-rules/:ruleId', authorizeRoles('admin'), deleteCenterRecurringIncentiveRule);
+router.post('/:id/recurring-incentives/apply', authorizeRoles('admin'), applyRecurringIncentivesForMonth);
+router.get('/:id/payroll', authorizeRoles('admin'), getCenterPayroll);
+router.post('/:id/payroll', authorizeRoles('admin'), upsertCenterPayrollEntry);
+router.delete('/:id/payroll/:entryId', authorizeRoles('admin'), deleteCenterPayrollEntry);
 
 // ─── Shift definitions ──────────────────────────────────────────────────────
 router.get('/:id/shifts', authorizeRoles('admin'), getCenterShifts);
