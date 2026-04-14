@@ -629,6 +629,24 @@ async function openReservationsDay(page, targetDate, config) {
 
   await dismissCookies(page);
   await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
+  await page.waitForFunction(
+    () => {
+      const blocks = Array.from(document.querySelectorAll('.bloqueClase'));
+      if (blocks.length === 0) return false;
+
+      const hasOccupiedClass = blocks.some((block) => {
+        const text = (block.textContent || '').replace(/\s+/g, ' ').trim();
+        const match = text.match(/Plazas ocupadas\s*(\d+)\s*\/\s*(\d+)/i);
+        return Boolean(match && Number(match[1]) > 0);
+      });
+
+      if (!hasOccupiedClass) return true;
+
+      return document.querySelectorAll('.bloqueClase .rvApuntados .atletaClase').length > 0;
+    },
+    { timeout: 7000 }
+  ).catch(() => {});
+  await page.waitForTimeout(800).catch(() => {});
   await saveDebugSnapshot(page, `05_schedule_day${targetDay}`);
 }
 
@@ -876,6 +894,7 @@ function extractContactFromOnclick(onclick) {
 function isCancelledWaitlistEntry($athlete, athleteText = '') {
   const normalizedText = String(athleteText).replace(/\s+/g, ' ').trim();
   const athleteHtml = ($athlete.html() || '').toLowerCase();
+  const athleteClassName = String($athlete.attr('class') || '').toLowerCase();
 
   const hasCancelText =
     /cancelad[oa]s?/i.test(normalizedText) ||
@@ -886,7 +905,8 @@ function isCancelledWaitlistEntry($athlete, athleteText = '') {
     $athlete.find('.checkAthlete img[src*="delete2.svg"], .checkAthlete img[src*="delete"], .checkAthlete img[src*="cancel"]').length > 0;
 
   const hasCancelMarker =
-    athleteHtml.includes('cancel') ||
+    athleteClassName.includes('noassist') ||
+    athleteHtml.includes('cancelado') ||
     athleteHtml.includes('anulad') ||
     athleteHtml.includes('delete2.svg');
 
