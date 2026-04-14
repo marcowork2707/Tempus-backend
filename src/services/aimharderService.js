@@ -1289,6 +1289,11 @@ async function getClassReportContext(dateStr = null, centerId, userName = '', is
             savedClass,
           ])
         );
+        const hasLegacyWholeReportCompletion =
+          savedClasses.size === 0 &&
+          Boolean(saved?.submittedAt || saved?.updatedAt) &&
+          Array.isArray(saved?.items) &&
+          saved.items.length > 0;
 
         return {
           instructorName: group.instructorName,
@@ -1301,8 +1306,10 @@ async function getClassReportContext(dateStr = null, centerId, userName = '', is
           classes: group.classes.map((classItem) => ({
             className: classItem.className,
             classTime: classItem.classTime,
-            saved: savedClasses.has(buildSavedClassKey(classItem.classTime, classItem.className)),
-            savedAt: savedClasses.get(buildSavedClassKey(classItem.classTime, classItem.className))?.savedAt || null,
+            saved: hasLegacyWholeReportCompletion || savedClasses.has(buildSavedClassKey(classItem.classTime, classItem.className)),
+            savedAt:
+              savedClasses.get(buildSavedClassKey(classItem.classTime, classItem.className))?.savedAt ||
+              (hasLegacyWholeReportCompletion ? saved?.submittedAt || saved?.updatedAt || null : null),
             members: classItem.members.map((member) => {
               const savedItem = savedItems.get(
                 `${classItem.classTime}::${normalizeName(classItem.className)}::${normalizeName(member.memberName)}`
@@ -1384,6 +1391,11 @@ async function getClassReportStatus(dateStr = null, centerId, options = {}) {
   for (const entry of roster.instructors || []) {
     const report = reportMap.get(`${normalizeName(entry.instructorName)}::${entry.period}`);
     const savedClasses = new Set((report?.savedClasses || []).map((savedClass) => buildSavedClassKey(savedClass.classTime, savedClass.className)));
+    const hasLegacyWholeReportCompletion =
+      savedClasses.size === 0 &&
+      Boolean(report?.submittedAt || report?.updatedAt) &&
+      Array.isArray(report?.items) &&
+      report.items.length > 0;
     const key = normalizeName(entry.instructorName);
     const existing = grouped.get(key) || {
       instructorName: entry.instructorName,
@@ -1396,7 +1408,7 @@ async function getClassReportStatus(dateStr = null, centerId, options = {}) {
 
     existing.totalGroups += 1;
     existing.totalClasses += 1;
-    if (savedClasses.has(buildSavedClassKey(entry.classTime, entry.className))) {
+    if (hasLegacyWholeReportCompletion || savedClasses.has(buildSavedClassKey(entry.classTime, entry.className))) {
       existing.completedGroups += 1;
       existing.completedClasses += 1;
     }
