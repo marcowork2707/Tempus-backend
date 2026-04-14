@@ -858,7 +858,7 @@ exports.createVacationRequest = catchAsyncErrors(async (req, res, next) => {
 });
 
 exports.reviewVacationRequest = catchAsyncErrors(async (req, res, next) => {
-  const { status, reviewNotes } = req.body;
+  const { status, reviewNotes, startDate, endDate } = req.body;
   const request = await VacationRequest.findOne({ _id: req.params.requestId, center: req.params.id });
   if (!request) return next(new ErrorHandler('Vacation request not found', 404));
 
@@ -867,18 +867,44 @@ exports.reviewVacationRequest = catchAsyncErrors(async (req, res, next) => {
     return next(new ErrorHandler('Unauthorized to review vacation requests', 403));
   }
 
-  if (!['approved', 'denied'].includes(status)) {
+  if (status && !['approved', 'denied'].includes(status)) {
     return next(new ErrorHandler('status must be approved or denied', 400));
   }
 
-  request.status = status;
-  request.reviewNotes = reviewNotes || undefined;
+  const nextStartDate = startDate ? _startOfDay(startDate) : _startOfDay(request.startDate);
+  const nextEndDate = endDate ? _startOfDay(endDate) : _startOfDay(request.endDate);
+
+  if (nextEndDate < nextStartDate) {
+    return next(new ErrorHandler('endDate cannot be earlier than startDate', 400));
+  }
+
+  const overlapping = await VacationRequest.findOne({
+    center: req.params.id,
+    user: request.user,
+    _id: { $ne: request._id },
+    status: { $in: ['pending', 'approved'] },
+    startDate: { $lte: nextEndDate },
+    endDate: { $gte: nextStartDate },
+  });
+
+  if (overlapping) {
+    return next(new ErrorHandler('This user already has another vacation request overlapping those dates', 400));
+  }
+
+  const nextStatus = status || request.status;
+
+  if (nextStatus === 'approved') {
+    await _assertVacationConflictRules(req.params.id, request.user, nextStartDate, nextEndDate, request._id);
+  }
+
+  request.startDate = nextStartDate;
+  request.endDate = nextEndDate;
+  request.status = nextStatus;
+  if (reviewNotes !== undefined) {
+    request.reviewNotes = reviewNotes || undefined;
+  }
   request.reviewedBy = req.user.id;
   request.reviewedAt = new Date();
-
-  if (status === 'approved') {
-    await _assertVacationConflictRules(req.params.id, request.user, _startOfDay(request.startDate), _startOfDay(request.endDate), request._id);
-  }
 
   await request.save();
 
@@ -888,7 +914,7 @@ exports.reviewVacationRequest = catchAsyncErrors(async (req, res, next) => {
     vacationRequest: request._id,
   });
 
-  if (status === 'approved') {
+  if (nextStatus === 'approved') {
     let current = new Date(_startOfDay(request.startDate));
     const end = _startOfDay(request.endDate);
 
