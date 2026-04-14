@@ -1,7 +1,16 @@
 const Checklist = require('../models/Checklist');
+const ChecklistAlertDismissal = require('../models/ChecklistAlertDismissal');
 const UserCenterRole = require('../models/UserCenterRole');
 const ErrorHandler = require('../utils/errorHandler');
 const catchAsyncErrors = require('../utils/catchAsyncErrors');
+
+function buildDayRange(dateInput) {
+  const baseDate = new Date(dateInput);
+  const start = new Date(baseDate.getFullYear(), baseDate.getMonth(), baseDate.getDate());
+  const end = new Date(start);
+  end.setDate(end.getDate() + 1);
+  return { start, end };
+}
 
 // Worker creates a checklist (for daily tasks) or admin generates
 exports.createChecklist = catchAsyncErrors(async (req, res, next) => {
@@ -21,9 +30,7 @@ exports.createChecklist = catchAsyncErrors(async (req, res, next) => {
   });
 
   const baseDate = new Date(date);
-  const start = new Date(baseDate.getFullYear(), baseDate.getMonth(), baseDate.getDate());
-  const end = new Date(start);
-  end.setDate(end.getDate() + 1);
+  const { start, end } = buildDayRange(baseDate);
 
   const uniquenessFilter =
     checklistType === 'daily'
@@ -164,4 +171,65 @@ exports.adminReview = catchAsyncErrors(async (req, res, next) => {
   await checklist.save();
 
   res.status(200).json({ success: true, checklist });
+});
+
+exports.getOverdueDismissals = catchAsyncErrors(async (req, res, next) => {
+  const { centerId, startDate, endDate } = req.query;
+
+  if (!centerId || !startDate || !endDate) {
+    return next(new ErrorHandler('centerId, startDate and endDate are required', 400));
+  }
+
+  if (req.user.role !== 'admin') {
+    const assignment = await UserCenterRole.findOne({
+      user: req.user.id,
+      center: centerId,
+      active: true,
+    });
+
+    if (!assignment) {
+      return next(new ErrorHandler('Unauthorized', 403));
+    }
+  }
+
+  const start = new Date(startDate);
+  const endRange = buildDayRange(endDate).end;
+
+  const dismissals = await ChecklistAlertDismissal.find({
+    center: centerId,
+    date: { $gte: start, $lt: endRange },
+  }).select('date dismissedAt dismissedBy');
+
+  res.status(200).json({ success: true, dismissals });
+});
+
+exports.dismissOverdueAlert = catchAsyncErrors(async (req, res, next) => {
+  if (req.user.role !== 'admin') {
+    return next(new ErrorHandler('Only admin can dismiss overdue alerts', 403));
+  }
+
+  const { centerId, date } = req.body;
+
+  if (!centerId || !date) {
+    return next(new ErrorHandler('centerId and date are required', 400));
+  }
+
+  const { start } = buildDayRange(date);
+
+  const dismissal = await ChecklistAlertDismissal.findOneAndUpdate(
+    { center: centerId, date: start },
+    {
+      $set: {
+        dismissedBy: req.user.id,
+        dismissedAt: new Date(),
+      },
+      $setOnInsert: {
+        center: centerId,
+        date: start,
+      },
+    },
+    { new: true, upsert: true }
+  );
+
+  res.status(200).json({ success: true, dismissal });
 });
