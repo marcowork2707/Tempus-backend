@@ -1382,7 +1382,7 @@ exports.deleteShiftOverride = catchAsyncErrors(async (req, res, next) => {
 
 // Get computed shift calendar for a center (admin: all workers; others: own only)
 exports.getShiftCalendar = catchAsyncErrors(async (req, res, next) => {
-  const { from, to } = req.query;
+  const { from, to, ignoreVacationRequestId } = req.query;
   if (!from || !to) {
     return next(new ErrorHandler('from and to query params (YYYY-MM-DD) are required', 400));
   }
@@ -1410,7 +1410,14 @@ exports.getShiftCalendar = catchAsyncErrors(async (req, res, next) => {
   };
   if (roleName !== 'coach' && !canReviewCenterCalendar) overrideFilter.user = req.user.id;
 
-  const overrides = await ShiftOverride.find(overrideFilter).populate('user', 'name email');
+  let overrides = await ShiftOverride.find(overrideFilter).populate('user', 'name email');
+
+  if (ignoreVacationRequestId) {
+    overrides = overrides.filter((override) => {
+      if (override.reasonType !== 'vacation') return true;
+      return String(override.vacationRequest || '') !== String(ignoreVacationRequestId);
+    });
+  }
 
   let occurrences = applyOverrides(
     computeOccurrences(patterns.filter(hasResolvedUser), fromDate, toDate),
