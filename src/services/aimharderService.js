@@ -1142,10 +1142,6 @@ async function parseReservationsHtmlForClassReports(page) {
       );
       if (waitlistContainer.length) return;
 
-      const hasAttendanceCheck =
-        $athlete.find('.checkAthlete img[src*="check"], .checkAthlete img[src*="ok"], .checkAthlete img[src*="success"]').length > 0;
-      if (!hasAttendanceCheck) return;
-
       const memberName = (
         $athlete.find('.atletaNom').first().text() ||
         $athlete
@@ -1159,6 +1155,7 @@ async function parseReservationsHtmlForClassReports(page) {
 
       const athleteText = $athlete.text().replace(/\s+/g, ' ').trim();
       if (/lista de espera/i.test(athleteText)) return;
+      if (isCancelledWaitlistEntry($athlete, athleteText)) return;
 
       const alerts = [];
       $athlete.find('*').each((___, childEl) => {
