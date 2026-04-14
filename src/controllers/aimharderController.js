@@ -9,6 +9,7 @@ const {
   getStoredAimHarderIntegration,
   upsertAimHarderIntegration,
   getClassReportContext,
+  getClassReportStatus,
   saveClassReport,
   setClassReportHandoffStatus,
   getPendingPaymentsWithTPVError,
@@ -235,6 +236,40 @@ exports.getClassReports = async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Error al obtener los reportes de clases de AimHarder.',
+      detail: process.env.NODE_ENV === 'development' ? err.message : undefined,
+    });
+  }
+};
+
+exports.getClassReportStatus = async (req, res) => {
+  try {
+    const { centerId, date } = req.query;
+    if (!centerId) {
+      return res.status(400).json({ success: false, message: 'centerId es obligatorio' });
+    }
+
+    if (req.user.role !== 'admin') {
+      const assignment = await UserCenterRole.findOne({
+        user: req.user.id,
+        center: centerId,
+        active: true,
+      });
+
+      if (!assignment) {
+        return res.status(403).json({ success: false, message: 'No tienes acceso a este centro' });
+      }
+    }
+
+    const result = await getClassReportStatus(date || null, centerId);
+    res.json({
+      success: true,
+      ...result,
+    });
+  } catch (err) {
+    console.error('[AimHarder Controller] Error getClassReportStatus:', err.message);
+    res.status(500).json({
+      success: false,
+      message: 'Error al obtener el estado de avisos por instructor.',
       detail: process.env.NODE_ENV === 'development' ? err.message : undefined,
     });
   }

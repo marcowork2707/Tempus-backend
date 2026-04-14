@@ -21,6 +21,7 @@ const ActiveClient = require('../models/ActiveClient');
 const AttendanceAbsenceSnapshot = require('../models/AttendanceAbsenceSnapshot');
 const CenterOccupancySnapshot = require('../models/CenterOccupancySnapshot');
 const ClassReport = require('../models/ClassReport');
+const ClassReportRoster = require('../models/ClassReportRoster');
 
 // URL del portal principal de AimHarder (donde está el botón de login)
 const LOGIN_URL = 'https://aimharder.com';
@@ -1309,6 +1310,77 @@ async function getClassReportContext(dateStr = null, centerId, userName = '', is
   }
 }
 
+async function upsertClassReportRoster(centerId, date, reports = []) {
+  const instructors = reports.map((report) => ({
+    instructorName: report.instructorName,
+    period: report.period,
+  }));
+
+  return ClassReportRoster.findOneAndUpdate(
+    { center: centerId, date },
+    {
+      $set: {
+        center: centerId,
+        date,
+        instructors,
+        refreshedAt: new Date(),
+      },
+    },
+    { upsert: true, new: true, setDefaultsOnInsert: true }
+  );
+}
+
+async function getClassReportStatus(dateStr = null, centerId) {
+  const targetDate = dateStr || toDateString(new Date());
+
+  let roster = await ClassReportRoster.findOne({ center: centerId, date: targetDate }).lean();
+  if (!roster) {
+    const context = await getClassReportContext(targetDate, centerId, '', true, null);
+    roster = (await upsertClassReportRoster(centerId, context.date, context.reports || [])).toObject();
+  }
+
+  const savedReports = await ClassReport.find({ center: centerId, date: targetDate }).lean();
+  const reportMap = new Map(
+    savedReports.map((report) => [
+      `${normalizeName(report.instructorName)}::${report.period}`,
+      report,
+    ])
+  );
+
+  const grouped = new Map();
+  for (const entry of roster.instructors || []) {
+    const report = reportMap.get(`${normalizeName(entry.instructorName)}::${entry.period}`);
+    const key = normalizeName(entry.instructorName);
+    const existing = grouped.get(key) || {
+      instructorName: entry.instructorName,
+      totalGroups: 0,
+      completedGroups: 0,
+      done: false,
+    };
+
+    existing.totalGroups += 1;
+    if (report?.submittedAt || report?.updatedAt) {
+      existing.completedGroups += 1;
+    }
+    existing.done = existing.totalGroups > 0 && existing.completedGroups === existing.totalGroups;
+    grouped.set(key, existing);
+  }
+
+  const instructors = Array.from(grouped.values()).sort((a, b) =>
+    a.instructorName.localeCompare(b.instructorName, 'es')
+  );
+  const completedInstructors = instructors.filter((item) => item.done).length;
+
+  return {
+    date: targetDate,
+    done: instructors.length === 0 || completedInstructors === instructors.length,
+    totalInstructors: instructors.length,
+    completedInstructors,
+    instructors,
+    rosterRefreshedAt: roster.refreshedAt || roster.updatedAt || null,
+  };
+}
+
 async function saveClassReport(data) {
   const {
     centerId,
@@ -2055,6 +2127,7 @@ module.exports = {
   upsertAimHarderIntegration,
   seedAimHarderIntegrationsFromEnv,
   getClassReportContext,
+  getClassReportStatus,
   saveClassReport,
   setClassReportHandoffStatus,
   getPendingPaymentsWithTPVError,

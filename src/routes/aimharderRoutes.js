@@ -8,6 +8,7 @@ const {
   getIntegration,
   updateIntegration,
   getClassReports,
+  getClassReportStatus,
   saveClassReport,
   setClassReportHandoff,
   getTpvRedsysPayments,
@@ -30,6 +31,7 @@ router.post('/clear-session', isAuthenticatedUser, clearSession);
 router.get('/integration/:centerId', isAuthenticatedUser, authorizeRoles('admin'), getIntegration);
 router.put('/integration/:centerId', isAuthenticatedUser, authorizeRoles('admin'), updateIntegration);
 router.get('/class-reports', isAuthenticatedUser, getClassReports);
+router.get('/class-reports/status', isAuthenticatedUser, getClassReportStatus);
 router.put('/class-reports', isAuthenticatedUser, saveClassReport);
 router.put('/class-reports/handoff', isAuthenticatedUser, setClassReportHandoff);
 router.get('/tpv-redsys-payments', isAuthenticatedUser, getTpvRedsysPayments);
