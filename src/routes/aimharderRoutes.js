@@ -10,6 +10,7 @@ const {
   getClassReports,
   getClassReportStatus,
   saveClassReport,
+  resetClassReportTask,
   setClassReportHandoff,
   getTpvRedsysPayments,
   getPendingPaymentsNoTpv,
@@ -33,6 +34,7 @@ router.put('/integration/:centerId', isAuthenticatedUser, authorizeRoles('admin'
 router.get('/class-reports', isAuthenticatedUser, getClassReports);
 router.get('/class-reports/status', isAuthenticatedUser, getClassReportStatus);
 router.put('/class-reports', isAuthenticatedUser, saveClassReport);
+router.post('/class-reports/reset', isAuthenticatedUser, authorizeRoles('admin'), resetClassReportTask);
 router.put('/class-reports/handoff', isAuthenticatedUser, setClassReportHandoff);
 router.get('/tpv-redsys-payments', isAuthenticatedUser, getTpvRedsysPayments);
 router.get('/pending-payments-no-tpv', isAuthenticatedUser, getPendingPaymentsNoTpv);

@@ -11,6 +11,7 @@ const {
   getClassReportContext,
   getClassReportStatus,
   saveClassReport,
+  resetClassReportTask,
   setClassReportHandoffStatus,
   getPendingPaymentsWithTPVError,
   getPendingPaymentsWithoutTPVError,
@@ -367,6 +368,34 @@ exports.saveClassReport = async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Error al guardar los avisos de las clases.',
+      detail: process.env.NODE_ENV === 'development' ? err.message : undefined,
+    });
+  }
+};
+
+exports.resetClassReportTask = async (req, res) => {
+  try {
+    const { centerId, date, instructorName } = req.body || {};
+    if (!centerId || !instructorName) {
+      return res.status(400).json({ success: false, message: 'centerId e instructorName son obligatorios' });
+    }
+
+    const result = await resetClassReportTask({
+      centerId,
+      date,
+      instructorName,
+    });
+
+    res.json({
+      success: true,
+      message: 'La tarea de avisos se ha reseteado correctamente',
+      ...result,
+    });
+  } catch (err) {
+    console.error('[AimHarder Controller] Error resetClassReportTask:', err.message);
+    res.status(500).json({
+      success: false,
+      message: 'Error al resetear la tarea de avisos del instructor.',
       detail: process.env.NODE_ENV === 'development' ? err.message : undefined,
     });
   }

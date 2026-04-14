@@ -1548,6 +1548,33 @@ async function saveClassReport(data) {
   return report;
 }
 
+async function resetClassReportTask(data) {
+  const {
+    centerId,
+    date,
+    instructorName,
+  } = data;
+
+  const targetDate = date || toDateString(new Date());
+  const normalizedInstructorName = String(instructorName || '').trim();
+
+  if (!centerId || !normalizedInstructorName) {
+    throw new Error('centerId e instructorName son obligatorios');
+  }
+
+  const result = await ClassReport.deleteMany({
+    center: centerId,
+    date: targetDate,
+    instructorName: normalizedInstructorName,
+  });
+
+  return {
+    date: targetDate,
+    instructorName: normalizedInstructorName,
+    deletedCount: result.deletedCount || 0,
+  };
+}
+
 async function setClassReportHandoffStatus(data) {
   const { centerId, date, period, instructorName, className, classTime, memberName, done, updatedBy } = data;
   const targetDate = date || toDateString(new Date());
@@ -2223,6 +2250,7 @@ module.exports = {
   getClassReportContext,
   getClassReportStatus,
   saveClassReport,
+  resetClassReportTask,
   setClassReportHandoffStatus,
   getPendingPaymentsWithTPVError,
   getPendingPaymentsWithoutTPVError,
