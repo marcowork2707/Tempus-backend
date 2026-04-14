@@ -19,6 +19,8 @@ const getUserRoleForCenter = async (userId, centerId) => {
 
 const canReviewCenterEntries = (roleName) => roleName === 'admin' || roleName === 'encargado';
 
+const CENTER_TIME_ZONE = 'Europe/Madrid';
+
 const startOfDay = (date) => {
   const d = new Date(date);
   d.setHours(0, 0, 0, 0);
@@ -31,6 +33,34 @@ const formatLocalDate = (date) => {
   const m = String(d.getMonth() + 1).padStart(2, '0');
   const day = String(d.getDate()).padStart(2, '0');
   return `${y}-${m}-${day}`;
+};
+
+const getTimeZoneOffsetMinutes = (date, timeZone) => {
+  const timeZoneName = new Intl.DateTimeFormat('en-US', {
+    timeZone,
+    timeZoneName: 'longOffset',
+  })
+    .formatToParts(date)
+    .find((part) => part.type === 'timeZoneName')?.value;
+
+  if (!timeZoneName || timeZoneName === 'GMT') return 0;
+
+  const match = timeZoneName.match(/^GMT([+-])(\d{2}):(\d{2})$/);
+  if (!match) return 0;
+
+  const [, sign, hours, minutes] = match;
+  const absoluteMinutes = (Number(hours) * 60) + Number(minutes);
+  return sign === '+' ? absoluteMinutes : -absoluteMinutes;
+};
+
+const buildCenterDateTime = (date, time) => {
+  if (!time) return null;
+
+  const [year, month, day] = formatLocalDate(date).split('-').map(Number);
+  const [hours, minutes] = time.split(':').map(Number);
+  const utcGuess = new Date(Date.UTC(year, month - 1, day, hours, minutes, 0));
+  const offsetMinutes = getTimeZoneOffsetMinutes(utcGuess, CENTER_TIME_ZONE);
+  return new Date(Date.UTC(year, month - 1, day, hours, minutes, 0) - (offsetMinutes * 60 * 1000));
 };
 
 const startOfISOWeek = (date) => {
@@ -493,10 +523,10 @@ exports.updateTimeEntry = catchAsyncErrors(async (req, res, next) => {
 
   const entryDate = date ? startOfDay(date) : startOfDay(entry.date);
   const currentEntryTime = entryTime
-    ? new Date(`${formatLocalDate(entryDate)}T${entryTime}:00`)
+    ? buildCenterDateTime(entryDate, entryTime)
     : new Date(entry.entryTime);
   const currentExitTime = exitTime
-    ? new Date(`${formatLocalDate(entryDate)}T${exitTime}:00`)
+    ? buildCenterDateTime(entryDate, exitTime)
     : null;
 
   if (currentExitTime && currentExitTime < currentEntryTime) {
@@ -553,8 +583,8 @@ exports.adminCreateTimeEntry = catchAsyncErrors(async (req, res, next) => {
   }
 
   const entryDate = startOfDay(date);
-  const entryTimestamp = new Date(`${formatLocalDate(entryDate)}T${entryTime}:00`);
-  const exitTimestamp = exitTime ? new Date(`${formatLocalDate(entryDate)}T${exitTime}:00`) : null;
+  const entryTimestamp = buildCenterDateTime(entryDate, entryTime);
+  const exitTimestamp = exitTime ? buildCenterDateTime(entryDate, exitTime) : null;
 
   if (exitTimestamp && exitTimestamp < entryTimestamp) {
     return next(new ErrorHandler('exitTime cannot be earlier than entryTime', 400));
