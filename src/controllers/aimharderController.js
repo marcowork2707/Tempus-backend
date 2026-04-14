@@ -295,9 +295,19 @@ exports.getClassReportStatus = async (req, res) => {
     const result = await getClassReportStatus(date || null, centerId, {
       initialize: initialize === 'true',
     });
+    const currentUser = await User.findById(req.user.id).select('name nickname firstName lastName');
+    const userNameCandidates = buildUserNameCandidates(currentUser);
+    const personalInstructor = (result.instructors || []).find((item) =>
+      userNameCandidates.some((candidate) => namesLikelyMatch(candidate, item.instructorName))
+    ) || null;
+
     res.json({
       success: true,
       ...result,
+      personalDone: personalInstructor ? !!personalInstructor.done : false,
+      personalTotalClasses: personalInstructor ? Number(personalInstructor.totalClasses || personalInstructor.totalGroups || 0) : 0,
+      personalCompletedClasses: personalInstructor ? Number(personalInstructor.completedClasses || personalInstructor.completedGroups || 0) : 0,
+      personalInstructorName: personalInstructor?.instructorName || null,
     });
   } catch (err) {
     console.error('[AimHarder Controller] Error getClassReportStatus:', err.message);
@@ -311,7 +321,7 @@ exports.getClassReportStatus = async (req, res) => {
 
 exports.saveClassReport = async (req, res) => {
   try {
-    const { centerId, date, period, instructorName, items } = req.body || {};
+    const { centerId, date, period, instructorName, items, completedClasses } = req.body || {};
     if (!centerId || !period || !instructorName) {
       return res.status(400).json({ success: false, message: 'centerId, period e instructorName son obligatorios' });
     }
@@ -344,6 +354,7 @@ exports.saveClassReport = async (req, res) => {
       instructorUserId: req.user.id,
       updatedBy: req.user.id,
       items,
+      completedClasses,
     });
 
     res.json({

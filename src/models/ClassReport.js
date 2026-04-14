@@ -39,6 +39,31 @@ const classReportItemSchema = new mongoose.Schema(
   { _id: false }
 );
 
+const classReportSavedClassSchema = new mongoose.Schema(
+  {
+    className: {
+      type: String,
+      required: true,
+      trim: true,
+    },
+    classTime: {
+      type: String,
+      required: true,
+      trim: true,
+    },
+    savedBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'User',
+      default: null,
+    },
+    savedAt: {
+      type: Date,
+      default: null,
+    },
+  },
+  { _id: false }
+);
+
 const classReportSchema = new mongoose.Schema(
   {
     center: {
@@ -69,6 +94,10 @@ const classReportSchema = new mongoose.Schema(
     },
     items: {
       type: [classReportItemSchema],
+      default: [],
+    },
+    savedClasses: {
+      type: [classReportSavedClassSchema],
       default: [],
     },
     updatedBy: {

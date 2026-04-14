@@ -12,6 +12,16 @@ const classReportRosterInstructorSchema = new mongoose.Schema(
       enum: ['morning', 'afternoon'],
       required: true,
     },
+    className: {
+      type: String,
+      trim: true,
+      default: '',
+    },
+    classTime: {
+      type: String,
+      trim: true,
+      default: '',
+    },
   },
   { _id: false }
 );

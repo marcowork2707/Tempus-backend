@@ -143,6 +143,10 @@ function getPeriodByTime(time = '') {
   return hour < 15 ? 'morning' : 'afternoon';
 }
 
+function buildSavedClassKey(classTime = '', className = '') {
+  return `${String(classTime || '').trim()}::${normalizeName(className)}`;
+}
+
 function toEnvKey(value = '') {
   return value
     .normalize('NFD')
@@ -1279,6 +1283,12 @@ async function getClassReportContext(dateStr = null, centerId, userName = '', is
             item,
           ])
         );
+        const savedClasses = new Map(
+          (saved?.savedClasses || []).map((savedClass) => [
+            buildSavedClassKey(savedClass.classTime, savedClass.className),
+            savedClass,
+          ])
+        );
 
         return {
           instructorName: group.instructorName,
@@ -1291,6 +1301,8 @@ async function getClassReportContext(dateStr = null, centerId, userName = '', is
           classes: group.classes.map((classItem) => ({
             className: classItem.className,
             classTime: classItem.classTime,
+            saved: savedClasses.has(buildSavedClassKey(classItem.classTime, classItem.className)),
+            savedAt: savedClasses.get(buildSavedClassKey(classItem.classTime, classItem.className))?.savedAt || null,
             members: classItem.members.map((member) => {
               const savedItem = savedItems.get(
                 `${classItem.classTime}::${normalizeName(classItem.className)}::${normalizeName(member.memberName)}`
@@ -1314,10 +1326,14 @@ async function getClassReportContext(dateStr = null, centerId, userName = '', is
 }
 
 async function upsertClassReportRoster(centerId, date, reports = []) {
-  const instructors = reports.map((report) => ({
-    instructorName: report.instructorName,
-    period: report.period,
-  }));
+  const instructors = reports.flatMap((report) =>
+    (report.classes || []).map((classItem) => ({
+      instructorName: report.instructorName,
+      period: report.period,
+      className: classItem.className,
+      classTime: classItem.classTime,
+    }))
+  );
 
   return ClassReportRoster.findOneAndUpdate(
     { center: centerId, date },
@@ -1338,7 +1354,8 @@ async function getClassReportStatus(dateStr = null, centerId, options = {}) {
   const { initialize = false } = options;
 
   let roster = await ClassReportRoster.findOne({ center: centerId, date: targetDate }).lean();
-  if (!roster && initialize) {
+  const rosterNeedsRefresh = roster && (roster.instructors || []).some((entry) => !entry.classTime || !entry.className);
+  if ((!roster || rosterNeedsRefresh) && initialize) {
     const context = await getClassReportContext(targetDate, centerId, '', true, null);
     roster = (await upsertClassReportRoster(centerId, context.date, context.reports || [])).toObject();
   }
@@ -1366,17 +1383,22 @@ async function getClassReportStatus(dateStr = null, centerId, options = {}) {
   const grouped = new Map();
   for (const entry of roster.instructors || []) {
     const report = reportMap.get(`${normalizeName(entry.instructorName)}::${entry.period}`);
+    const savedClasses = new Set((report?.savedClasses || []).map((savedClass) => buildSavedClassKey(savedClass.classTime, savedClass.className)));
     const key = normalizeName(entry.instructorName);
     const existing = grouped.get(key) || {
       instructorName: entry.instructorName,
       totalGroups: 0,
       completedGroups: 0,
+      totalClasses: 0,
+      completedClasses: 0,
       done: false,
     };
 
     existing.totalGroups += 1;
-    if (report?.submittedAt || report?.updatedAt) {
+    existing.totalClasses += 1;
+    if (savedClasses.has(buildSavedClassKey(entry.classTime, entry.className))) {
       existing.completedGroups += 1;
+      existing.completedClasses += 1;
     }
     existing.done = existing.totalGroups > 0 && existing.completedGroups === existing.totalGroups;
     grouped.set(key, existing);
@@ -1407,6 +1429,7 @@ async function saveClassReport(data) {
     instructorUserId = null,
     updatedBy,
     items = [],
+    completedClasses = [],
   } = data;
 
   const targetDate = date || toDateString(new Date());
@@ -1422,6 +1445,28 @@ async function saveClassReport(data) {
       `${item.classTime}::${normalizeName(item.className)}::${normalizeName(item.memberName)}`,
       item,
     ])
+  );
+
+  const normalizedCompletedClasses = completedClasses
+    .map((classItem) => ({
+      className: String(classItem.className || '').trim(),
+      classTime: String(classItem.classTime || '').trim(),
+    }))
+    .filter((classItem) => classItem.className && classItem.classTime);
+
+  if (normalizedCompletedClasses.length === 0) {
+    const derivedClasses = new Map();
+    for (const item of items) {
+      const className = String(item.className || '').trim();
+      const classTime = String(item.classTime || '').trim();
+      if (!className || !classTime) continue;
+      derivedClasses.set(buildSavedClassKey(classTime, className), { className, classTime });
+    }
+    normalizedCompletedClasses.push(...derivedClasses.values());
+  }
+
+  const completedClassKeys = new Set(
+    normalizedCompletedClasses.map((classItem) => buildSavedClassKey(classItem.classTime, classItem.className))
   );
 
   const normalizedItems = items
@@ -1446,6 +1491,28 @@ async function saveClassReport(data) {
       };
     });
 
+  const preservedItems = (existingReport?.items || []).filter(
+    (item) => !completedClassKeys.has(buildSavedClassKey(item.classTime, item.className))
+  );
+
+  const mergedItems = [...preservedItems, ...normalizedItems];
+
+  const savedClassesMap = new Map(
+    (existingReport?.savedClasses || []).map((savedClass) => [
+      buildSavedClassKey(savedClass.classTime, savedClass.className),
+      savedClass,
+    ])
+  );
+
+  for (const classItem of normalizedCompletedClasses) {
+    savedClassesMap.set(buildSavedClassKey(classItem.classTime, classItem.className), {
+      className: classItem.className,
+      classTime: classItem.classTime,
+      savedBy: updatedBy,
+      savedAt: new Date(),
+    });
+  }
+
   const report = await ClassReport.findOneAndUpdate(
     {
       center: centerId,
@@ -1460,7 +1527,8 @@ async function saveClassReport(data) {
         instructorName: String(instructorName || '').trim(),
         instructorUser: instructorUserId || null,
         period,
-        items: normalizedItems,
+        items: mergedItems,
+        savedClasses: Array.from(savedClassesMap.values()),
         updatedBy,
         submittedAt: new Date(),
       },
