@@ -22,6 +22,7 @@ const {
   deleteCenterRecurringIncentiveRule,
   applyRecurringIncentivesForMonth,
   getCenterPayroll,
+  getCenterMonthlyOvertimeSummary,
   upsertCenterPayrollEntry,
   deleteCenterPayrollEntry,
   getCenterShifts,
@@ -88,6 +89,7 @@ router.put('/:id/recurring-incentive-rules/:ruleId', authorizeRoles('admin'), up
 router.delete('/:id/recurring-incentive-rules/:ruleId', authorizeRoles('admin'), deleteCenterRecurringIncentiveRule);
 router.post('/:id/recurring-incentives/apply', authorizeRoles('admin'), applyRecurringIncentivesForMonth);
 router.get('/:id/payroll', authorizeRoles('admin'), getCenterPayroll);
+router.get('/:id/overtime-summary', authorizeRoles('admin'), getCenterMonthlyOvertimeSummary);
 router.post('/:id/payroll', authorizeRoles('admin'), upsertCenterPayrollEntry);
 router.delete('/:id/payroll/:entryId', authorizeRoles('admin'), deleteCenterPayrollEntry);
 

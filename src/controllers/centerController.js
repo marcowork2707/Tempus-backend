@@ -10,11 +10,155 @@ const VacationConflictRule = require('../models/VacationConflictRule');
 const ExtraIncentive = require('../models/ExtraIncentive');
 const RecurringIncentiveRule = require('../models/RecurringIncentiveRule');
 const PayrollEntry = require('../models/PayrollEntry');
+const TimeEntry = require('../models/TimeEntry');
 const Checklist = require('../models/Checklist');
 const ErrorHandler = require('../utils/errorHandler');
 const catchAsyncErrors = require('../utils/catchAsyncErrors');
 
 const hasResolvedUser = (record) => Boolean(record?.user && record.user._id);
+const OVERTIME_AGGREGATION_MODES = ['net', 'positive_only'];
+
+const startOfDayLocal = (date) => {
+  const value = new Date(date);
+  value.setHours(0, 0, 0, 0);
+  return value;
+};
+
+const endOfDayLocal = (date) => {
+  const value = startOfDayLocal(date);
+  value.setDate(value.getDate() + 1);
+  return value;
+};
+
+const formatLocalDateKey = (date) => {
+  const value = startOfDayLocal(date);
+  const year = value.getFullYear();
+  const month = String(value.getMonth() + 1).padStart(2, '0');
+  const day = String(value.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+};
+
+const getStartOfIsoWeek = (date) => {
+  const value = startOfDayLocal(date);
+  const day = value.getDay();
+  value.setDate(value.getDate() + (day === 0 ? -6 : 1 - day));
+  return value;
+};
+
+const addDaysLocal = (date, days) => {
+  const value = new Date(date);
+  value.setDate(value.getDate() + days);
+  return value;
+};
+
+const formatMinutesForLabel = (minutes) => {
+  const safeMinutes = Math.abs(Math.round(minutes || 0));
+  const hours = Math.floor(safeMinutes / 60);
+  const restMinutes = safeMinutes % 60;
+  return `${hours}h ${restMinutes}m`;
+};
+
+const parseMonthRange = (month) => {
+  if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(month || '')) {
+    throw new ErrorHandler('month must be YYYY-MM', 400);
+  }
+
+  const [yearString, monthString] = month.split('-');
+  const year = Number(yearString);
+  const monthIndex = Number(monthString) - 1;
+  const monthStart = new Date(year, monthIndex, 1);
+  const monthEnd = new Date(year, monthIndex + 1, 0);
+  return { monthStart, monthEnd };
+};
+
+const buildWeeklyOvertimeSummaries = ({ month, assignments, entries, aggregationMode }) => {
+  const { monthStart, monthEnd } = parseMonthRange(month);
+  const rangeStart = getStartOfIsoWeek(monthStart);
+  const rangeEnd = addDaysLocal(getStartOfIsoWeek(monthEnd), 6);
+  const entriesByUser = new Map();
+
+  for (const entry of entries) {
+    if (!entry.user?._id) continue;
+    const userId = entry.user._id.toString();
+    if (!entriesByUser.has(userId)) entriesByUser.set(userId, []);
+    entriesByUser.get(userId).push(entry);
+  }
+
+  const summaries = assignments.map((assignment) => {
+    const userId = assignment.user._id.toString();
+    const weeklyContractHours = Number(assignment.weeklyContractHours);
+    const weeklyContractMinutes = Number.isFinite(weeklyContractHours) && weeklyContractHours > 0
+      ? Math.round(weeklyContractHours * 60)
+      : 0;
+    const userEntries = entriesByUser.get(userId) || [];
+    const workedMinutesInMonth = userEntries.reduce((total, entry) => {
+      const entryDate = startOfDayLocal(entry.date);
+      if (entryDate < monthStart || entryDate > monthEnd) return total;
+      return total + Number(entry.duration || 0);
+    }, 0);
+    const weeks = [];
+
+    let cursor = new Date(rangeStart);
+    while (cursor <= rangeEnd) {
+      const weekStart = new Date(cursor);
+      const weekEnd = addDaysLocal(weekStart, 6);
+      const intersectsMonth = weekEnd >= monthStart && weekStart <= monthEnd;
+
+      if (intersectsMonth) {
+        const weekEntries = userEntries.filter((entry) => {
+          const entryDate = startOfDayLocal(entry.date);
+          return entryDate >= weekStart && entryDate <= weekEnd;
+        });
+        const workedMinutes = weekEntries.reduce((total, entry) => total + Number(entry.duration || 0), 0);
+        const deltaMinutes = weeklyContractMinutes > 0 ? workedMinutes - weeklyContractMinutes : 0;
+        const countedExtraMinutes = aggregationMode === 'net'
+          ? deltaMinutes
+          : Math.max(0, deltaMinutes);
+
+        weeks.push({
+          weekStart: formatLocalDateKey(weekStart),
+          weekEnd: formatLocalDateKey(weekEnd),
+          workedMinutes,
+          theoreticalMinutes: weeklyContractMinutes,
+          deltaMinutes,
+          countedExtraMinutes,
+          workedLabel: formatMinutesForLabel(workedMinutes),
+          theoreticalLabel: formatMinutesForLabel(weeklyContractMinutes),
+          deltaLabel: `${deltaMinutes > 0 ? '+' : deltaMinutes < 0 ? '-' : ''}${formatMinutesForLabel(deltaMinutes)}`,
+          countedExtraLabel: `${countedExtraMinutes > 0 ? '+' : countedExtraMinutes < 0 ? '-' : ''}${formatMinutesForLabel(countedExtraMinutes)}`,
+        });
+      }
+
+      cursor = addDaysLocal(cursor, 7);
+    }
+
+    const totalTheoreticalMinutes = weeks.reduce((total, week) => total + week.theoreticalMinutes, 0);
+    const totalExtraMinutes = weeks.reduce((total, week) => total + week.countedExtraMinutes, 0);
+    const totalDeltaMinutes = weeks.reduce((total, week) => total + week.deltaMinutes, 0);
+
+    return {
+      user: {
+        _id: assignment.user._id,
+        name: assignment.user.name,
+        email: assignment.user.email,
+      },
+      weeklyContractHours: weeklyContractHours || null,
+      weeklyContractMinutes,
+      configurationMissing: weeklyContractMinutes <= 0,
+      totalWorkedMinutes: workedMinutesInMonth,
+      totalTheoreticalMinutes,
+      totalExtraMinutes,
+      totalDeltaMinutes,
+      totalWorkedLabel: formatMinutesForLabel(workedMinutesInMonth),
+      totalTheoreticalLabel: formatMinutesForLabel(totalTheoreticalMinutes),
+      totalExtraLabel: `${totalExtraMinutes > 0 ? '+' : totalExtraMinutes < 0 ? '-' : ''}${formatMinutesForLabel(totalExtraMinutes)}`,
+      totalDeltaLabel: `${totalDeltaMinutes > 0 ? '+' : totalDeltaMinutes < 0 ? '-' : ''}${formatMinutesForLabel(totalDeltaMinutes)}`,
+      weeks,
+    };
+  });
+
+  return summaries.sort((left, right) => left.user.name.localeCompare(right.user.name, 'es'));
+};
 
 // Public centers list for registration flow
 exports.getPublicCenters = catchAsyncErrors(async (req, res, next) => {
@@ -87,7 +231,7 @@ exports.createCenter = catchAsyncErrors(async (req, res, next) => {
 
 // Update Center (Admin only)
 exports.updateCenter = catchAsyncErrors(async (req, res, next) => {
-  const { name, type, address, phone, email, active, aimharderKey } = req.body;
+  const { name, type, address, phone, email, active, aimharderKey, overtimeSettings } = req.body;
 
   let center = await Center.findById(req.params.id);
 
@@ -102,6 +246,18 @@ exports.updateCenter = catchAsyncErrors(async (req, res, next) => {
   if (email) center.email = email;
   if (aimharderKey !== undefined) center.aimharderKey = aimharderKey;
   if (active !== undefined) center.active = active;
+  if (overtimeSettings && typeof overtimeSettings === 'object') {
+    const nextAggregationMode = overtimeSettings.monthlyAggregationMode;
+    if (nextAggregationMode !== undefined) {
+      if (!OVERTIME_AGGREGATION_MODES.includes(nextAggregationMode)) {
+        return next(new ErrorHandler('Invalid overtime monthlyAggregationMode', 400));
+      }
+      center.overtimeSettings = {
+        ...(center.overtimeSettings || {}),
+        monthlyAggregationMode: nextAggregationMode,
+      };
+    }
+  }
 
   await center.save();
 
@@ -171,7 +327,7 @@ exports.getCenterUsers = catchAsyncErrors(async (req, res, next) => {
 
 // Assign a user to a center with a role
 exports.addUserToCenter = catchAsyncErrors(async (req, res, next) => {
-  const { userId, roleName } = req.body;
+  const { userId, roleName, weeklyContractHours } = req.body;
 
   if (!userId || !roleName) {
     return next(new ErrorHandler('userId and roleName are required', 400));
@@ -190,6 +346,9 @@ exports.addUserToCenter = catchAsyncErrors(async (req, res, next) => {
     user: userId,
     center: req.params.id,
     role: role._id,
+    weeklyContractHours: weeklyContractHours === undefined || weeklyContractHours === null || weeklyContractHours === ''
+      ? null
+      : Number(weeklyContractHours),
   });
 
   const populated = await assignment.populate([
@@ -202,24 +361,99 @@ exports.addUserToCenter = catchAsyncErrors(async (req, res, next) => {
 
 // Update user's role in a center
 exports.updateUserCenterRole = catchAsyncErrors(async (req, res, next) => {
-  const { roleName } = req.body;
+  const { roleName, weeklyContractHours } = req.body;
+  if (roleName === undefined && weeklyContractHours === undefined) {
+    return next(new ErrorHandler('Provide roleName or weeklyContractHours', 400));
+  }
 
-  if (!roleName) return next(new ErrorHandler('roleName is required', 400));
+  const assignment = await UserCenterRole.findOne({ user: req.params.userId, center: req.params.id });
+  if (!assignment) return next(new ErrorHandler('Assignment not found', 404));
 
-  const role = await Role.findOne({ name: roleName });
-  if (!role) return next(new ErrorHandler(`Role '${roleName}' not found`, 404));
+  if (roleName !== undefined) {
+    const role = await Role.findOne({ name: roleName });
+    if (!role) return next(new ErrorHandler(`Role '${roleName}' not found`, 404));
+    assignment.role = role._id;
+  }
 
-  const assignment = await UserCenterRole.findOneAndUpdate(
-    { user: req.params.userId, center: req.params.id },
-    { role: role._id },
-    { new: true }
-  )
+  if (weeklyContractHours !== undefined) {
+    if (weeklyContractHours === null || weeklyContractHours === '') {
+      assignment.weeklyContractHours = null;
+    } else {
+      const parsedWeeklyContractHours = Number(weeklyContractHours);
+      if (!Number.isFinite(parsedWeeklyContractHours) || parsedWeeklyContractHours < 0) {
+        return next(new ErrorHandler('weeklyContractHours must be a valid number >= 0', 400));
+      }
+      assignment.weeklyContractHours = Number(parsedWeeklyContractHours.toFixed(2));
+    }
+  }
+
+  await assignment.save();
+
+  const populatedAssignment = await UserCenterRole.findById(assignment._id)
     .populate('user', 'name email active')
     .populate('role', 'name');
 
-  if (!assignment) return next(new ErrorHandler('Assignment not found', 404));
+  res.status(200).json({ success: true, assignment: populatedAssignment });
+});
 
-  res.status(200).json({ success: true, assignment });
+exports.getCenterMonthlyOvertimeSummary = catchAsyncErrors(async (req, res, next) => {
+  const center = await Center.findById(req.params.id);
+  if (!center) return next(new ErrorHandler('Center not found', 404));
+
+  const { month, userId } = req.query;
+  if (!month) {
+    return next(new ErrorHandler('month query param is required', 400));
+  }
+
+  const { monthStart, monthEnd } = parseMonthRange(month);
+  const queryStart = getStartOfIsoWeek(monthStart);
+  const queryEnd = addDaysLocal(getStartOfIsoWeek(monthEnd), 6);
+  const coachRole = await Role.findOne({ name: 'coach' });
+  if (!coachRole) {
+    return next(new ErrorHandler('Coach role not found', 404));
+  }
+
+  const assignmentFilter = {
+    center: req.params.id,
+    role: coachRole._id,
+    active: true,
+  };
+  if (userId) assignmentFilter.user = userId;
+
+  const assignments = await UserCenterRole.find(assignmentFilter)
+    .populate('user', 'name email active')
+    .populate('role', 'name');
+
+  const validAssignments = assignments.filter((assignment) => Boolean(assignment.user?._id));
+  const userIds = validAssignments.map((assignment) => assignment.user._id);
+  const entries = userIds.length === 0
+    ? []
+    : await TimeEntry.find({
+        center: req.params.id,
+        user: { $in: userIds },
+        date: {
+          $gte: queryStart,
+          $lt: endOfDayLocal(queryEnd),
+        },
+        status: 'completed',
+      })
+        .populate('user', 'name email')
+        .sort({ date: 1, entryTime: 1 });
+
+  const aggregationMode = center.overtimeSettings?.monthlyAggregationMode || 'positive_only';
+  const summaries = buildWeeklyOvertimeSummaries({
+    month,
+    assignments: validAssignments,
+    entries,
+    aggregationMode,
+  });
+
+  res.status(200).json({
+    success: true,
+    month,
+    aggregationMode,
+    summaries,
+  });
 });
 
 // Remove a user from a center

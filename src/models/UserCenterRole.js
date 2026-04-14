@@ -21,6 +21,11 @@ const userCenterRoleSchema = new mongoose.Schema(
       type: Boolean,
       default: true,
     },
+    weeklyContractHours: {
+      type: Number,
+      min: [0, 'weeklyContractHours cannot be negative'],
+      default: null,
+    },
   },
   { timestamps: true }
 );

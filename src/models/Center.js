@@ -52,6 +52,13 @@ const centerSchema = new mongoose.Schema(
         ],
       },
     },
+    overtimeSettings: {
+      monthlyAggregationMode: {
+        type: String,
+        enum: ['net', 'positive_only'],
+        default: 'positive_only',
+      },
+    },
   },
   { timestamps: true }
 );
