@@ -1235,7 +1235,10 @@ async function getClassReportContext(dateStr = null, centerId, userName = '', is
 
     await openReservationsDay(page, targetDate, config);
     const reservationClasses = await parseReservationsHtmlForClassReports(page);
-    const normalizedUserName = normalizeName(userName);
+    const userNameCandidates = Array.isArray(userName) ? userName : [userName];
+    const normalizedUserNames = userNameCandidates
+      .map((value) => normalizeName(value))
+      .filter(Boolean);
     const now = new Date();
     const nowMinutes = (now.getHours() * 60) + now.getMinutes();
     const isToday = targetDateStr === toDateString(new Date());
@@ -1243,7 +1246,7 @@ async function getClassReportContext(dateStr = null, centerId, userName = '', is
     const filteredClasses = isAdmin
       ? reservationClasses
       : reservationClasses.filter((item) => {
-          return namesLikelyMatch(item.instructorName, normalizedUserName);
+          return normalizedUserNames.some((candidate) => namesLikelyMatch(item.instructorName, candidate));
         });
 
     const savedReports = await ClassReport.find({ center: centerId, date: targetDateStr }).lean();

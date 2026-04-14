@@ -27,6 +27,38 @@ function normalizeName(value = '') {
     .toLowerCase();
 }
 
+function namesLikelyMatch(left = '', right = '') {
+  const normalizedLeft = normalizeName(left);
+  const normalizedRight = normalizeName(right);
+
+  if (!normalizedLeft || !normalizedRight) return false;
+  if (normalizedLeft === normalizedRight) return true;
+  if (normalizedLeft.includes(normalizedRight) || normalizedRight.includes(normalizedLeft)) return true;
+
+  const leftTokens = normalizedLeft.split(' ').filter(Boolean);
+  const rightTokens = normalizedRight.split(' ').filter(Boolean);
+  const commonTokens = leftTokens.filter((token) => rightTokens.includes(token));
+
+  return commonTokens.length >= Math.min(2, leftTokens.length, rightTokens.length);
+}
+
+function buildUserNameCandidates(user) {
+  if (!user) return [];
+
+  return Array.from(
+    new Set(
+      [
+        user.name,
+        user.nickname,
+        [user.firstName, user.lastName].filter(Boolean).join(' '),
+        user.firstName,
+      ]
+        .map((value) => String(value || '').trim())
+        .filter(Boolean)
+    )
+  );
+}
+
 /**
  * GET /api/aimharder/absences?date=YYYY-MM-DD
  * Si no se pasa date, devuelve las ausencias de ayer.
@@ -223,9 +255,9 @@ exports.getClassReports = async (req, res) => {
       }
     }
 
-    const currentUser = await User.findById(req.user.id).select('name');
-    const allowAllReports = req.user.role === 'admin' || includeAll === 'true';
-    const result = await getClassReportContext(date || null, centerId, currentUser?.name || '', allowAllReports, req.user.id);
+    const currentUser = await User.findById(req.user.id).select('name nickname firstName lastName');
+    const allowAllReports = includeAll === 'true';
+    const result = await getClassReportContext(date || null, centerId, buildUserNameCandidates(currentUser), allowAllReports, req.user.id);
 
     res.json({
       success: true,
@@ -296,8 +328,11 @@ exports.saveClassReport = async (req, res) => {
       }
     }
 
-    const currentUser = await User.findById(req.user.id).select('name');
-    if (req.user.role !== 'admin' && currentUser?.name && normalizeName(currentUser.name) !== normalizeName(instructorName)) {
+    const currentUser = await User.findById(req.user.id).select('name nickname firstName lastName');
+    const userNameCandidates = buildUserNameCandidates(currentUser);
+    const canSaveOwnReport = userNameCandidates.some((candidate) => namesLikelyMatch(candidate, instructorName));
+
+    if (req.user.role !== 'admin' && !canSaveOwnReport) {
       return res.status(403).json({ success: false, message: 'Solo puedes guardar avisos de tus propias clases' });
     }
 
