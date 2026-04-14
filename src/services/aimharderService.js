@@ -1330,13 +1330,26 @@ async function upsertClassReportRoster(centerId, date, reports = []) {
   );
 }
 
-async function getClassReportStatus(dateStr = null, centerId) {
+async function getClassReportStatus(dateStr = null, centerId, options = {}) {
   const targetDate = dateStr || toDateString(new Date());
+  const { initialize = false } = options;
 
   let roster = await ClassReportRoster.findOne({ center: centerId, date: targetDate }).lean();
-  if (!roster) {
+  if (!roster && initialize) {
     const context = await getClassReportContext(targetDate, centerId, '', true, null);
     roster = (await upsertClassReportRoster(centerId, context.date, context.reports || [])).toObject();
+  }
+
+  if (!roster) {
+    return {
+      date: targetDate,
+      done: false,
+      totalInstructors: 0,
+      completedInstructors: 0,
+      instructors: [],
+      rosterRefreshedAt: null,
+      initialized: false,
+    };
   }
 
   const savedReports = await ClassReport.find({ center: centerId, date: targetDate }).lean();
@@ -1378,6 +1391,7 @@ async function getClassReportStatus(dateStr = null, centerId) {
     completedInstructors,
     instructors,
     rosterRefreshedAt: roster.refreshedAt || roster.updatedAt || null,
+    initialized: true,
   };
 }
 

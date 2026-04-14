@@ -243,7 +243,7 @@ exports.getClassReports = async (req, res) => {
 
 exports.getClassReportStatus = async (req, res) => {
   try {
-    const { centerId, date } = req.query;
+    const { centerId, date, initialize } = req.query;
     if (!centerId) {
       return res.status(400).json({ success: false, message: 'centerId es obligatorio' });
     }
@@ -260,7 +260,9 @@ exports.getClassReportStatus = async (req, res) => {
       }
     }
 
-    const result = await getClassReportStatus(date || null, centerId);
+    const result = await getClassReportStatus(date || null, centerId, {
+      initialize: initialize === 'true',
+    });
     res.json({
       success: true,
       ...result,
