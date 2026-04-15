@@ -14,6 +14,7 @@ const {
   setClassReportHandoff,
   getTpvRedsysPayments,
   getPendingPaymentsNoTpv,
+  getOccupancyReport,
 } = require('../controllers/aimharderController');
 const { isAuthenticatedUser, authorizeRoles } = require('../middleware/auth');
 
@@ -38,5 +39,6 @@ router.post('/class-reports/reset', isAuthenticatedUser, authorizeRoles('admin')
 router.put('/class-reports/handoff', isAuthenticatedUser, setClassReportHandoff);
 router.get('/tpv-redsys-payments', isAuthenticatedUser, getTpvRedsysPayments);
 router.get('/pending-payments-no-tpv', isAuthenticatedUser, getPendingPaymentsNoTpv);
+router.get('/occupancy-report', isAuthenticatedUser, authorizeRoles('admin'), getOccupancyReport);
 
 module.exports = router;

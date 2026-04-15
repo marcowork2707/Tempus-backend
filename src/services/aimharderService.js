@@ -1784,6 +1784,16 @@ async function getStoredAbsences(dateStr = null, centerId) {
   return snapshot?.absences || [];
 }
 
+async function getAbsenceSnapshotsRange(startDateStr, endDateStr, centerId) {
+  const snapshots = await AttendanceAbsenceSnapshot.find({
+    center: centerId,
+    date: { $gte: startDateStr, $lte: endDateStr },
+  })
+    .sort({ date: 1 })
+    .lean();
+  return snapshots.map((s) => ({ date: s.date, absences: s.absences || [] }));
+}
+
 async function getStoredOccupancy(startDateStr = null, endDateStr = null, centerId) {
   if (startDateStr && endDateStr) {
     const snapshots = await CenterOccupancySnapshot.find({
@@ -2258,6 +2268,7 @@ async function getPendingPaymentsWithoutTPVError(centerId) {
 module.exports = {
   getAbsences,
   getStoredAbsences,
+  getAbsenceSnapshotsRange,
   refreshAndStoreAbsences,
   getStoredOccupancy,
   refreshAndStoreOccupancy,

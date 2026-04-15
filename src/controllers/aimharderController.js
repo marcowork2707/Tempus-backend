@@ -2,6 +2,7 @@ const {
   syncActiveClients,
   clearSessionCache,
   getStoredAbsences,
+  getAbsenceSnapshotsRange,
   refreshAndStoreAbsences,
   getStoredOccupancy,
   refreshAndStoreOccupancy,
@@ -498,6 +499,147 @@ exports.getPendingPaymentsNoTpv = async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Error al obtener los pagos pendientes sin fallo TPV de AimHarder.',
+      detail: process.env.NODE_ENV === 'development' ? err.message : undefined,
+    });
+  }
+};
+
+/**
+ * GET /api/aimharder/occupancy-report?centerId=X&startDate=YYYY-MM-DD&endDate=YYYY-MM-DD
+ * Aggregated occupancy stats for admin reports dashboard.
+ */
+exports.getOccupancyReport = async (req, res) => {
+  try {
+    const { centerId, startDate, endDate } = req.query;
+
+    if (!centerId) {
+      return res.status(400).json({ success: false, message: 'centerId es obligatorio' });
+    }
+    if (!startDate || !endDate) {
+      return res.status(400).json({ success: false, message: 'startDate y endDate son obligatorios' });
+    }
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(startDate) || !/^\d{4}-\d{2}-\d{2}$/.test(endDate)) {
+      return res.status(400).json({ success: false, message: 'Formato de fecha inválido. Usa YYYY-MM-DD' });
+    }
+    if (startDate > endDate) {
+      return res.status(400).json({ success: false, message: 'startDate debe ser anterior a endDate' });
+    }
+
+    const avg = (arr) => (arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : 0);
+    const sum = (arr) => arr.reduce((a, b) => a + b, 0);
+
+    const [snapshots, absenceSnaps] = await Promise.all([
+      getStoredOccupancy(startDate, endDate, centerId),
+      getAbsenceSnapshotsRange(startDate, endDate, centerId),
+    ]);
+
+    const absenceByDate = new Map(absenceSnaps.map((s) => [s.date, s.absences.length]));
+
+    // ── Daily aggregation ──────────────────────────────────────────────
+    const daily = snapshots.map((snap) => {
+      const classes = (snap.classes || []).filter((c) => c.capacity > 0);
+      return {
+        date: snap.date,
+        avgOccupancy: Math.round(avg(classes.map((c) => c.occupancyRate))),
+        avgAttendance: Math.round(avg(classes.map((c) => c.attendanceRate))),
+        totalBooked: sum(classes.map((c) => c.bookedCount)),
+        totalAttended: sum(classes.map((c) => c.attendanceCount)),
+        totalNoShows: sum(classes.map((c) => c.noShowCount)),
+        totalWaitlist: sum(classes.map((c) => c.waitlistCount)),
+        classCount: classes.length,
+        absenceCount: absenceByDate.get(snap.date) ?? 0,
+      };
+    });
+
+    // ── Per class-name aggregation ─────────────────────────────────────
+    const classMap = new Map();
+    for (const snap of snapshots) {
+      for (const cls of snap.classes) {
+        if (!cls.className) continue;
+        if (!classMap.has(cls.className)) classMap.set(cls.className, []);
+        classMap.get(cls.className).push(cls);
+      }
+    }
+    const byClass = [...classMap.entries()]
+      .map(([className, records]) => {
+        const valid = records.filter((r) => r.capacity > 0);
+        return {
+          className,
+          avgOccupancy: Math.round(avg(valid.map((r) => r.occupancyRate))),
+          avgAttendance: Math.round(avg(valid.map((r) => r.attendanceRate))),
+          avgBooked: Math.round(avg(records.map((r) => r.bookedCount))),
+          totalClasses: records.length,
+        };
+      })
+      .sort((a, b) => b.avgOccupancy - a.avgOccupancy);
+
+    // ── Per instructor aggregation ─────────────────────────────────────
+    const instructorMap = new Map();
+    for (const snap of snapshots) {
+      for (const cls of snap.classes) {
+        if (!cls.instructorName) continue;
+        if (!instructorMap.has(cls.instructorName)) instructorMap.set(cls.instructorName, []);
+        instructorMap.get(cls.instructorName).push(cls);
+      }
+    }
+    const byInstructor = [...instructorMap.entries()]
+      .map(([instructorName, records]) => {
+        const valid = records.filter((r) => r.capacity > 0);
+        return {
+          instructorName,
+          avgOccupancy: Math.round(avg(valid.map((r) => r.occupancyRate))),
+          avgAttendance: Math.round(avg(valid.map((r) => r.attendanceRate))),
+          totalClasses: records.length,
+        };
+      })
+      .sort((a, b) => b.totalClasses - a.totalClasses);
+
+    // ── Per hour-slot aggregation ──────────────────────────────────────
+    const hourMap = new Map();
+    for (const snap of snapshots) {
+      for (const cls of snap.classes) {
+        const hour = cls.classTime ? cls.classTime.split(':')[0].padStart(2, '0') : '00';
+        if (!hourMap.has(hour)) hourMap.set(hour, []);
+        hourMap.get(hour).push(cls);
+      }
+    }
+    const byHour = [...hourMap.entries()]
+      .map(([hour, records]) => {
+        const valid = records.filter((r) => r.capacity > 0);
+        return {
+          hour: `${hour}:00`,
+          avgOccupancy: Math.round(avg(valid.map((r) => r.occupancyRate))),
+          avgBooked: Math.round(avg(records.map((r) => r.bookedCount))),
+          classCount: records.length,
+        };
+      })
+      .sort((a, b) => a.hour.localeCompare(b.hour));
+
+    // ── Overall summary KPIs ───────────────────────────────────────────
+    const allValid = snapshots.flatMap((s) => s.classes).filter((c) => c.capacity > 0);
+    const peakDay = daily.length ? daily.reduce((a, b) => (a.avgOccupancy >= b.avgOccupancy ? a : b)) : null;
+    const worstDay = daily.length ? daily.reduce((a, b) => (a.avgOccupancy <= b.avgOccupancy ? a : b)) : null;
+
+    const summary = {
+      totalDays: snapshots.length,
+      totalClasses: allValid.length,
+      avgOccupancy: Math.round(avg(allValid.map((c) => c.occupancyRate))),
+      avgAttendance: Math.round(avg(allValid.map((c) => c.attendanceRate))),
+      totalBooked: sum(allValid.map((c) => c.bookedCount)),
+      totalAttended: sum(allValid.map((c) => c.attendanceCount)),
+      totalNoShows: sum(allValid.map((c) => c.noShowCount)),
+      totalWaitlist: sum(allValid.map((c) => c.waitlistCount)),
+      totalAbsences: absenceSnaps.reduce((acc, s) => acc + s.absences.length, 0),
+      peakDay: peakDay ? { date: peakDay.date, value: peakDay.avgOccupancy } : null,
+      worstDay: worstDay ? { date: worstDay.date, value: worstDay.avgOccupancy } : null,
+    };
+
+    res.json({ success: true, summary, daily, byClass, byInstructor, byHour });
+  } catch (err) {
+    console.error('[AimHarder Controller] Error getOccupancyReport:', err.message);
+    res.status(500).json({
+      success: false,
+      message: 'Error al generar el informe de ocupación.',
       detail: process.env.NODE_ENV === 'development' ? err.message : undefined,
     });
   }
