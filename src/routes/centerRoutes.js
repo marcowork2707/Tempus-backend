@@ -25,6 +25,10 @@ const {
   getCenterMonthlyOvertimeSummary,
   upsertCenterPayrollEntry,
   deleteCenterPayrollEntry,
+  getCenterExpensesSummary,
+  createCenterExpense,
+  updateCenterExpense,
+  deleteCenterExpense,
   getCenterShifts,
   createShift,
   updateShift,
@@ -92,6 +96,10 @@ router.get('/:id/payroll', authorizeRoles('admin'), getCenterPayroll);
 router.get('/:id/overtime-summary', authorizeRoles('admin'), getCenterMonthlyOvertimeSummary);
 router.post('/:id/payroll', authorizeRoles('admin'), upsertCenterPayrollEntry);
 router.delete('/:id/payroll/:entryId', authorizeRoles('admin'), deleteCenterPayrollEntry);
+router.get('/:id/expenses', authorizeRoles('admin'), getCenterExpensesSummary);
+router.post('/:id/expenses', authorizeRoles('admin'), createCenterExpense);
+router.put('/:id/expenses/:expenseId', authorizeRoles('admin'), updateCenterExpense);
+router.delete('/:id/expenses/:expenseId', authorizeRoles('admin'), deleteCenterExpense);
 
 // ─── Shift definitions ──────────────────────────────────────────────────────
 router.get('/:id/shifts', authorizeRoles('admin'), getCenterShifts);

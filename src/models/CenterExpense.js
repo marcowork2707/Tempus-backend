@@ -1,0 +1,75 @@
+const mongoose = require('mongoose');
+
+const centerExpenseSchema = new mongoose.Schema(
+  {
+    center: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Center',
+      required: true,
+      index: true,
+    },
+    date: {
+      type: String,
+      required: true,
+      match: /^\d{4}-(0[1-9]|[12]\d|3[01])$/,
+      index: true,
+    },
+    month: {
+      type: String,
+      required: true,
+      match: /^\d{4}-(0[1-9]|1[0-2])$/,
+      index: true,
+    },
+    concept: {
+      type: String,
+      required: true,
+      trim: true,
+      maxlength: 120,
+    },
+    category: {
+      type: String,
+      required: true,
+      trim: true,
+      maxlength: 60,
+      default: 'General',
+    },
+    amount: {
+      type: Number,
+      required: true,
+      min: 0,
+    },
+    paymentMethod: {
+      type: String,
+      trim: true,
+      maxlength: 40,
+      default: '',
+    },
+    supplier: {
+      type: String,
+      trim: true,
+      maxlength: 100,
+      default: '',
+    },
+    notes: {
+      type: String,
+      trim: true,
+      maxlength: 400,
+      default: '',
+    },
+    createdBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'User',
+      required: true,
+    },
+    updatedBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'User',
+      default: null,
+    },
+  },
+  { timestamps: true }
+);
+
+centerExpenseSchema.index({ center: 1, month: 1, date: 1 });
+
+module.exports = mongoose.model('CenterExpense', centerExpenseSchema);

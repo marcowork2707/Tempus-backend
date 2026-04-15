@@ -10,6 +10,7 @@ const VacationConflictRule = require('../models/VacationConflictRule');
 const ExtraIncentive = require('../models/ExtraIncentive');
 const RecurringIncentiveRule = require('../models/RecurringIncentiveRule');
 const PayrollEntry = require('../models/PayrollEntry');
+const CenterExpense = require('../models/CenterExpense');
 const TimeEntry = require('../models/TimeEntry');
 const Checklist = require('../models/Checklist');
 const ErrorHandler = require('../utils/errorHandler');
@@ -769,6 +770,54 @@ function monthInRange(month, startMonth, endMonth) {
   return true;
 }
 
+function assertMonthFormat(month) {
+  if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(month || '')) {
+    throw new ErrorHandler('month must be in format YYYY-MM', 400);
+  }
+}
+
+function assertDateFormat(date) {
+  if (!/^\d{4}-(0[1-9]|[12]\d|3[01])$/.test(date || '')) {
+    throw new ErrorHandler('date must be in format YYYY-MM-DD', 400);
+  }
+}
+
+function monthFromDate(date) {
+  return String(date).slice(0, 7);
+}
+
+function buildExpensesSummary({ manualExpenses, salaryExpenses }) {
+  const manualTotal = manualExpenses.reduce((total, item) => total + Number(item.amount || 0), 0);
+  const salaryTotal = salaryExpenses.reduce((total, item) => total + Number(item.amount || 0), 0);
+  const total = manualTotal + salaryTotal;
+
+  const byCategoryMap = new Map();
+  for (const item of manualExpenses) {
+    const category = item.category || 'General';
+    const current = byCategoryMap.get(category) || { category, amount: 0, count: 0 };
+    current.amount += Number(item.amount || 0);
+    current.count += 1;
+    byCategoryMap.set(category, current);
+  }
+
+  const byCategory = Array.from(byCategoryMap.values())
+    .map((row) => ({
+      ...row,
+      percentage: manualTotal > 0 ? Number(((row.amount / manualTotal) * 100).toFixed(2)) : 0,
+    }))
+    .sort((a, b) => b.amount - a.amount);
+
+  return {
+    manualTotal: Number(manualTotal.toFixed(2)),
+    salaryTotal: Number(salaryTotal.toFixed(2)),
+    total: Number(total.toFixed(2)),
+    manualCount: manualExpenses.length,
+    salaryCount: salaryExpenses.length,
+    averageManualExpense: manualExpenses.length > 0 ? Number((manualTotal / manualExpenses.length).toFixed(2)) : 0,
+    byCategory,
+  };
+}
+
 exports.applyRecurringIncentivesForMonth = catchAsyncErrors(async (req, res, next) => {
   const center = await Center.findById(req.params.id);
   if (!center) return next(new ErrorHandler('Center not found', 404));
@@ -903,6 +952,146 @@ exports.deleteCenterPayrollEntry = catchAsyncErrors(async (req, res, next) => {
   if (!deleted) return next(new ErrorHandler('Payroll entry not found', 404));
 
   res.status(200).json({ success: true, message: 'Payroll entry deleted' });
+});
+
+exports.getCenterExpensesSummary = catchAsyncErrors(async (req, res, next) => {
+  const center = await Center.findById(req.params.id);
+  if (!center) return next(new ErrorHandler('Center not found', 404));
+
+  const month = typeof req.query.month === 'string' && req.query.month
+    ? req.query.month
+    : new Date().toISOString().slice(0, 7);
+  assertMonthFormat(month);
+
+  const [manualExpenses, payrollEntries] = await Promise.all([
+    CenterExpense.find({ center: req.params.id, month })
+      .populate('createdBy', 'name email')
+      .populate('updatedBy', 'name email')
+      .sort({ date: 1, createdAt: 1 }),
+    PayrollEntry.find({ center: req.params.id, month })
+      .populate('user', 'name email active')
+      .sort({ createdAt: 1 }),
+  ]);
+
+  const safePayrollEntries = payrollEntries.filter((entry) => Boolean(entry.user));
+  const salaryExpenses = safePayrollEntries.map((entry) => ({
+    _id: `salary-${entry._id}`,
+    sourceType: 'salary',
+    payrollEntryId: entry._id,
+    month: entry.month,
+    date: `${entry.month}-01`,
+    category: 'Sueldos',
+    concept: `Sueldo ${entry.user.name}`,
+    amount: Number(entry.grossSalary ?? entry.baseAmount ?? 0),
+    grossSalary: Number(entry.grossSalary ?? entry.baseAmount ?? 0),
+    netSalary: Number(entry.netSalary ?? entry.variableAmount ?? 0),
+    notes: entry.notes || '',
+    user: entry.user,
+    createdAt: entry.createdAt,
+  }));
+
+  const summary = buildExpensesSummary({
+    manualExpenses,
+    salaryExpenses,
+  });
+
+  res.status(200).json({
+    success: true,
+    month,
+    summary,
+    manualExpenses,
+    salaryExpenses,
+  });
+});
+
+exports.createCenterExpense = catchAsyncErrors(async (req, res, next) => {
+  const center = await Center.findById(req.params.id);
+  if (!center) return next(new ErrorHandler('Center not found', 404));
+
+  const { date, concept, category, amount, paymentMethod, supplier, notes } = req.body;
+
+  assertDateFormat(date);
+  if (!concept || !String(concept).trim()) {
+    return next(new ErrorHandler('concept is required', 400));
+  }
+
+  const parsedAmount = Number(amount);
+  if (!Number.isFinite(parsedAmount) || parsedAmount <= 0) {
+    return next(new ErrorHandler('amount must be a number greater than 0', 400));
+  }
+
+  const expense = await CenterExpense.create({
+    center: req.params.id,
+    date,
+    month: monthFromDate(date),
+    concept: String(concept).trim(),
+    category: String(category || 'General').trim(),
+    amount: Number(parsedAmount.toFixed(2)),
+    paymentMethod: paymentMethod ? String(paymentMethod).trim() : '',
+    supplier: supplier ? String(supplier).trim() : '',
+    notes: notes ? String(notes).trim() : '',
+    createdBy: req.user.id,
+    updatedBy: req.user.id,
+  });
+
+  const populated = await CenterExpense.findById(expense._id)
+    .populate('createdBy', 'name email')
+    .populate('updatedBy', 'name email');
+
+  res.status(201).json({ success: true, expense: populated });
+});
+
+exports.updateCenterExpense = catchAsyncErrors(async (req, res, next) => {
+  const expense = await CenterExpense.findOne({
+    _id: req.params.expenseId,
+    center: req.params.id,
+  });
+  if (!expense) return next(new ErrorHandler('Expense not found', 404));
+
+  const { date, concept, category, amount, paymentMethod, supplier, notes } = req.body;
+
+  if (date !== undefined) {
+    assertDateFormat(date);
+    expense.date = date;
+    expense.month = monthFromDate(date);
+  }
+  if (concept !== undefined) {
+    const normalizedConcept = String(concept).trim();
+    if (!normalizedConcept) return next(new ErrorHandler('concept cannot be empty', 400));
+    expense.concept = normalizedConcept;
+  }
+  if (category !== undefined) {
+    expense.category = String(category || 'General').trim() || 'General';
+  }
+  if (amount !== undefined) {
+    const parsedAmount = Number(amount);
+    if (!Number.isFinite(parsedAmount) || parsedAmount <= 0) {
+      return next(new ErrorHandler('amount must be a number greater than 0', 400));
+    }
+    expense.amount = Number(parsedAmount.toFixed(2));
+  }
+  if (paymentMethod !== undefined) expense.paymentMethod = String(paymentMethod || '').trim();
+  if (supplier !== undefined) expense.supplier = String(supplier || '').trim();
+  if (notes !== undefined) expense.notes = String(notes || '').trim();
+  expense.updatedBy = req.user.id;
+
+  await expense.save();
+
+  const populated = await CenterExpense.findById(expense._id)
+    .populate('createdBy', 'name email')
+    .populate('updatedBy', 'name email');
+
+  res.status(200).json({ success: true, expense: populated });
+});
+
+exports.deleteCenterExpense = catchAsyncErrors(async (req, res, next) => {
+  const deleted = await CenterExpense.findOneAndDelete({
+    _id: req.params.expenseId,
+    center: req.params.id,
+  });
+  if (!deleted) return next(new ErrorHandler('Expense not found', 404));
+
+  res.status(200).json({ success: true, message: 'Expense deleted' });
 });
 
 // ─── SHIFT DEFINITIONS ──────────────────────────────────────────────────────
