@@ -11,7 +11,7 @@ const centerExpenseSchema = new mongoose.Schema(
     date: {
       type: String,
       required: true,
-      match: /^\d{4}-(0[1-9]|[12]\d|3[01])$/,
+      match: /^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/,
       index: true,
     },
     month: {

@@ -777,7 +777,7 @@ function assertMonthFormat(month) {
 }
 
 function assertDateFormat(date) {
-  if (!/^\d{4}-(0[1-9]|[12]\d|3[01])$/.test(date || '')) {
+  if (!/^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/.test(date || '')) {
     throw new ErrorHandler('date must be in format YYYY-MM-DD', 400);
   }
 }
