@@ -80,6 +80,18 @@ const getOccurrenceMinutes = (occurrence) => {
   return getDurationFromTimes(occurrence.startTime, occurrence.endTime);
 };
 
+const isCreditedOffDayOverride = (override) => {
+  if (!override) return false;
+
+  const reasonType = String(override.reasonType || '').toLowerCase();
+  if (reasonType === 'vacation' || reasonType === 'holiday') return true;
+
+  if (!override.isOff) return false;
+
+  const labelAndNotes = `${override.label || ''} ${override.notes || ''}`.toLowerCase();
+  return labelAndNotes.includes('festivo') || labelAndNotes.includes('vacacion');
+};
+
 const buildOffDayCreditMap = ({ baseOccurrences, overrides }) => {
   const baseMinutesByKey = new Map();
   for (const occurrence of baseOccurrences) {
@@ -90,7 +102,7 @@ const buildOffDayCreditMap = ({ baseOccurrences, overrides }) => {
   const vacationMinutesByKey = new Map();
   for (const override of overrides) {
     if (!override.user?._id) continue;
-    if (override.reasonType !== 'vacation' && override.reasonType !== 'holiday') continue;
+    if (!isCreditedOffDayOverride(override)) continue;
     const key = `${override.user._id.toString()}|${formatLocalDateKey(override.date)}`;
     vacationMinutesByKey.set(key, baseMinutesByKey.get(key) || 0);
   }
@@ -507,7 +519,6 @@ exports.getCenterMonthlyOvertimeSummary = catchAsyncErrors(async (req, res, next
             $gte: queryStart,
             $lte: queryEnd,
           },
-          reasonType: { $in: ['vacation', 'holiday'] },
         }).populate('user', 'name email'),
       ]);
 
