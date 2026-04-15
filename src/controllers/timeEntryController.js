@@ -177,17 +177,20 @@ function applyOverrides(baseOccurrences, overrides) {
     if (!override.user?._id) continue;
     const date = formatLocalDate(override.date);
     const userId = override.user._id.toString();
+    const segments = override.isOff
+      ? []
+      : override.segments?.length
+        ? override.segments
+        : override.startTime && override.endTime
+          ? [{ startTime: override.startTime, endTime: override.endTime }]
+          : [];
     byKey.set(`${userId}|${date}`, {
       date,
       userId,
       shiftName: override.label || (override.isOff ? 'No laborable' : 'Turno'),
-      startTime: override.isOff ? '' : override.startTime || '',
-      endTime: override.isOff ? '' : override.endTime || '',
-      timeSegments: override.isOff
-        ? []
-        : override.startTime && override.endTime
-          ? [{ startTime: override.startTime, endTime: override.endTime }]
-          : [],
+      startTime: segments[0]?.startTime || '',
+      endTime: segments[segments.length - 1]?.endTime || '',
+      timeSegments: segments,
       notes: override.notes || '',
       isOff: !!override.isOff,
       reasonType: override.reasonType || 'custom',
@@ -382,6 +385,13 @@ exports.getTimeEntries = catchAsyncErrors(async (req, res, next) => {
             notes: planned.notes || '',
           }
         : null,
+      vacationCredit: planned?.reasonType === 'vacation'
+        ? {
+            minutes: plannedMinutes,
+            label: planned.shiftName || 'Vacaciones',
+            notes: planned.notes || '',
+          }
+        : null,
       workedMinutes,
       overtimeMinutes,
     };
@@ -397,7 +407,20 @@ exports.getTimeEntries = catchAsyncErrors(async (req, res, next) => {
     totalWorkedMinutes: 0,
     totalPlannedMinutes: 0,
     totalOvertimeMinutes: 0,
+    weeklyContractMinutes: null,
   });
+
+  if (filter.center && req.query.userId) {
+    const assignment = await UserCenterRole.findOne({
+      center: filter.center,
+      user: req.query.userId,
+      active: true,
+    }).lean();
+
+    if (assignment && assignment.weeklyContractHours !== null && assignment.weeklyContractHours !== undefined) {
+      summary.weeklyContractMinutes = Math.max(0, Math.round(Number(assignment.weeklyContractHours) * 60));
+    }
+  }
 
   res.status(200).json({ success: true, entries: enrichedEntries, summary });
 });

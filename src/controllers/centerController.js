@@ -58,6 +58,46 @@ const formatMinutesForLabel = (minutes) => {
   return `${hours}h ${restMinutes}m`;
 };
 
+const timeToMinutes = (timeString) => {
+  if (!timeString) return 0;
+  const [hours, minutes] = String(timeString).split(':').map(Number);
+  return (hours * 60) + minutes;
+};
+
+const getDurationFromTimes = (startTime, endTime) => {
+  if (!startTime || !endTime) return 0;
+  return Math.max(0, timeToMinutes(endTime) - timeToMinutes(startTime));
+};
+
+const getMinutesFromSegments = (segments = []) =>
+  segments.reduce((total, segment) => total + getDurationFromTimes(segment.startTime, segment.endTime), 0);
+
+const getOccurrenceMinutes = (occurrence) => {
+  if (!occurrence || occurrence.isOff) return 0;
+  if (Array.isArray(occurrence.timeSegments) && occurrence.timeSegments.length > 0) {
+    return getMinutesFromSegments(occurrence.timeSegments);
+  }
+  return getDurationFromTimes(occurrence.startTime, occurrence.endTime);
+};
+
+const buildVacationCreditMap = ({ baseOccurrences, overrides }) => {
+  const baseMinutesByKey = new Map();
+  for (const occurrence of baseOccurrences) {
+    const key = `${occurrence.userId}|${occurrence.date}`;
+    baseMinutesByKey.set(key, (baseMinutesByKey.get(key) || 0) + getOccurrenceMinutes(occurrence));
+  }
+
+  const vacationMinutesByKey = new Map();
+  for (const override of overrides) {
+    if (!override.user?._id) continue;
+    if (override.reasonType !== 'vacation') continue;
+    const key = `${override.user._id.toString()}|${formatLocalDateKey(override.date)}`;
+    vacationMinutesByKey.set(key, baseMinutesByKey.get(key) || 0);
+  }
+
+  return vacationMinutesByKey;
+};
+
 const parseMonthRange = (month) => {
   if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(month || '')) {
     throw new ErrorHandler('month must be YYYY-MM', 400);
@@ -71,7 +111,7 @@ const parseMonthRange = (month) => {
   return { monthStart, monthEnd };
 };
 
-const buildWeeklyOvertimeSummaries = ({ month, assignments, entries, aggregationMode }) => {
+const buildWeeklyOvertimeSummaries = ({ month, assignments, entries, aggregationMode, vacationCreditByUserDate = new Map() }) => {
   const { monthStart, monthEnd } = parseMonthRange(month);
   const rangeStart = getStartOfIsoWeek(monthStart);
   const rangeEnd = addDaysLocal(getStartOfIsoWeek(monthEnd), 6);
@@ -91,11 +131,18 @@ const buildWeeklyOvertimeSummaries = ({ month, assignments, entries, aggregation
       ? Math.round(weeklyContractHours * 60)
       : 0;
     const userEntries = entriesByUser.get(userId) || [];
+    const vacationCreditMinutesInMonth = Array.from(vacationCreditByUserDate.entries()).reduce((total, [key, minutes]) => {
+      const [entryUserId, dateKey] = key.split('|');
+      if (entryUserId !== userId) return total;
+      const entryDate = startOfDayLocal(dateKey);
+      if (entryDate < monthStart || entryDate > monthEnd) return total;
+      return total + Number(minutes || 0);
+    }, 0);
     const workedMinutesInMonth = userEntries.reduce((total, entry) => {
       const entryDate = startOfDayLocal(entry.date);
       if (entryDate < monthStart || entryDate > monthEnd) return total;
       return total + Number(entry.duration || 0);
-    }, 0);
+    }, 0) + vacationCreditMinutesInMonth;
     const weeks = [];
 
     let cursor = new Date(rangeStart);
@@ -109,7 +156,14 @@ const buildWeeklyOvertimeSummaries = ({ month, assignments, entries, aggregation
           const entryDate = startOfDayLocal(entry.date);
           return entryDate >= weekStart && entryDate <= weekEnd;
         });
-        const workedMinutes = weekEntries.reduce((total, entry) => total + Number(entry.duration || 0), 0);
+        const vacationCreditMinutes = Array.from(vacationCreditByUserDate.entries()).reduce((total, [key, minutes]) => {
+          const [entryUserId, dateKey] = key.split('|');
+          if (entryUserId !== userId) return total;
+          const entryDate = startOfDayLocal(dateKey);
+          if (entryDate < weekStart || entryDate > weekEnd) return total;
+          return total + Number(minutes || 0);
+        }, 0);
+        const workedMinutes = weekEntries.reduce((total, entry) => total + Number(entry.duration || 0), 0) + vacationCreditMinutes;
         const deltaMinutes = weeklyContractMinutes > 0 ? workedMinutes - weeklyContractMinutes : 0;
         const countedExtraMinutes = aggregationMode === 'net'
           ? deltaMinutes
@@ -440,12 +494,35 @@ exports.getCenterMonthlyOvertimeSummary = catchAsyncErrors(async (req, res, next
         .populate('user', 'name email')
         .sort({ date: 1, entryTime: 1 });
 
+  const [patterns, vacationOverrides] = userIds.length === 0
+    ? [[], []]
+    : await Promise.all([
+        ShiftPattern.find({ center: req.params.id, user: { $in: userIds }, active: true })
+          .populate('user', 'name email')
+          .populate('shift', 'name startTime endTime'),
+        ShiftOverride.find({
+          center: req.params.id,
+          user: { $in: userIds },
+          date: {
+            $gte: queryStart,
+            $lte: queryEnd,
+          },
+          reasonType: 'vacation',
+        }).populate('user', 'name email'),
+      ]);
+
+  const vacationCreditByUserDate = buildVacationCreditMap({
+    baseOccurrences: computeOccurrences(patterns.filter(hasResolvedUser), queryStart, queryEnd),
+    overrides: vacationOverrides.filter(hasResolvedUser),
+  });
+
   const aggregationMode = center.overtimeSettings?.monthlyAggregationMode || 'positive_only';
   const summaries = buildWeeklyOvertimeSummaries({
     month,
     assignments: validAssignments,
     entries,
     aggregationMode,
+    vacationCreditByUserDate,
   });
 
   res.status(200).json({
