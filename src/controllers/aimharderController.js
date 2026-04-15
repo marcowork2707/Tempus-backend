@@ -527,6 +527,17 @@ exports.getOccupancyReport = async (req, res) => {
 
     const avg = (arr) => (arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : 0);
     const sum = (arr) => arr.reduce((a, b) => a + b, 0);
+    const normalizeInstructorDisplayName = (value = '') => String(value)
+      .replace(/([a-záéíóúñ])([A-ZÁÉÍÓÚÑ])/g, '$1 $2')
+      .replace(/\s+/g, ' ')
+      .trim();
+    const instructorKey = (value = '') => normalizeInstructorDisplayName(value)
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .toLowerCase()
+      .replace(/[^a-z\s]/g, '')
+      .replace(/\s+/g, ' ')
+      .trim();
 
     const [snapshots, absenceSnaps] = await Promise.all([
       getStoredOccupancy(startDate, endDate, centerId),
@@ -578,13 +589,27 @@ exports.getOccupancyReport = async (req, res) => {
     for (const snap of snapshots) {
       for (const cls of snap.classes) {
         if (!cls.instructorName) continue;
-        if (!instructorMap.has(cls.instructorName)) instructorMap.set(cls.instructorName, []);
-        instructorMap.get(cls.instructorName).push(cls);
+        const key = instructorKey(cls.instructorName);
+        if (!key) continue;
+        if (!instructorMap.has(key)) {
+          instructorMap.set(key, { records: [], labels: new Map() });
+        }
+        const bucket = instructorMap.get(key);
+        const display = normalizeInstructorDisplayName(cls.instructorName);
+        bucket.records.push(cls);
+        bucket.labels.set(display, (bucket.labels.get(display) || 0) + 1);
       }
     }
     const byInstructor = [...instructorMap.entries()]
-      .map(([instructorName, records]) => {
+      .map(([, bucket]) => {
+        const records = bucket.records;
         const valid = records.filter((r) => r.capacity > 0);
+        const labelEntries = [...bucket.labels.entries()];
+        labelEntries.sort((a, b) => {
+          if (b[1] !== a[1]) return b[1] - a[1];
+          return a[0].length - b[0].length;
+        });
+        const instructorName = labelEntries[0]?.[0] || 'Entrenador';
         return {
           instructorName,
           avgOccupancy: Math.round(avg(valid.map((r) => r.occupancyRate))),
@@ -593,6 +618,22 @@ exports.getOccupancyReport = async (req, res) => {
         };
       })
       .sort((a, b) => b.totalClasses - a.totalClasses);
+
+    const rawClasses = snapshots.flatMap((snap) =>
+      (snap.classes || []).map((cls) => ({
+        date: snap.date,
+        className: cls.className,
+        classTime: cls.classTime,
+        instructorName: normalizeInstructorDisplayName(cls.instructorName || ''),
+        bookedCount: cls.bookedCount || 0,
+        attendanceCount: cls.attendanceCount || 0,
+        noShowCount: cls.noShowCount || 0,
+        waitlistCount: cls.waitlistCount || 0,
+        capacity: cls.capacity || 0,
+        occupancyRate: cls.occupancyRate || 0,
+        attendanceRate: cls.attendanceRate || 0,
+      }))
+    );
 
     // ── Per hour-slot aggregation ──────────────────────────────────────
     const hourMap = new Map();
@@ -634,7 +675,7 @@ exports.getOccupancyReport = async (req, res) => {
       worstDay: worstDay ? { date: worstDay.date, value: worstDay.avgOccupancy } : null,
     };
 
-    res.json({ success: true, summary, daily, byClass, byInstructor, byHour });
+    res.json({ success: true, summary, daily, byClass, byInstructor, byHour, rawClasses });
   } catch (err) {
     console.error('[AimHarder Controller] Error getOccupancyReport:', err.message);
     res.status(500).json({
