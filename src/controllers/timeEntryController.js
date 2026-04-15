@@ -87,6 +87,44 @@ const getDurationFromTimes = (startTime, endTime) => {
 const getMinutesFromSegments = (segments = []) =>
   segments.reduce((total, segment) => total + getDurationFromTimes(segment.startTime, segment.endTime), 0);
 
+const getOccurrenceMinutes = (occurrence) => {
+  if (!occurrence || occurrence.isOff) return 0;
+  if (Array.isArray(occurrence.timeSegments) && occurrence.timeSegments.length > 0) {
+    return getMinutesFromSegments(occurrence.timeSegments);
+  }
+  return getDurationFromTimes(occurrence.startTime, occurrence.endTime);
+};
+
+const isCreditedOffDayOverride = (override) => {
+  if (!override) return false;
+
+  const reasonType = String(override.reasonType || '').toLowerCase();
+  if (reasonType === 'vacation' || reasonType === 'holiday') return true;
+
+  if (!override.isOff) return false;
+
+  const labelAndNotes = `${override.label || ''} ${override.notes || ''}`.toLowerCase();
+  return labelAndNotes.includes('festivo') || labelAndNotes.includes('vacacion');
+};
+
+const buildOffDayCreditMap = ({ baseOccurrences, overrides }) => {
+  const baseMinutesByKey = new Map();
+  for (const occurrence of baseOccurrences) {
+    const key = `${occurrence.userId}|${occurrence.date}`;
+    baseMinutesByKey.set(key, (baseMinutesByKey.get(key) || 0) + getOccurrenceMinutes(occurrence));
+  }
+
+  const creditsByKey = new Map();
+  for (const override of overrides) {
+    if (!override.user?._id) continue;
+    if (!isCreditedOffDayOverride(override)) continue;
+    const key = `${override.user._id.toString()}|${formatLocalDate(override.date)}`;
+    creditsByKey.set(key, baseMinutesByKey.get(key) || 0);
+  }
+
+  return creditsByKey;
+};
+
 const getSegmentsForPattern = (pattern, dayOfWeek) => {
   const dayOverride = (pattern.dayTimeOverrides || []).find((override) => override.dayOfWeek === dayOfWeek);
   if (dayOverride?.segments?.length) return dayOverride.segments;
@@ -215,11 +253,25 @@ const getPlannedOccurrencesMap = async (centerId, from, to, userId) => {
     ShiftOverride.find(overrideFilter).populate('user', 'name email'),
   ]);
 
+  const baseOccurrences = computeOccurrences(
+    patterns.filter((pattern) => pattern.user && pattern.user._id),
+    from,
+    to
+  );
+
   const occurrences = applyOverrides(
-    computeOccurrences(patterns.filter((pattern) => pattern.user && pattern.user._id), from, to),
+    baseOccurrences,
     overrides.filter((override) => override.user && override.user._id)
   );
-  return new Map(occurrences.map((occ) => [`${occ.userId}|${occ.date}`, occ]));
+  const offDayCreditsByUserDate = buildOffDayCreditMap({
+    baseOccurrences,
+    overrides: overrides.filter((override) => override.user && override.user._id),
+  });
+
+  return {
+    occurrenceMap: new Map(occurrences.map((occ) => [`${occ.userId}|${occ.date}`, occ])),
+    offDayCreditsByUserDate,
+  };
 };
 
 // Check-in
@@ -352,10 +404,21 @@ exports.getTimeEntries = catchAsyncErrors(async (req, res, next) => {
   const validEntries = entries.filter((entry) => entry.user && entry.center);
 
   let plannedMap = new Map();
-  if (filter.center && validEntries.length > 0) {
-    const rangeStart = req.query.startDate ? new Date(req.query.startDate) : validEntries[validEntries.length - 1].date;
-    const rangeEnd = req.query.endDate ? new Date(req.query.endDate) : validEntries[0].date;
-    plannedMap = await getPlannedOccurrencesMap(filter.center, rangeStart, rangeEnd, req.query.userId);
+  let offDayCreditsByUserDate = new Map();
+  if (filter.center) {
+    const rangeStart = req.query.startDate
+      ? new Date(req.query.startDate)
+      : validEntries.length > 0
+        ? validEntries[validEntries.length - 1].date
+        : new Date();
+    const rangeEnd = req.query.endDate
+      ? new Date(req.query.endDate)
+      : validEntries.length > 0
+        ? validEntries[0].date
+        : new Date();
+    const plannedResult = await getPlannedOccurrencesMap(filter.center, rangeStart, rangeEnd, req.query.userId);
+    plannedMap = plannedResult.occurrenceMap;
+    offDayCreditsByUserDate = plannedResult.offDayCreditsByUserDate;
   }
 
   const enrichedEntries = validEntries.map((entry) => {
@@ -407,8 +470,19 @@ exports.getTimeEntries = catchAsyncErrors(async (req, res, next) => {
     totalWorkedMinutes: 0,
     totalPlannedMinutes: 0,
     totalOvertimeMinutes: 0,
+    totalCreditedOffMinutes: 0,
     weeklyContractMinutes: null,
   });
+
+  const entryKeySet = new Set(
+    enrichedEntries.map((entry) => `${entry.user?._id?.toString() || ''}|${formatLocalDate(entry.date)}`)
+  );
+  const creditedOffMinutes = Array.from(offDayCreditsByUserDate.entries()).reduce((total, [key, minutes]) => {
+    if (entryKeySet.has(key)) return total;
+    return total + Number(minutes || 0);
+  }, 0);
+  summary.totalCreditedOffMinutes = creditedOffMinutes;
+  summary.totalWorkedMinutes += creditedOffMinutes;
 
   if (filter.center && req.query.userId) {
     const assignment = await UserCenterRole.findOne({
