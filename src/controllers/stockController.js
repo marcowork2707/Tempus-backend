@@ -180,6 +180,7 @@ exports.submitStockReport = catchAsyncErrors(async (req, res, next) => {
 
   const config = await StockConfig.findOne({ center: centerId });
   const configItems = config ? config.items : [];
+  const currentReport = await StockReport.findOne({ center: centerId, date }).lean();
 
   const previousReport = await StockReport.findOne({
     center: centerId,
@@ -195,14 +196,45 @@ exports.submitStockReport = catchAsyncErrors(async (req, res, next) => {
     }
   }
 
-  const normalizedEntries = entries.map((entry) => ({
-    concept: entry.concept,
-    controlType: entry.controlType,
-    value: entry.value,
-    comment: typeof entry.comment === 'string' ? entry.comment.trim() : '',
-  }));
+  const incomingEntries = entries
+    .filter((entry) => entry && typeof entry.concept === 'string')
+    .map((entry) => ({
+      concept: entry.concept,
+      controlType: entry.controlType,
+      value: typeof entry.value === 'string' ? entry.value.trim() : '',
+      comment: typeof entry.comment === 'string' ? entry.comment.trim() : '',
+    }));
 
-  const alertsTriggered = computeAlerts(configItems, normalizedEntries);
+  const mergedEntriesByConcept = new Map();
+  for (const existingEntry of currentReport?.entries || []) {
+    if (!existingEntry?.concept) continue;
+    mergedEntriesByConcept.set(normalizeConcept(existingEntry.concept), {
+      concept: existingEntry.concept,
+      controlType: existingEntry.controlType,
+      value: existingEntry.value,
+      comment: typeof existingEntry.comment === 'string' ? existingEntry.comment : '',
+    });
+  }
+
+  for (const entry of incomingEntries) {
+    const conceptKey = normalizeConcept(entry.concept);
+    if (!conceptKey) continue;
+
+    if (!entry.value) {
+      mergedEntriesByConcept.delete(conceptKey);
+      continue;
+    }
+
+    mergedEntriesByConcept.set(conceptKey, {
+      concept: entry.concept,
+      controlType: entry.controlType,
+      value: entry.value,
+      comment: entry.comment,
+    });
+  }
+
+  const mergedEntries = Array.from(mergedEntriesByConcept.values());
+  const alertsTriggered = computeAlerts(configItems, mergedEntries);
   const alertByConcept = new Map(alertsTriggered.map((alert) => [normalizeConcept(alert.concept), alert]));
 
   // Upsert: one report per center per day
@@ -212,7 +244,7 @@ exports.submitStockReport = catchAsyncErrors(async (req, res, next) => {
       center: centerId,
       date,
       submittedBy: req.user.id,
-      entries: normalizedEntries,
+      entries: mergedEntries,
       alertsTriggered,
     },
     { upsert: true, new: true, runValidators: true }
@@ -232,7 +264,7 @@ exports.submitStockReport = catchAsyncErrors(async (req, res, next) => {
     }
   }
 
-  for (const entry of normalizedEntries) {
+  for (const entry of mergedEntries) {
     const conceptKey = normalizeConcept(entry.concept);
     const conceptAlerts = activeAlertsByConcept.get(conceptKey) || [];
     const keepAlert = conceptAlerts[0] || null;
