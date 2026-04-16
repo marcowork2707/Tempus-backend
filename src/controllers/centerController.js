@@ -11,10 +11,12 @@ const ExtraIncentive = require('../models/ExtraIncentive');
 const RecurringIncentiveRule = require('../models/RecurringIncentiveRule');
 const PayrollEntry = require('../models/PayrollEntry');
 const CenterExpense = require('../models/CenterExpense');
+const WeeklyPlanning = require('../models/WeeklyPlanning');
 const TimeEntry = require('../models/TimeEntry');
 const Checklist = require('../models/Checklist');
 const ErrorHandler = require('../utils/errorHandler');
 const catchAsyncErrors = require('../utils/catchAsyncErrors');
+const { buildPlanningMessage } = require('../services/weeklyPlanningService');
 
 const hasResolvedUser = (record) => Boolean(record?.user && record.user._id);
 const OVERTIME_AGGREGATION_MODES = ['net', 'positive_only'];
@@ -786,6 +788,45 @@ function monthFromDate(date) {
   return String(date).slice(0, 7);
 }
 
+function getWeekRangeFromDate(dateStr) {
+  const start = getStartOfIsoWeek(dateStr);
+  const end = addDaysLocal(start, 6);
+  return {
+    weekStart: formatLocalDateKey(start),
+    weekEnd: formatLocalDateKey(end),
+  };
+}
+
+function getSunday10LocalDateFromWeekStart(weekStart) {
+  const start = startOfDayLocal(weekStart);
+  const sunday = addDaysLocal(start, 6);
+  sunday.setHours(10, 0, 0, 0);
+  return sunday;
+}
+
+function parseDataUrlImage(value) {
+  const raw = String(value || '').trim();
+  const match = raw.match(/^data:(image\/(png|jpeg|webp));base64,([A-Za-z0-9+/=\s]+)$/);
+  if (!match) {
+    throw new ErrorHandler('imageDataUrl must be a valid base64 data URL (png/jpeg/webp)', 400);
+  }
+
+  const mimeType = match[1];
+  const base64Content = String(match[3] || '').replace(/\s+/g, '');
+  const bytes = Buffer.byteLength(base64Content, 'base64');
+  if (bytes <= 0) {
+    throw new ErrorHandler('imageDataUrl has no content', 400);
+  }
+  if (bytes > 5 * 1024 * 1024) {
+    throw new ErrorHandler('imageDataUrl exceeds max size of 5MB', 400);
+  }
+
+  return {
+    normalizedDataUrl: `data:${mimeType};base64,${base64Content}`,
+    mimeType,
+  };
+}
+
 function buildExpensesSummary({ manualExpenses, salaryExpenses }) {
   const manualTotal = manualExpenses.reduce((total, item) => total + Number(item.amount || 0), 0);
   const salaryTotal = salaryExpenses.reduce((total, item) => total + Number(item.amount || 0), 0);
@@ -1092,6 +1133,76 @@ exports.deleteCenterExpense = catchAsyncErrors(async (req, res, next) => {
   if (!deleted) return next(new ErrorHandler('Expense not found', 404));
 
   res.status(200).json({ success: true, message: 'Expense deleted' });
+});
+
+exports.getCenterWeeklyPlanning = catchAsyncErrors(async (req, res, next) => {
+  const center = await Center.findById(req.params.id).select('_id name type active');
+  if (!center) return next(new ErrorHandler('Center not found', 404));
+
+  const date = typeof req.query.date === 'string' && req.query.date
+    ? req.query.date
+    : formatLocalDateKey(new Date());
+  assertDateFormat(date);
+
+  const { weekStart, weekEnd } = getWeekRangeFromDate(date);
+
+  const planning = await WeeklyPlanning.findOne({
+    center: req.params.id,
+    weekStart,
+  })
+    .populate('uploadedBy', 'name email')
+    .sort({ createdAt: -1 });
+
+  const message = planning ? buildPlanningMessage(weekStart) : null;
+
+  res.status(200).json({
+    success: true,
+    weekStart,
+    weekEnd,
+    planning,
+    whatsappPreview: planning
+      ? {
+        message,
+        scheduledFor: planning.scheduledFor,
+        sentAt: planning.sentAt,
+        lastSendError: planning.lastSendError || '',
+      }
+      : null,
+  });
+});
+
+exports.createCenterWeeklyPlanning = catchAsyncErrors(async (req, res, next) => {
+  const center = await Center.findById(req.params.id).select('_id name type active');
+  if (!center) return next(new ErrorHandler('Center not found', 404));
+
+  const { date, imageDataUrl } = req.body;
+  assertDateFormat(date);
+
+  const sourceDate = new Date(`${date}T12:00:00`);
+  if (sourceDate.getDay() !== 4) {
+    return next(new ErrorHandler('Weekly planning upload is only enabled on Thursdays', 400));
+  }
+
+  const { normalizedDataUrl, mimeType } = parseDataUrlImage(imageDataUrl);
+  const { weekStart, weekEnd } = getWeekRangeFromDate(date);
+
+  const planning = await WeeklyPlanning.create({
+    center: req.params.id,
+    weekStart,
+    weekEnd,
+    imageDataUrl: normalizedDataUrl,
+    imageMimeType: mimeType,
+    uploadedBy: req.user.id,
+    scheduledFor: getSunday10LocalDateFromWeekStart(weekStart),
+    sentAt: null,
+    sendAttempts: 0,
+    lastSendError: '',
+  });
+
+  const populated = await WeeklyPlanning.findById(planning._id)
+    .populate('uploadedBy', 'name email');
+
+  res.status(201).json({ success: true, planning: populated });
 });
 
 // ─── SHIFT DEFINITIONS ──────────────────────────────────────────────────────

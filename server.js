@@ -16,6 +16,7 @@ const {
   toDateString,
   seedAimHarderIntegrationsFromEnv,
 } = require('./src/services/aimharderService');
+const { dispatchPendingWeeklyPlannings } = require('./src/services/weeklyPlanningService');
 
 // Connect to database
 connectDB();
@@ -23,8 +24,8 @@ connectDB();
 const app = express();
 
 // Middleware
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+app.use(express.json({ limit: '8mb' }));
+app.use(express.urlencoded({ extended: true, limit: '8mb' }));
 app.use(
   cors({
     origin: process.env.FRONTEND_URL || 'http://localhost:3000',
@@ -63,7 +64,6 @@ app.use(errorMiddleware);
 
 let lastAimharderSyncDay = null;
 let lastOccupancySyncDay = null;
-
 async function maybeRunDailyAimharderSync() {
   const now = new Date();
   const hours = now.getHours();
@@ -119,12 +119,25 @@ async function maybeRunDailyOccupancySync() {
   }
 }
 
+async function maybeRunWeeklyPlanningDispatch() {
+  try {
+    const result = await dispatchPendingWeeklyPlannings(new Date());
+    if (result.processed === 0) return;
+    console.log(`[Weekly Planning Scheduler] Procesadas: ${result.processed}, enviadas: ${result.sent}, fallidas: ${result.failed}`);
+  } catch (error) {
+    console.error('[Weekly Planning Scheduler] Error en envío automático:', error.message);
+  }
+}
+
 setInterval(() => {
   maybeRunDailyAimharderSync().catch((error) => {
     console.error('[AimHarder Scheduler] Error inesperado:', error.message);
   });
   maybeRunDailyOccupancySync().catch((error) => {
     console.error('[AimHarder Scheduler] Error inesperado en ocupación:', error.message);
+  });
+  maybeRunWeeklyPlanningDispatch().catch((error) => {
+    console.error('[Weekly Planning Scheduler] Error inesperado:', error.message);
   });
 }, 60 * 1000);
 
@@ -141,5 +154,8 @@ app.listen(PORT, () => {
   });
   maybeRunDailyOccupancySync().catch((error) => {
     console.error('[AimHarder Scheduler] Error de ocupación al arrancar:', error.message);
+  });
+  maybeRunWeeklyPlanningDispatch().catch((error) => {
+    console.error('[Weekly Planning Scheduler] Error al arrancar:', error.message);
   });
 });

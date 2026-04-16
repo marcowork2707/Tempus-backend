@@ -29,6 +29,8 @@ const {
   createCenterExpense,
   updateCenterExpense,
   deleteCenterExpense,
+  getCenterWeeklyPlanning,
+  createCenterWeeklyPlanning,
   getCenterShifts,
   createShift,
   updateShift,
@@ -100,6 +102,8 @@ router.get('/:id/expenses', authorizeRoles('admin'), getCenterExpensesSummary);
 router.post('/:id/expenses', authorizeRoles('admin'), createCenterExpense);
 router.put('/:id/expenses/:expenseId', authorizeRoles('admin'), updateCenterExpense);
 router.delete('/:id/expenses/:expenseId', authorizeRoles('admin'), deleteCenterExpense);
+router.get('/:id/weekly-planning', authorizeRoles('admin', 'encargado', 'coach'), getCenterWeeklyPlanning);
+router.post('/:id/weekly-planning', authorizeRoles('admin', 'encargado', 'coach'), createCenterWeeklyPlanning);
 
 // ─── Shift definitions ──────────────────────────────────────────────────────
 router.get('/:id/shifts', authorizeRoles('admin'), getCenterShifts);
