@@ -788,6 +788,13 @@ function monthFromDate(date) {
   return String(date).slice(0, 7);
 }
 
+const EXPENSE_TYPES = ['fixed', 'consumable', 'ads', 'investment', 'other'];
+
+function normalizeExpenseType(value) {
+  const normalized = String(value || '').trim().toLowerCase();
+  return EXPENSE_TYPES.includes(normalized) ? normalized : 'other';
+}
+
 function getWeekRangeFromDate(dateStr) {
   const start = getStartOfIsoWeek(dateStr);
   const end = addDaysLocal(start, 6);
@@ -848,6 +855,29 @@ function buildExpensesSummary({ manualExpenses, salaryExpenses }) {
     }))
     .sort((a, b) => b.amount - a.amount);
 
+  const byTypeMap = new Map();
+  for (const item of manualExpenses) {
+    const type = normalizeExpenseType(item.expenseType);
+    const current = byTypeMap.get(type) || { type, amount: 0, count: 0 };
+    current.amount += Number(item.amount || 0);
+    current.count += 1;
+    byTypeMap.set(type, current);
+  }
+  if (salaryTotal > 0) {
+    byTypeMap.set('payroll', {
+      type: 'payroll',
+      amount: salaryTotal,
+      count: salaryExpenses.length,
+    });
+  }
+
+  const byType = Array.from(byTypeMap.values())
+    .map((row) => ({
+      ...row,
+      percentage: total > 0 ? Number(((row.amount / total) * 100).toFixed(2)) : 0,
+    }))
+    .sort((a, b) => b.amount - a.amount);
+
   return {
     manualTotal: Number(manualTotal.toFixed(2)),
     salaryTotal: Number(salaryTotal.toFixed(2)),
@@ -856,6 +886,7 @@ function buildExpensesSummary({ manualExpenses, salaryExpenses }) {
     salaryCount: salaryExpenses.length,
     averageManualExpense: manualExpenses.length > 0 ? Number((manualTotal / manualExpenses.length).toFixed(2)) : 0,
     byCategory,
+    byType,
   };
 }
 
@@ -1049,7 +1080,7 @@ exports.createCenterExpense = catchAsyncErrors(async (req, res, next) => {
   const center = await Center.findById(req.params.id);
   if (!center) return next(new ErrorHandler('Center not found', 404));
 
-  const { date, concept, category, amount, paymentMethod, supplier, notes } = req.body;
+  const { date, concept, category, expenseType, amount, comment, paymentMethod, supplier, notes } = req.body;
 
   assertDateFormat(date);
   if (!concept || !String(concept).trim()) {
@@ -1067,7 +1098,9 @@ exports.createCenterExpense = catchAsyncErrors(async (req, res, next) => {
     month: monthFromDate(date),
     concept: String(concept).trim(),
     category: String(category || 'General').trim(),
+    expenseType: normalizeExpenseType(expenseType),
     amount: Number(parsedAmount.toFixed(2)),
+    comment: comment ? String(comment).trim() : '',
     paymentMethod: paymentMethod ? String(paymentMethod).trim() : '',
     supplier: supplier ? String(supplier).trim() : '',
     notes: notes ? String(notes).trim() : '',
@@ -1089,7 +1122,7 @@ exports.updateCenterExpense = catchAsyncErrors(async (req, res, next) => {
   });
   if (!expense) return next(new ErrorHandler('Expense not found', 404));
 
-  const { date, concept, category, amount, paymentMethod, supplier, notes } = req.body;
+  const { date, concept, category, expenseType, amount, comment, paymentMethod, supplier, notes } = req.body;
 
   if (date !== undefined) {
     assertDateFormat(date);
@@ -1104,6 +1137,9 @@ exports.updateCenterExpense = catchAsyncErrors(async (req, res, next) => {
   if (category !== undefined) {
     expense.category = String(category || 'General').trim() || 'General';
   }
+  if (expenseType !== undefined) {
+    expense.expenseType = normalizeExpenseType(expenseType);
+  }
   if (amount !== undefined) {
     const parsedAmount = Number(amount);
     if (!Number.isFinite(parsedAmount) || parsedAmount <= 0) {
@@ -1111,6 +1147,7 @@ exports.updateCenterExpense = catchAsyncErrors(async (req, res, next) => {
     }
     expense.amount = Number(parsedAmount.toFixed(2));
   }
+  if (comment !== undefined) expense.comment = String(comment || '').trim();
   if (paymentMethod !== undefined) expense.paymentMethod = String(paymentMethod || '').trim();
   if (supplier !== undefined) expense.supplier = String(supplier || '').trim();
   if (notes !== undefined) expense.notes = String(notes || '').trim();

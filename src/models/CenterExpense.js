@@ -33,10 +33,22 @@ const centerExpenseSchema = new mongoose.Schema(
       maxlength: 60,
       default: 'General',
     },
+    expenseType: {
+      type: String,
+      enum: ['fixed', 'consumable', 'ads', 'investment', 'other'],
+      default: 'other',
+      index: true,
+    },
     amount: {
       type: Number,
       required: true,
       min: 0,
+    },
+    comment: {
+      type: String,
+      trim: true,
+      maxlength: 120,
+      default: '',
     },
     paymentMethod: {
       type: String,
