@@ -59,6 +59,10 @@ const centerSchema = new mongoose.Schema(
         default: 'positive_only',
       },
     },
+    expenseCategories: {
+      type: [String],
+      default: ['General', 'Fijos', 'Consumible', 'Publicidad', 'Inversión', 'Otros'],
+    },
   },
   { timestamps: true }
 );

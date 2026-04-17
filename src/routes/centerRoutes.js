@@ -29,6 +29,11 @@ const {
   createCenterExpense,
   updateCenterExpense,
   deleteCenterExpense,
+  toggleExpenseChecked,
+  getCenterExpenseCategories,
+  addExpenseCategory,
+  updateExpenseCategory,
+  deleteExpenseCategory,
   getCenterWeeklyPlanning,
   createCenterWeeklyPlanning,
   getCenterShifts,
@@ -101,7 +106,12 @@ router.delete('/:id/payroll/:entryId', authorizeRoles('admin'), deleteCenterPayr
 router.get('/:id/expenses', authorizeRoles('admin'), getCenterExpensesSummary);
 router.post('/:id/expenses', authorizeRoles('admin'), createCenterExpense);
 router.put('/:id/expenses/:expenseId', authorizeRoles('admin'), updateCenterExpense);
+router.patch('/:id/expenses/:expenseId/toggle-checked', authorizeRoles('admin'), toggleExpenseChecked);
 router.delete('/:id/expenses/:expenseId', authorizeRoles('admin'), deleteCenterExpense);
+router.get('/:id/expense-categories', authorizeRoles('admin'), getCenterExpenseCategories);
+router.post('/:id/expense-categories', authorizeRoles('admin'), addExpenseCategory);
+router.put('/:id/expense-categories', authorizeRoles('admin'), updateExpenseCategory);
+router.delete('/:id/expense-categories', authorizeRoles('admin'), deleteExpenseCategory);
 router.get('/:id/weekly-planning', authorizeRoles('admin', 'encargado', 'coach'), getCenterWeeklyPlanning);
 router.post('/:id/weekly-planning', authorizeRoles('admin', 'encargado', 'coach'), createCenterWeeklyPlanning);
 

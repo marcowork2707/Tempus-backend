@@ -1054,8 +1054,7 @@ exports.getCenterExpensesSummary = catchAsyncErrors(async (req, res, next) => {
     date: `${entry.month}-01`,
     category: 'Sueldos',
     concept: `Sueldo ${entry.user.name}`,
-    amount: Number(entry.grossSalary ?? entry.baseAmount ?? 0),
-    grossSalary: Number(entry.grossSalary ?? entry.baseAmount ?? 0),
+    amount: Number(entry.netSalary ?? entry.variableAmount ?? 0),
     netSalary: Number(entry.netSalary ?? entry.variableAmount ?? 0),
     notes: entry.notes || '',
     user: entry.user,
@@ -2086,4 +2085,111 @@ exports.getShiftCalendar = catchAsyncErrors(async (req, res, next) => {
     occurrences = occurrences.filter((occ) => occ.userId === req.user.id || occ.reasonType === 'vacation');
   }
   res.status(200).json({ success: true, occurrences });
+});
+
+exports.toggleExpenseChecked = catchAsyncErrors(async (req, res, next) => {
+  const center = await Center.findById(req.params.id);
+  if (!center) return next(new ErrorHandler('Center not found', 404));
+
+  const expense = await CenterExpense.findOne({
+    _id: req.params.expenseId,
+    center: req.params.id,
+  });
+  if (!expense) return next(new ErrorHandler('Expense not found', 404));
+
+  expense.checked = !expense.checked;
+  await expense.save();
+
+  res.status(200).json({ success: true, expense });
+});
+
+exports.getCenterExpenseCategories = catchAsyncErrors(async (req, res, next) => {
+  const center = await Center.findById(req.params.id).select('expenseCategories');
+  if (!center) return next(new ErrorHandler('Center not found', 404));
+
+  res.status(200).json({
+    success: true,
+    categories: center.expenseCategories || [],
+  });
+});
+
+exports.addExpenseCategory = catchAsyncErrors(async (req, res, next) => {
+  const center = await Center.findById(req.params.id);
+  if (!center) return next(new ErrorHandler('Center not found', 404));
+
+  const { category } = req.body;
+  if (!category || !String(category).trim()) {
+    return next(new ErrorHandler('Category is required', 400));
+  }
+
+  const categoryTrimmed = String(category).trim();
+  if (center.expenseCategories.includes(categoryTrimmed)) {
+    return next(new ErrorHandler('Category already exists', 400));
+  }
+
+  center.expenseCategories.push(categoryTrimmed);
+  await center.save();
+
+  res.status(201).json({
+    success: true,
+    categories: center.expenseCategories,
+  });
+});
+
+exports.updateExpenseCategory = catchAsyncErrors(async (req, res, next) => {
+  const center = await Center.findById(req.params.id);
+  if (!center) return next(new ErrorHandler('Center not found', 404));
+
+  const { oldCategory, newCategory } = req.body;
+  if (!oldCategory || !newCategory) {
+    return next(new ErrorHandler('oldCategory and newCategory are required', 400));
+  }
+
+  const oldIndex = center.expenseCategories.indexOf(oldCategory);
+  if (oldIndex === -1) {
+    return next(new ErrorHandler('Category not found', 404));
+  }
+
+  const newCategoryTrimmed = String(newCategory).trim();
+  if (center.expenseCategories.includes(newCategoryTrimmed) && newCategoryTrimmed !== oldCategory) {
+    return next(new ErrorHandler('New category already exists', 400));
+  }
+
+  center.expenseCategories[oldIndex] = newCategoryTrimmed;
+  
+  // Update all expenses with this category
+  await CenterExpense.updateMany(
+    { center: req.params.id, category: oldCategory },
+    { category: newCategoryTrimmed }
+  );
+
+  await center.save();
+
+  res.status(200).json({
+    success: true,
+    categories: center.expenseCategories,
+  });
+});
+
+exports.deleteExpenseCategory = catchAsyncErrors(async (req, res, next) => {
+  const center = await Center.findById(req.params.id);
+  if (!center) return next(new ErrorHandler('Center not found', 404));
+
+  const { category } = req.body;
+  if (!category) {
+    return next(new ErrorHandler('Category is required', 400));
+  }
+
+  const index = center.expenseCategories.indexOf(category);
+  if (index === -1) {
+    return next(new ErrorHandler('Category not found', 404));
+  }
+
+  center.expenseCategories.splice(index, 1);
+  await center.save();
+
+  res.status(200).json({
+    success: true,
+    categories: center.expenseCategories,
+  });
 });

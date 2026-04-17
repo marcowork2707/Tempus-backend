@@ -68,6 +68,11 @@ const centerExpenseSchema = new mongoose.Schema(
       maxlength: 400,
       default: '',
     },
+    checked: {
+      type: Boolean,
+      default: false,
+      index: true,
+    },
     createdBy: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'User',
