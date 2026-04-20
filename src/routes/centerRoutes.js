@@ -29,6 +29,10 @@ const {
   createCenterExpense,
   updateCenterExpense,
   deleteCenterExpense,
+  getCenterRecurringExpenseConcepts,
+  createCenterRecurringExpenseConcept,
+  updateCenterRecurringExpenseConcept,
+  deleteCenterRecurringExpenseConcept,
   toggleExpenseChecked,
   getCenterExpenseCategories,
   addExpenseCategory,
@@ -104,6 +108,10 @@ router.get('/:id/overtime-summary', authorizeRoles('admin'), getCenterMonthlyOve
 router.post('/:id/payroll', authorizeRoles('admin'), upsertCenterPayrollEntry);
 router.delete('/:id/payroll/:entryId', authorizeRoles('admin'), deleteCenterPayrollEntry);
 router.get('/:id/expenses', authorizeRoles('admin'), getCenterExpensesSummary);
+router.get('/:id/recurring-expenses', authorizeRoles('admin'), getCenterRecurringExpenseConcepts);
+router.post('/:id/recurring-expenses', authorizeRoles('admin'), createCenterRecurringExpenseConcept);
+router.put('/:id/recurring-expenses/:conceptId', authorizeRoles('admin'), updateCenterRecurringExpenseConcept);
+router.delete('/:id/recurring-expenses/:conceptId', authorizeRoles('admin'), deleteCenterRecurringExpenseConcept);
 router.post('/:id/expenses', authorizeRoles('admin'), createCenterExpense);
 router.put('/:id/expenses/:expenseId', authorizeRoles('admin'), updateCenterExpense);
 router.patch('/:id/expenses/:expenseId/toggle-checked', authorizeRoles('admin'), toggleExpenseChecked);

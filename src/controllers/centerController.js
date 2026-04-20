@@ -11,6 +11,7 @@ const ExtraIncentive = require('../models/ExtraIncentive');
 const RecurringIncentiveRule = require('../models/RecurringIncentiveRule');
 const PayrollEntry = require('../models/PayrollEntry');
 const CenterExpense = require('../models/CenterExpense');
+const RecurringExpenseConcept = require('../models/RecurringExpenseConcept');
 const WeeklyPlanning = require('../models/WeeklyPlanning');
 const TimeEntry = require('../models/TimeEntry');
 const Checklist = require('../models/Checklist');
@@ -795,6 +796,48 @@ function normalizeExpenseType(value) {
   return EXPENSE_TYPES.includes(normalized) ? normalized : 'other';
 }
 
+async function syncRecurringExpensesForMonth({ centerId, month, userId }) {
+  const recurringConcepts = await RecurringExpenseConcept.find({
+    center: centerId,
+    active: true,
+  })
+    .select('_id concept category expenseType comment paymentMethod supplier notes')
+    .sort({ createdAt: 1 });
+
+  if (!recurringConcepts.length) return;
+
+  const recurringIds = recurringConcepts.map((concept) => concept._id);
+  const alreadyCreated = await CenterExpense.find({
+    center: centerId,
+    month,
+    recurringConcept: { $in: recurringIds },
+  }).select('recurringConcept');
+
+  const existingByRecurringId = new Set(alreadyCreated.map((item) => String(item.recurringConcept)));
+  const missing = recurringConcepts.filter((concept) => !existingByRecurringId.has(String(concept._id)));
+
+  if (!missing.length) return;
+
+  await CenterExpense.insertMany(
+    missing.map((concept) => ({
+      center: centerId,
+      date: `${month}-01`,
+      month,
+      concept: concept.concept,
+      category: concept.category || 'General',
+      expenseType: normalizeExpenseType(concept.expenseType),
+      amount: 0,
+      comment: concept.comment || '',
+      paymentMethod: concept.paymentMethod || '',
+      supplier: concept.supplier || '',
+      notes: concept.notes || '',
+      recurringConcept: concept._id,
+      createdBy: userId,
+      updatedBy: userId,
+    }))
+  );
+}
+
 function getWeekRangeFromDate(dateStr) {
   const start = getStartOfIsoWeek(dateStr);
   const end = addDaysLocal(start, 6);
@@ -1035,10 +1078,17 @@ exports.getCenterExpensesSummary = catchAsyncErrors(async (req, res, next) => {
     : new Date().toISOString().slice(0, 7);
   assertMonthFormat(month);
 
+  await syncRecurringExpensesForMonth({
+    centerId: req.params.id,
+    month,
+    userId: req.user.id,
+  });
+
   const [manualExpenses, payrollEntries] = await Promise.all([
     CenterExpense.find({ center: req.params.id, month })
       .populate('createdBy', 'name email')
       .populate('updatedBy', 'name email')
+      .populate('recurringConcept', 'concept category expenseType active')
       .sort({ date: 1, createdAt: 1 }),
     PayrollEntry.find({ center: req.params.id, month })
       .populate('user', 'name email active')
@@ -1079,7 +1129,18 @@ exports.createCenterExpense = catchAsyncErrors(async (req, res, next) => {
   const center = await Center.findById(req.params.id);
   if (!center) return next(new ErrorHandler('Center not found', 404));
 
-  const { date, concept, category, expenseType, amount, comment, paymentMethod, supplier, notes } = req.body;
+  const {
+    date,
+    concept,
+    category,
+    expenseType,
+    amount,
+    comment,
+    paymentMethod,
+    supplier,
+    notes,
+    recurringConceptId,
+  } = req.body;
 
   assertDateFormat(date);
   if (!concept || !String(concept).trim()) {
@@ -1087,8 +1148,19 @@ exports.createCenterExpense = catchAsyncErrors(async (req, res, next) => {
   }
 
   const parsedAmount = Number(amount);
-  if (!Number.isFinite(parsedAmount) || parsedAmount <= 0) {
-    return next(new ErrorHandler('amount must be a number greater than 0', 400));
+  if (!Number.isFinite(parsedAmount) || parsedAmount < 0) {
+    return next(new ErrorHandler('amount must be a number greater than or equal to 0', 400));
+  }
+
+  let recurringConcept = null;
+  if (recurringConceptId) {
+    recurringConcept = await RecurringExpenseConcept.findOne({
+      _id: recurringConceptId,
+      center: req.params.id,
+    }).select('_id');
+    if (!recurringConcept) {
+      return next(new ErrorHandler('Recurring concept not found for this center', 404));
+    }
   }
 
   const expense = await CenterExpense.create({
@@ -1103,13 +1175,15 @@ exports.createCenterExpense = catchAsyncErrors(async (req, res, next) => {
     paymentMethod: paymentMethod ? String(paymentMethod).trim() : '',
     supplier: supplier ? String(supplier).trim() : '',
     notes: notes ? String(notes).trim() : '',
+    recurringConcept: recurringConcept ? recurringConcept._id : null,
     createdBy: req.user.id,
     updatedBy: req.user.id,
   });
 
   const populated = await CenterExpense.findById(expense._id)
     .populate('createdBy', 'name email')
-    .populate('updatedBy', 'name email');
+    .populate('updatedBy', 'name email')
+    .populate('recurringConcept', 'concept category expenseType active');
 
   res.status(201).json({ success: true, expense: populated });
 });
@@ -1141,8 +1215,8 @@ exports.updateCenterExpense = catchAsyncErrors(async (req, res, next) => {
   }
   if (amount !== undefined) {
     const parsedAmount = Number(amount);
-    if (!Number.isFinite(parsedAmount) || parsedAmount <= 0) {
-      return next(new ErrorHandler('amount must be a number greater than 0', 400));
+    if (!Number.isFinite(parsedAmount) || parsedAmount < 0) {
+      return next(new ErrorHandler('amount must be a number greater than or equal to 0', 400));
     }
     expense.amount = Number(parsedAmount.toFixed(2));
   }
@@ -1156,7 +1230,8 @@ exports.updateCenterExpense = catchAsyncErrors(async (req, res, next) => {
 
   const populated = await CenterExpense.findById(expense._id)
     .populate('createdBy', 'name email')
-    .populate('updatedBy', 'name email');
+    .populate('updatedBy', 'name email')
+    .populate('recurringConcept', 'concept category expenseType active');
 
   res.status(200).json({ success: true, expense: populated });
 });
@@ -2085,6 +2160,99 @@ exports.getShiftCalendar = catchAsyncErrors(async (req, res, next) => {
     occurrences = occurrences.filter((occ) => occ.userId === req.user.id || occ.reasonType === 'vacation');
   }
   res.status(200).json({ success: true, occurrences });
+});
+
+exports.getCenterRecurringExpenseConcepts = catchAsyncErrors(async (req, res, next) => {
+  const center = await Center.findById(req.params.id).select('_id');
+  if (!center) return next(new ErrorHandler('Center not found', 404));
+
+  const activeOnly = String(req.query.activeOnly || 'true') !== 'false';
+  const filter = { center: req.params.id };
+  if (activeOnly) filter.active = true;
+
+  const concepts = await RecurringExpenseConcept.find(filter)
+    .populate('createdBy', 'name email')
+    .populate('updatedBy', 'name email')
+    .sort({ createdAt: 1 });
+
+  res.status(200).json({ success: true, concepts });
+});
+
+exports.createCenterRecurringExpenseConcept = catchAsyncErrors(async (req, res, next) => {
+  const center = await Center.findById(req.params.id);
+  if (!center) return next(new ErrorHandler('Center not found', 404));
+
+  const { concept, category, expenseType, comment, paymentMethod, supplier, notes, active } = req.body;
+
+  if (!concept || !String(concept).trim()) {
+    return next(new ErrorHandler('concept is required', 400));
+  }
+
+  const recurringConcept = await RecurringExpenseConcept.create({
+    center: req.params.id,
+    concept: String(concept).trim(),
+    category: String(category || 'General').trim() || 'General',
+    expenseType: normalizeExpenseType(expenseType || 'fixed'),
+    comment: comment ? String(comment).trim() : '',
+    paymentMethod: paymentMethod ? String(paymentMethod).trim() : '',
+    supplier: supplier ? String(supplier).trim() : '',
+    notes: notes ? String(notes).trim() : '',
+    active: active !== undefined ? Boolean(active) : true,
+    createdBy: req.user.id,
+    updatedBy: req.user.id,
+  });
+
+  const populated = await RecurringExpenseConcept.findById(recurringConcept._id)
+    .populate('createdBy', 'name email')
+    .populate('updatedBy', 'name email');
+
+  res.status(201).json({ success: true, concept: populated });
+});
+
+exports.updateCenterRecurringExpenseConcept = catchAsyncErrors(async (req, res, next) => {
+  const concept = await RecurringExpenseConcept.findOne({
+    _id: req.params.conceptId,
+    center: req.params.id,
+  });
+  if (!concept) return next(new ErrorHandler('Recurring concept not found', 404));
+
+  const { concept: conceptName, category, expenseType, comment, paymentMethod, supplier, notes, active } = req.body;
+
+  if (conceptName !== undefined) {
+    const normalizedConcept = String(conceptName).trim();
+    if (!normalizedConcept) return next(new ErrorHandler('concept cannot be empty', 400));
+    concept.concept = normalizedConcept;
+  }
+  if (category !== undefined) {
+    concept.category = String(category || 'General').trim() || 'General';
+  }
+  if (expenseType !== undefined) {
+    concept.expenseType = normalizeExpenseType(expenseType);
+  }
+  if (comment !== undefined) concept.comment = String(comment || '').trim();
+  if (paymentMethod !== undefined) concept.paymentMethod = String(paymentMethod || '').trim();
+  if (supplier !== undefined) concept.supplier = String(supplier || '').trim();
+  if (notes !== undefined) concept.notes = String(notes || '').trim();
+  if (active !== undefined) concept.active = Boolean(active);
+  concept.updatedBy = req.user.id;
+
+  await concept.save();
+
+  const populated = await RecurringExpenseConcept.findById(concept._id)
+    .populate('createdBy', 'name email')
+    .populate('updatedBy', 'name email');
+
+  res.status(200).json({ success: true, concept: populated });
+});
+
+exports.deleteCenterRecurringExpenseConcept = catchAsyncErrors(async (req, res, next) => {
+  const deleted = await RecurringExpenseConcept.findOneAndDelete({
+    _id: req.params.conceptId,
+    center: req.params.id,
+  });
+  if (!deleted) return next(new ErrorHandler('Recurring concept not found', 404));
+
+  res.status(200).json({ success: true, message: 'Recurring concept deleted' });
 });
 
 exports.toggleExpenseChecked = catchAsyncErrors(async (req, res, next) => {
