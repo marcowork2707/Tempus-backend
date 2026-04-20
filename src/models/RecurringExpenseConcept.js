@@ -22,8 +22,8 @@ const recurringExpenseConceptSchema = new mongoose.Schema(
     },
     expenseType: {
       type: String,
-      enum: ['fixed', 'consumable', 'ads', 'investment', 'other'],
-      default: 'fixed',
+      trim: true,
+      default: 'Gastos fijos',
       index: true,
     },
     comment: {

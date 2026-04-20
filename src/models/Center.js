@@ -63,6 +63,10 @@ const centerSchema = new mongoose.Schema(
       type: [String],
       default: ['General', 'Fijos', 'Consumible', 'Publicidad', 'Inversión', 'Otros'],
     },
+    expenseTypes: {
+      type: [String],
+      default: ['Gastos fijos', 'Consumibles', 'Anuncios', 'Inversion', 'Impuestos', 'Otros'],
+    },
   },
   { timestamps: true }
 );

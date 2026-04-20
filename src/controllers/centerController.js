@@ -789,11 +789,9 @@ function monthFromDate(date) {
   return String(date).slice(0, 7);
 }
 
-const EXPENSE_TYPES = ['fixed', 'consumable', 'ads', 'investment', 'other'];
-
 function normalizeExpenseType(value) {
-  const normalized = String(value || '').trim().toLowerCase();
-  return EXPENSE_TYPES.includes(normalized) ? normalized : 'other';
+  const normalized = String(value || '').trim();
+  return normalized || 'Otros';
 }
 
 async function syncRecurringExpensesForMonth({ centerId, month, userId }) {
@@ -2192,7 +2190,7 @@ exports.createCenterRecurringExpenseConcept = catchAsyncErrors(async (req, res, 
     center: req.params.id,
     concept: String(concept).trim(),
     category: String(category || 'General').trim() || 'General',
-    expenseType: normalizeExpenseType(expenseType || 'fixed'),
+    expenseType: normalizeExpenseType(expenseType || center.expenseTypes?.[0] || 'Gastos fijos'),
     comment: comment ? String(comment).trim() : '',
     paymentMethod: paymentMethod ? String(paymentMethod).trim() : '',
     supplier: supplier ? String(supplier).trim() : '',
@@ -2269,6 +2267,109 @@ exports.toggleExpenseChecked = catchAsyncErrors(async (req, res, next) => {
   await expense.save();
 
   res.status(200).json({ success: true, expense });
+});
+
+exports.getCenterExpenseTypes = catchAsyncErrors(async (req, res, next) => {
+  const center = await Center.findById(req.params.id).select('expenseTypes');
+  if (!center) return next(new ErrorHandler('Center not found', 404));
+
+  res.status(200).json({
+    success: true,
+    types: center.expenseTypes || [],
+  });
+});
+
+exports.addExpenseType = catchAsyncErrors(async (req, res, next) => {
+  const center = await Center.findById(req.params.id);
+  if (!center) return next(new ErrorHandler('Center not found', 404));
+
+  const { type } = req.body;
+  if (!type || !String(type).trim()) {
+    return next(new ErrorHandler('Type is required', 400));
+  }
+
+  const typeTrimmed = String(type).trim();
+  if (center.expenseTypes?.includes(typeTrimmed)) {
+    return next(new ErrorHandler('Type already exists', 400));
+  }
+
+  if (!Array.isArray(center.expenseTypes)) center.expenseTypes = [];
+  center.expenseTypes.push(typeTrimmed);
+  await center.save();
+
+  res.status(201).json({ success: true, types: center.expenseTypes });
+});
+
+exports.updateExpenseType = catchAsyncErrors(async (req, res, next) => {
+  const center = await Center.findById(req.params.id);
+  if (!center) return next(new ErrorHandler('Center not found', 404));
+
+  const { oldType, newType } = req.body;
+  if (!oldType || !newType) {
+    return next(new ErrorHandler('oldType and newType are required', 400));
+  }
+
+  const oldIndex = center.expenseTypes?.indexOf(oldType) ?? -1;
+  if (oldIndex === -1) {
+    return next(new ErrorHandler('Type not found', 404));
+  }
+
+  const newTypeTrimmed = String(newType).trim();
+  if (!newTypeTrimmed) {
+    return next(new ErrorHandler('newType cannot be empty', 400));
+  }
+  if (center.expenseTypes.includes(newTypeTrimmed) && newTypeTrimmed !== oldType) {
+    return next(new ErrorHandler('New type already exists', 400));
+  }
+
+  center.expenseTypes[oldIndex] = newTypeTrimmed;
+
+  await Promise.all([
+    CenterExpense.updateMany(
+      { center: req.params.id, expenseType: oldType },
+      { expenseType: newTypeTrimmed }
+    ),
+    RecurringExpenseConcept.updateMany(
+      { center: req.params.id, expenseType: oldType },
+      { expenseType: newTypeTrimmed }
+    ),
+  ]);
+
+  await center.save();
+
+  res.status(200).json({ success: true, types: center.expenseTypes });
+});
+
+exports.deleteExpenseType = catchAsyncErrors(async (req, res, next) => {
+  const center = await Center.findById(req.params.id);
+  if (!center) return next(new ErrorHandler('Center not found', 404));
+
+  const { type } = req.body;
+  if (!type) {
+    return next(new ErrorHandler('Type is required', 400));
+  }
+
+  const index = center.expenseTypes?.indexOf(type) ?? -1;
+  if (index === -1) {
+    return next(new ErrorHandler('Type not found', 404));
+  }
+
+  center.expenseTypes.splice(index, 1);
+  await center.save();
+
+  const fallbackType = center.expenseTypes[0] || 'Otros';
+  await Promise.all([
+    CenterExpense.updateMany(
+      { center: req.params.id, expenseType: type },
+      { expenseType: fallbackType }
+    ),
+    RecurringExpenseConcept.updateMany(
+      { center: req.params.id, expenseType: type },
+      { expenseType: fallbackType }
+    ),
+  ]);
+
+  res.status(200).json({ success: true, types: center.expenseTypes });
 });
 
 exports.getCenterExpenseCategories = catchAsyncErrors(async (req, res, next) => {

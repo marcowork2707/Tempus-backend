@@ -34,6 +34,10 @@ const {
   updateCenterRecurringExpenseConcept,
   deleteCenterRecurringExpenseConcept,
   toggleExpenseChecked,
+  getCenterExpenseTypes,
+  addExpenseType,
+  updateExpenseType,
+  deleteExpenseType,
   getCenterExpenseCategories,
   addExpenseCategory,
   updateExpenseCategory,
@@ -116,6 +120,10 @@ router.post('/:id/expenses', authorizeRoles('admin'), createCenterExpense);
 router.put('/:id/expenses/:expenseId', authorizeRoles('admin'), updateCenterExpense);
 router.patch('/:id/expenses/:expenseId/toggle-checked', authorizeRoles('admin'), toggleExpenseChecked);
 router.delete('/:id/expenses/:expenseId', authorizeRoles('admin'), deleteCenterExpense);
+router.get('/:id/expense-types', authorizeRoles('admin'), getCenterExpenseTypes);
+router.post('/:id/expense-types', authorizeRoles('admin'), addExpenseType);
+router.put('/:id/expense-types', authorizeRoles('admin'), updateExpenseType);
+router.delete('/:id/expense-types', authorizeRoles('admin'), deleteExpenseType);
 router.get('/:id/expense-categories', authorizeRoles('admin'), getCenterExpenseCategories);
 router.post('/:id/expense-categories', authorizeRoles('admin'), addExpenseCategory);
 router.put('/:id/expense-categories', authorizeRoles('admin'), updateExpenseCategory);
