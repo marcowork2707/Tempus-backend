@@ -2478,12 +2478,46 @@ async function getTariffCancellationRenewals(centerId, referenceDateStr = null) 
     await page.evaluate(({ startInput, endInput }) => {
       const normalize = (value) => String(value || '').replace(/\s+/g, ' ').trim().toLowerCase();
 
+      const parseEsDate = (value) => {
+        const match = String(value || '').match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+        if (!match) return null;
+        const day = Number(match[1]);
+        const month = Number(match[2]);
+        const year = Number(match[3]);
+        const date = new Date(year, month - 1, day);
+        return Number.isNaN(date.getTime()) ? null : date;
+      };
+
+      const findDateInputByLabel = (labelNeedle) => {
+        const candidates = Array.from(document.querySelectorAll('label, span, div, td, strong'))
+          .filter((el) => normalize(el.textContent) === labelNeedle);
+
+        const queryInput = (root) => root?.querySelector?.('input[type="text"], input[type="date"]') || null;
+
+        for (const label of candidates) {
+          const parent = label.parentElement;
+          const direct = queryInput(parent);
+          if (direct) return direct;
+
+          let sibling = label.nextElementSibling;
+          while (sibling) {
+            if (sibling.matches?.('input[type="text"], input[type="date"]')) return sibling;
+            const nested = queryInput(sibling);
+            if (nested) return nested;
+            sibling = sibling.nextElementSibling;
+          }
+        }
+
+        return null;
+      };
+
       const setDateInput = (input, value) => {
         if (!input) return;
 
         try {
           if (window.jQuery && window.jQuery.fn && typeof window.jQuery(input).datepicker === 'function') {
-            window.jQuery(input).datepicker('setDate', value);
+            const parsed = parseEsDate(value);
+            window.jQuery(input).datepicker('setDate', parsed || value);
           }
         } catch {
           // fallback manual below
@@ -2496,21 +2530,21 @@ async function getTariffCancellationRenewals(centerId, referenceDateStr = null) 
         input.blur();
       };
 
-      const heading = Array.from(document.querySelectorAll('h1,h2,h3,h4,legend,label,strong'))
-        .find((el) => normalize(el.textContent).includes('fechas'));
+      let fromInput = findDateInputByLabel('desde');
+      let toInput = findDateInputByLabel('hasta');
 
-      let dateInputs = [];
-      if (heading) {
-        const container = heading.closest('fieldset, .box, .panel, .card, form, div') || document;
-        dateInputs = Array.from(container.querySelectorAll('input[type="text"], input[type="date"]'));
+      if (!fromInput || !toInput) {
+        const dateInputsInDatePanel = Array.from(document.querySelectorAll('input[type="text"], input[type="date"]')).filter((input) => {
+          const panel = input.closest('fieldset, .box, .panel, .card, form, div');
+          const text = normalize(panel?.textContent || '');
+          return text.includes('fechas') && text.includes('desde') && text.includes('hasta');
+        });
+        if (!fromInput) fromInput = dateInputsInDatePanel[0] || null;
+        if (!toInput) toInput = dateInputsInDatePanel[1] || null;
       }
 
-      if (dateInputs.length < 2) {
-        dateInputs = Array.from(document.querySelectorAll('input[type="text"], input[type="date"]'));
-      }
-
-      setDateInput(dateInputs[0], startInput);
-      setDateInput(dateInputs[1], endInput);
+      setDateInput(fromInput, startInput);
+      setDateInput(toInput, endInput);
 
       const selects = Array.from(document.querySelectorAll('select'));
       for (const select of selects) {
@@ -2531,7 +2565,9 @@ async function getTariffCancellationRenewals(centerId, referenceDateStr = null) 
 
       // Paso 4: generar informe.
       const trigger = Array.from(document.querySelectorAll('button, input[type="button"], input[type="submit"], a'))
-        .find((el) => normalize(el.textContent || el.getAttribute('value')).includes('generar informe'));
+        .find((el) => normalize(el.textContent || el.getAttribute('value')) === 'generar informe')
+        || Array.from(document.querySelectorAll('button, input[type="button"], input[type="submit"], a'))
+          .find((el) => normalize(el.textContent || el.getAttribute('value')).includes('generar informe'));
 
       if (trigger) {
         trigger.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
