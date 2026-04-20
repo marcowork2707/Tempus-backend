@@ -2325,7 +2325,45 @@ async function parseTariffCancellationRows(page) {
     }
 
     if (!selectedTable) {
-      return [];
+      // Fallback robusto: detectar filas por contenido, aunque no haya header estándar.
+      const fallbackRows = [];
+      const seen = new Set();
+      const allRows = Array.from(document.querySelectorAll('table tr'));
+
+      for (const row of allRows) {
+        const cells = Array.from(row.querySelectorAll('td')).map((td) => normalize(td.textContent));
+        if (cells.length < 2) continue;
+
+        let tariffCellIndex = -1;
+        for (let i = 0; i < cells.length; i += 1) {
+          if (/(semestral|trimestral)/i.test(cells[i])) {
+            tariffCellIndex = i;
+            break;
+          }
+        }
+        if (tariffCellIndex === -1) continue;
+
+        const nameFromLink = normalize(row.querySelector('a')?.textContent || '');
+        const memberName = nameFromLink || normalize(cells[1] || cells[0] || '');
+        const phone = normalize(cells.find((c) => /^\d{7,15}(?:[\s,;/.-]\d{7,15})*$/.test(c)) || '');
+        const cancelledTariff = normalize(cells[tariffCellIndex] || '');
+        const cancellationDate = normalize(cells.find((c) => /^\d{2}\/\d{2}\/\d{4}$/.test(c)) || '');
+
+        if (!memberName || !cancelledTariff) continue;
+
+        const dedupeKey = `${memberName}::${phone}::${cancelledTariff}::${cancellationDate}`;
+        if (seen.has(dedupeKey)) continue;
+        seen.add(dedupeKey);
+
+        fallbackRows.push({
+          memberName,
+          phone,
+          cancelledTariff,
+          cancellationDate,
+        });
+      }
+
+      return fallbackRows;
     }
 
     const findIdx = (candidates) => selectedHeader.findIndex((header) => includesAny(header, candidates));
@@ -2408,6 +2446,22 @@ async function getTariffCancellationRenewals(centerId, referenceDateStr = null) 
     await page.goto(reportsUrl, { waitUntil: 'domcontentloaded', timeout: 45000 });
     await dismissCookies(page);
     await page.waitForLoadState('networkidle', { timeout: 20000 }).catch(() => {});
+
+    // Asegura que estamos en "Cancelaciones de tarifa" antes de filtrar/generar.
+    await page.evaluate(() => {
+      const normalize = (value) => String(value || '').replace(/\s+/g, ' ').trim().toLowerCase();
+      const target = Array.from(document.querySelectorAll('a, button, li, span, div')).find((el) => {
+        const text = normalize(el.textContent);
+        return text === 'cancelaciones de tarifa' || text.includes('cancelaciones de tarifa');
+      });
+
+      if (target) {
+        target.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+      }
+    });
+
+    await page.waitForTimeout(700).catch(() => {});
+    await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
 
     await page.evaluate(({ startInput, endInput }) => {
       const normalize = (value) => String(value || '').replace(/\s+/g, ' ').trim().toLowerCase();
