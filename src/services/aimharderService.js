@@ -2486,8 +2486,46 @@ async function getTariffCancellationRenewals(centerId, referenceDateStr = null) 
       return text.includes('informes') && text.includes('cancelaciones de tarifa') && text.includes('generar informe');
     }, { timeout: 20000 }).catch(() => {});
 
-    // Paso 2-3: fijar fechas (Desde/Hasta) igual que en UI.
-    await page.evaluate(({ startInput, endInput }) => {
+    // Paso 2-3: fijar fechas (Desde/Hasta) escribiendo manualmente, como en UI.
+    const typedDates = await (async () => {
+      try {
+        const fechasPanel = page
+          .locator('div, fieldset, section, form')
+          .filter({ hasText: /\bfechas\b/i })
+          .first();
+
+        if (!(await fechasPanel.count())) return false;
+
+        const dateInputs = fechasPanel.locator('input[type="text"], input[type="date"]');
+        if ((await dateInputs.count()) < 2) return false;
+
+        const fromInput = dateInputs.nth(0);
+        const toInput = dateInputs.nth(1);
+
+        await fromInput.click({ clickCount: 3, timeout: 5000 }).catch(() => {});
+        await fromInput.fill(range.startInput, { timeout: 5000 });
+        await fromInput.dispatchEvent('input').catch(() => {});
+        await fromInput.dispatchEvent('change').catch(() => {});
+        await fromInput.press('Tab').catch(() => {});
+
+        await toInput.click({ clickCount: 3, timeout: 5000 }).catch(() => {});
+        await toInput.fill(range.endInput, { timeout: 5000 });
+        await toInput.dispatchEvent('input').catch(() => {});
+        await toInput.dispatchEvent('change').catch(() => {});
+        await toInput.press('Tab').catch(() => {});
+
+        const fromValue = await fromInput.inputValue().catch(() => '');
+        const toValue = await toInput.inputValue().catch(() => '');
+        console.log('[AimHarder] Fecha escrita manualmente:', { fromValue, toValue });
+
+        return true;
+      } catch {
+        return false;
+      }
+    })();
+
+    // Fallback: datepicker/evaluate si la escritura manual no encontró inputs válidos.
+    const evaluateResult = await page.evaluate(({ startInput, endInput }) => {
       const normalize = (value) => String(value || '').replace(/\s+/g, ' ').trim().toLowerCase();
 
       const parseEsDate = (value) => {
@@ -2555,8 +2593,10 @@ async function getTariffCancellationRenewals(centerId, referenceDateStr = null) 
         if (!toInput) toInput = dateInputsInDatePanel[1] || null;
       }
 
-      setDateInput(fromInput, startInput);
-      setDateInput(toInput, endInput);
+      if (fromInput && toInput) {
+        setDateInput(fromInput, startInput);
+        setDateInput(toInput, endInput);
+      }
 
       const selects = Array.from(document.querySelectorAll('select'));
       for (const select of selects) {
@@ -2593,6 +2633,11 @@ async function getTariffCancellationRenewals(centerId, referenceDateStr = null) 
         triggerFound: !!trigger,
       };
     }, { startInput: range.startInput, endInput: range.endInput });
+
+    console.log('[AimHarder] Resultado evaluate fechas:', {
+      typedDates,
+      ...evaluateResult,
+    });
 
     const dateDiagnostics = await page.evaluate(() => {
       const normalize = (value) => String(value || '').replace(/\s+/g, ' ').trim().toLowerCase();
