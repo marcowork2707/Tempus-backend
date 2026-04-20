@@ -51,6 +51,23 @@ const centerSchema = new mongoose.Schema(
           'Fichar Salida',
         ],
       },
+      dailyTaskKeys: {
+        type: [String],
+        default: [
+          'fitohub',
+          'absences',
+          'occupancy',
+          'class-notes',
+          'class-report',
+          'wod-recommendations',
+          'whatsapp-reviews',
+          'tpv-redsys',
+          'pending-payments-no-tpv',
+          'generate-payments',
+          'weekly-planning',
+          'stock-control',
+        ],
+      },
     },
     overtimeSettings: {
       monthlyAggregationMode: {
