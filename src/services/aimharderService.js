@@ -160,10 +160,15 @@ function namesLikelyMatch(left = '', right = '') {
 
   if (!normalizedLeft || !normalizedRight) return false;
   if (normalizedLeft === normalizedRight) return true;
-  if (normalizedLeft.includes(normalizedRight) || normalizedRight.includes(normalizedLeft)) return true;
 
   const leftTokens = normalizedLeft.split(' ').filter(Boolean);
   const rightTokens = normalizedRight.split(' ').filter(Boolean);
+
+  // Evitar coincidencias ambiguas por un solo nombre.
+  if (leftTokens.length < 2 || rightTokens.length < 2) {
+    return false;
+  }
+
   const commonTokens = leftTokens.filter((token) => rightTokens.includes(token));
 
   return commonTokens.length >= Math.min(2, leftTokens.length, rightTokens.length);
@@ -2448,23 +2453,30 @@ async function getTariffCancellationRenewals(centerId, referenceDateStr = null) 
     await page.waitForLoadState('networkidle', { timeout: 20000 }).catch(() => {});
 
     // Paso 1: abrir explícitamente "Cancelaciones de tarifa" desde Informes.
-    await page.evaluate(() => {
-      const normalize = (value) => String(value || '').replace(/\s+/g, ' ').trim().toLowerCase();
+    const cancelacionesCard = page
+      .locator('div, li, article, section, tr')
+      .filter({ hasText: /cancelaciones de tarifa/i })
+      .first();
 
-      const cards = Array.from(document.querySelectorAll('div, li, article, section, tr'));
-      const targetCard = cards.find((el) => normalize(el.textContent).includes('cancelaciones de tarifa'));
-      if (!targetCard) return;
+    const cardCount = await cancelacionesCard.count();
+    console.log(`[AimHarder] Card "Cancelaciones de tarifa" detectada: ${cardCount > 0}`);
 
-      const reportTrigger = Array.from(targetCard.querySelectorAll('a, button, span, div')).find((el) =>
-        normalize(el.textContent || el.getAttribute('value')).includes('ver informe')
-      );
+    if (!cardCount) {
+      throw new Error('No se encontró la tarjeta de "Cancelaciones de tarifa" en Informes');
+    }
 
-      if (reportTrigger) {
-        reportTrigger.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
-      } else {
-        targetCard.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
-      }
-    });
+    const verInformeInCard = cancelacionesCard
+      .locator('a, button, input[type="button"], input[type="submit"], span, div')
+      .filter({ hasText: /ver informe/i })
+      .first();
+
+    if (await verInformeInCard.count()) {
+      await verInformeInCard.click({ force: true, timeout: 8000 }).catch(async () => {
+        await cancelacionesCard.click({ force: true, timeout: 8000 });
+      });
+    } else {
+      await cancelacionesCard.click({ force: true, timeout: 8000 });
+    }
 
     await page.waitForTimeout(700).catch(() => {});
     await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
@@ -2572,7 +2584,27 @@ async function getTariffCancellationRenewals(centerId, referenceDateStr = null) 
       if (trigger) {
         trigger.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
       }
+
+      return {
+        fromFound: !!fromInput,
+        toFound: !!toInput,
+        fromValue: fromInput ? String(fromInput.value || '') : '',
+        toValue: toInput ? String(toInput.value || '') : '',
+        triggerFound: !!trigger,
+      };
     }, { startInput: range.startInput, endInput: range.endInput });
+
+    const dateDiagnostics = await page.evaluate(() => {
+      const normalize = (value) => String(value || '').replace(/\s+/g, ' ').trim().toLowerCase();
+      const labels = Array.from(document.querySelectorAll('label, span, div, td, strong'));
+      const fromLabel = labels.find((el) => normalize(el.textContent) === 'desde');
+      const toLabel = labels.find((el) => normalize(el.textContent) === 'hasta');
+      return {
+        hasFromLabel: !!fromLabel,
+        hasToLabel: !!toLabel,
+      };
+    });
+    console.log('[AimHarder] Diagnostico fechas:', dateDiagnostics);
 
     await page.waitForTimeout(1200).catch(() => {});
     await page.waitForLoadState('networkidle', { timeout: 25000 }).catch(() => {});

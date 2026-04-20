@@ -37,10 +37,15 @@ function namesLikelyMatch(left = '', right = '') {
 
   if (!normalizedLeft || !normalizedRight) return false;
   if (normalizedLeft === normalizedRight) return true;
-  if (normalizedLeft.includes(normalizedRight) || normalizedRight.includes(normalizedLeft)) return true;
 
   const leftTokens = normalizedLeft.split(' ').filter(Boolean);
   const rightTokens = normalizedRight.split(' ').filter(Boolean);
+
+  // Evitar coincidencias ambiguas por un solo nombre (ej: "Javier" ≠ "Antonio Javier Sánchez").
+  if (leftTokens.length < 2 || rightTokens.length < 2) {
+    return false;
+  }
+
   const commonTokens = leftTokens.filter((token) => rightTokens.includes(token));
 
   return commonTokens.length >= Math.min(2, leftTokens.length, rightTokens.length);
@@ -55,7 +60,6 @@ function buildUserNameCandidates(user) {
         user.name,
         user.nickname,
         [user.firstName, user.lastName].filter(Boolean).join(' '),
-        user.firstName,
       ]
         .map((value) => String(value || '').trim())
         .filter(Boolean)
