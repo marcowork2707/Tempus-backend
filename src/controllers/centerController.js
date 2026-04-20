@@ -791,7 +791,14 @@ function monthFromDate(date) {
 
 function normalizeExpenseType(value) {
   const normalized = String(value || '').trim();
-  return normalized || 'Otros';
+  if (!normalized) return 'Otros';
+
+  const lowered = normalized.toLowerCase();
+  if (lowered === 'fixed' || lowered === 'gastos fijos' || lowered === 'gasto fijo') {
+    return 'Gasto fijo';
+  }
+
+  return normalized;
 }
 
 async function syncRecurringExpensesForMonth({ centerId, month, userId }) {
@@ -2273,9 +2280,39 @@ exports.getCenterExpenseTypes = catchAsyncErrors(async (req, res, next) => {
   const center = await Center.findById(req.params.id).select('expenseTypes');
   if (!center) return next(new ErrorHandler('Center not found', 404));
 
+  const [manualTypes, recurringTypes] = await Promise.all([
+    CenterExpense.distinct('expenseType', { center: req.params.id }),
+    RecurringExpenseConcept.distinct('expenseType', { center: req.params.id }),
+  ]);
+
+  const mergedTypes = [];
+  const allSources = [
+    ...(center.expenseTypes || []),
+    ...(manualTypes || []),
+    ...(recurringTypes || []),
+  ];
+
+  for (const rawType of allSources) {
+    const canonicalType = normalizeExpenseType(rawType);
+    if (!canonicalType) continue;
+    if (!mergedTypes.includes(canonicalType)) mergedTypes.push(canonicalType);
+  }
+
+  if (mergedTypes.length === 0) mergedTypes.push('Gasto fijo');
+
+  const currentTypes = center.expenseTypes || [];
+  const changed =
+    currentTypes.length !== mergedTypes.length ||
+    currentTypes.some((type, index) => type !== mergedTypes[index]);
+
+  if (changed) {
+    center.expenseTypes = mergedTypes;
+    await center.save();
+  }
+
   res.status(200).json({
     success: true,
-    types: center.expenseTypes || [],
+    types: mergedTypes,
   });
 });
 
