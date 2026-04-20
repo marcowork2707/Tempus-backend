@@ -2496,45 +2496,6 @@ async function getTariffCancellationRenewals(centerId, referenceDateStr = null) 
       return text.includes('informes') && text.includes('cancelaciones de tarifa') && text.includes('generar informe');
     }, { timeout: 20000 }).catch(() => {});
 
-    // Paso 2-3: fijar fechas (Desde/Hasta) escribiendo manualmente, como en UI.
-    const typedDates = await (async () => {
-      try {
-        const fechasPanel = page
-          .locator('div, fieldset, section, form')
-          .filter({ hasText: /\bfechas\b/i })
-          .first();
-
-        if (!(await fechasPanel.count())) return false;
-
-        const dateInputs = fechasPanel.locator('input[type="text"], input[type="date"]');
-        if ((await dateInputs.count()) < 2) return false;
-
-        const fromInput = dateInputs.nth(0);
-        const toInput = dateInputs.nth(1);
-
-        await fromInput.click({ clickCount: 3, timeout: 5000 }).catch(() => {});
-        await fromInput.fill(range.startInput, { timeout: 5000 });
-        await fromInput.dispatchEvent('input').catch(() => {});
-        await fromInput.dispatchEvent('change').catch(() => {});
-        await fromInput.press('Tab').catch(() => {});
-
-        await toInput.click({ clickCount: 3, timeout: 5000 }).catch(() => {});
-        await toInput.fill(range.endInput, { timeout: 5000 });
-        await toInput.dispatchEvent('input').catch(() => {});
-        await toInput.dispatchEvent('change').catch(() => {});
-        await toInput.press('Tab').catch(() => {});
-
-        const fromValue = await fromInput.inputValue().catch(() => '');
-        const toValue = await toInput.inputValue().catch(() => '');
-        console.log('[AimHarder] Fecha escrita manualmente:', { fromValue, toValue });
-
-        return true;
-      } catch {
-        return false;
-      }
-    })();
-
-    // Fallback: datepicker/evaluate si la escritura manual no encontró inputs válidos.
     const evaluateResult = await page.evaluate(({ startInput, endInput }) => {
       const normalize = (value) => String(value || '').replace(/\s+/g, ' ').trim().toLowerCase();
 
@@ -2548,27 +2509,20 @@ async function getTariffCancellationRenewals(centerId, referenceDateStr = null) 
         return Number.isNaN(date.getTime()) ? null : date;
       };
 
-      const findDateInputByLabel = (labelNeedle) => {
-        const candidates = Array.from(document.querySelectorAll('label, span, div, td, strong'))
-          .filter((el) => normalize(el.textContent) === labelNeedle);
+      const getDateInputsFromFechasPanel = () => {
+        const containers = Array.from(document.querySelectorAll('form, fieldset, .box, .panel, .card, div'));
+        const candidate = containers.find((container) => {
+          const text = normalize(container.textContent);
+          return text.includes('fechas') && text.includes('desde') && text.includes('hasta');
+        });
 
-        const queryInput = (root) => root?.querySelector?.('input[type="text"], input[type="date"]') || null;
+        if (!candidate) return [];
 
-        for (const label of candidates) {
-          const parent = label.parentElement;
-          const direct = queryInput(parent);
-          if (direct) return direct;
-
-          let sibling = label.nextElementSibling;
-          while (sibling) {
-            if (sibling.matches?.('input[type="text"], input[type="date"]')) return sibling;
-            const nested = queryInput(sibling);
-            if (nested) return nested;
-            sibling = sibling.nextElementSibling;
-          }
-        }
-
-        return null;
+        return Array.from(candidate.querySelectorAll('input[type="text"], input[type="date"]'))
+          .filter((input) => {
+            const style = window.getComputedStyle(input);
+            return style.display !== 'none' && style.visibility !== 'hidden';
+          });
       };
 
       const setDateInput = (input, value) => {
@@ -2590,18 +2544,9 @@ async function getTariffCancellationRenewals(centerId, referenceDateStr = null) 
         input.blur();
       };
 
-      let fromInput = findDateInputByLabel('desde');
-      let toInput = findDateInputByLabel('hasta');
-
-      if (!fromInput || !toInput) {
-        const dateInputsInDatePanel = Array.from(document.querySelectorAll('input[type="text"], input[type="date"]')).filter((input) => {
-          const panel = input.closest('fieldset, .box, .panel, .card, form, div');
-          const text = normalize(panel?.textContent || '');
-          return text.includes('fechas') && text.includes('desde') && text.includes('hasta');
-        });
-        if (!fromInput) fromInput = dateInputsInDatePanel[0] || null;
-        if (!toInput) toInput = dateInputsInDatePanel[1] || null;
-      }
+      const dateInputsInDatePanel = getDateInputsFromFechasPanel();
+      const fromInput = dateInputsInDatePanel[0] || null;
+      const toInput = dateInputsInDatePanel[1] || null;
 
       if (fromInput && toInput) {
         setDateInput(fromInput, startInput);
@@ -2636,6 +2581,8 @@ async function getTariffCancellationRenewals(centerId, referenceDateStr = null) 
       }
 
       return {
+        sameInputResolved: fromInput && toInput ? fromInput === toInput : false,
+        panelInputCount: dateInputsInDatePanel.length,
         fromFound: !!fromInput,
         toFound: !!toInput,
         fromValue: fromInput ? String(fromInput.value || '') : '',
@@ -2645,7 +2592,6 @@ async function getTariffCancellationRenewals(centerId, referenceDateStr = null) 
     }, { startInput: range.startInput, endInput: range.endInput });
 
     console.log('[AimHarder] Resultado evaluate fechas:', {
-      typedDates,
       ...evaluateResult,
     });
 
