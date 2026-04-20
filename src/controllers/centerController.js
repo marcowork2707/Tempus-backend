@@ -797,6 +797,9 @@ function normalizeExpenseType(value) {
   if (lowered === 'fixed' || lowered === 'gastos fijos' || lowered === 'gasto fijo') {
     return 'Gasto fijo';
   }
+  if (lowered === 'sueldo' || lowered === 'sueldos') {
+    return 'Sueldos';
+  }
 
   return normalized;
 }
@@ -2298,6 +2301,8 @@ exports.getCenterExpenseTypes = catchAsyncErrors(async (req, res, next) => {
     if (!mergedTypes.includes(canonicalType)) mergedTypes.push(canonicalType);
   }
 
+  if (!mergedTypes.includes('Sueldos')) mergedTypes.push('Sueldos');
+
   if (mergedTypes.length === 0) mergedTypes.push('Gasto fijo');
 
   const currentTypes = center.expenseTypes || [];
@@ -2384,6 +2389,10 @@ exports.deleteExpenseType = catchAsyncErrors(async (req, res, next) => {
   const { type } = req.body;
   if (!type) {
     return next(new ErrorHandler('Type is required', 400));
+  }
+
+  if (normalizeExpenseType(type) === 'Sueldos') {
+    return next(new ErrorHandler('Sueldos type is mandatory and cannot be deleted', 400));
   }
 
   const index = center.expenseTypes?.indexOf(type) ?? -1;
