@@ -23,7 +23,7 @@ const recurringExpenseConceptSchema = new mongoose.Schema(
     expenseType: {
       type: String,
       trim: true,
-      default: 'Gastos fijos',
+      default: 'Gasto fijo',
       index: true,
     },
     comment: {
