@@ -2440,17 +2440,27 @@ async function getTariffCancellationRenewals(centerId, referenceDateStr = null) 
     }
 
     const page = await context.newPage();
-    await ensureAuthenticatedSession(page, config);
+    const reportsUrl = `${config.baseUrl}/reports`;
+
+    // Esta tarea debe entrar directamente a Informes (no pasar por /control).
+    console.log('[AimHarder] Navegando directamente a Informes...');
+    await page.goto(reportsUrl, { waitUntil: 'domcontentloaded', timeout: 45000 });
+    await dismissCookies(page);
+    await page.waitForLoadState('networkidle', { timeout: 20000 }).catch(() => {});
+
+    const initialReportsUrl = page.url();
+    if (!isAuthenticatedAimHarderUrl(initialReportsUrl)) {
+      console.log('[AimHarder] Sesión no válida en /reports, iniciando login...');
+      await login(page, config);
+      await page.goto(reportsUrl, { waitUntil: 'domcontentloaded', timeout: 45000 });
+      await dismissCookies(page);
+      await page.waitForLoadState('networkidle', { timeout: 20000 }).catch(() => {});
+    }
 
     await setSessionCache(config, {
       cookies: await context.cookies(),
       expiry: Date.now() + SESSION_TTL_MS,
     });
-
-    const reportsUrl = `${config.baseUrl}/reports`;
-    await page.goto(reportsUrl, { waitUntil: 'domcontentloaded', timeout: 45000 });
-    await dismissCookies(page);
-    await page.waitForLoadState('networkidle', { timeout: 20000 }).catch(() => {});
 
     // Paso 1: abrir explícitamente "Cancelaciones de tarifa" desde Informes.
     const cancelacionesCard = page
