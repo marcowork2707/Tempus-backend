@@ -16,6 +16,7 @@ const {
   setClassReportHandoffStatus,
   getPendingPaymentsWithTPVError,
   getPendingPaymentsWithoutTPVError,
+  getTariffCancellationRenewals,
 } = require('../services/aimharderService');
 const UserCenterRole = require('../models/UserCenterRole');
 const User = require('../models/User');
@@ -544,6 +545,41 @@ exports.getPendingPaymentsNoTpv = async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Error al obtener los pagos pendientes sin fallo TPV de AimHarder.',
+      detail: process.env.NODE_ENV === 'development' ? err.message : undefined,
+    });
+  }
+};
+
+/**
+ * GET /api/aimharder/tariff-cancellation-renewals?centerId=xxx&date=YYYY-MM-DD
+ * Obtiene clientes con tarifas trimestrales/semestrales desde "Informes > Cancelaciones de tarifa".
+ */
+exports.getTariffCancellationRenewals = async (req, res) => {
+  try {
+    const { centerId, date } = req.query;
+    if (!centerId) {
+      return res.status(400).json({ success: false, message: 'centerId es obligatorio' });
+    }
+    if (date && !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      return res.status(400).json({ success: false, message: 'Formato de fecha inválido. Usa YYYY-MM-DD' });
+    }
+
+    const result = await getTariffCancellationRenewals(centerId, date || null);
+    res.json({
+      success: true,
+      startDate: result.startDate,
+      endDate: result.endDate,
+      count: result.clients.length,
+      clients: result.clients,
+    });
+  } catch (err) {
+    console.error('[AimHarder Controller] Error cancelaciones de tarifa:', err.message);
+    if (err.message.includes('credenciales')) {
+      return res.status(503).json({ success: false, message: err.message });
+    }
+    res.status(500).json({
+      success: false,
+      message: 'Error al obtener cancelaciones de tarifa desde AimHarder.',
       detail: process.env.NODE_ENV === 'development' ? err.message : undefined,
     });
   }

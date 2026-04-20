@@ -109,6 +109,42 @@ function addDays(date, amount) {
   return copy;
 }
 
+function toDateInputValue(date) {
+  const day = String(date.getDate()).padStart(2, '0');
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const year = date.getFullYear();
+  return `${day}/${month}/${year}`;
+}
+
+function getTermRenewalReportRange(referenceDateStr = null) {
+  const referenceDate = referenceDateStr ? new Date(`${referenceDateStr}T12:00:00`) : new Date();
+  if (Number.isNaN(referenceDate.getTime())) {
+    throw new Error('Fecha de referencia inválida para calcular el informe de cancelaciones');
+  }
+
+  const year = referenceDate.getFullYear();
+  const month = referenceDate.getMonth();
+
+  const lastDayOfMonth = new Date(year, month + 1, 0);
+  const lastDayDow = lastDayOfMonth.getDay();
+  const daysBackToMonday = lastDayDow === 0 ? 6 : lastDayDow - 1;
+  const startDate = addDays(lastDayOfMonth, -daysBackToMonday);
+
+  const firstDayNextMonth = new Date(year, month + 1, 1);
+  const firstNextDow = firstDayNextMonth.getDay();
+  const daysForwardToSunday = firstNextDow === 0 ? 0 : 7 - firstNextDow;
+  const endDate = addDays(firstDayNextMonth, daysForwardToSunday);
+
+  return {
+    startDate,
+    endDate,
+    startIso: toDateString(startDate),
+    endIso: toDateString(endDate),
+    startInput: toDateInputValue(startDate),
+    endInput: toDateInputValue(endDate),
+  };
+}
+
 function normalizeName(value = '') {
   return value
     .normalize('NFD')
@@ -2265,6 +2301,187 @@ async function getPendingPaymentsWithoutTPVError(centerId) {
   }
 }
 
+async function parseTariffCancellationRows(page) {
+  return page.evaluate(() => {
+    const normalize = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+    const includesAny = (source, needles) => needles.some((needle) => source.includes(needle));
+
+    const tables = Array.from(document.querySelectorAll('table'));
+    let selectedTable = null;
+    let selectedHeader = [];
+
+    for (const table of tables) {
+      const headers = Array.from(table.querySelectorAll('thead th, tr th')).map((th) =>
+        normalize(th.textContent).toLowerCase()
+      );
+
+      if (!headers.length) continue;
+
+      if (headers.some((h) => h.includes('tarifas canceladas'))) {
+        selectedTable = table;
+        selectedHeader = headers;
+        break;
+      }
+    }
+
+    if (!selectedTable) {
+      return [];
+    }
+
+    const findIdx = (candidates) => selectedHeader.findIndex((header) => includesAny(header, candidates));
+
+    const nameIdx = findIdx(['nombre y apellidos', 'cliente', 'nombre']);
+    const phoneIdx = findIdx(['telefonos', 'teléfonos', 'telefono', 'teléfono', 'movil', 'móvil']);
+    const tariffIdx = findIdx(['tarifas canceladas', 'tarifa cancelada', 'tarifa']);
+    const endDateIdx = findIdx(['fecha de baja', 'baja']);
+
+    const rows = Array.from(selectedTable.querySelectorAll('tbody tr')).length
+      ? Array.from(selectedTable.querySelectorAll('tbody tr'))
+      : Array.from(selectedTable.querySelectorAll('tr')).slice(1);
+
+    const results = [];
+    const seen = new Set();
+
+    for (const row of rows) {
+      const cells = Array.from(row.querySelectorAll('td')).map((td) => normalize(td.textContent));
+      if (!cells.length) continue;
+
+      const memberName = normalize(nameIdx >= 0 ? cells[nameIdx] : cells[1] || cells[0]);
+      const phone = normalize(phoneIdx >= 0 ? cells[phoneIdx] : '');
+      const cancelledTariff = normalize(tariffIdx >= 0 ? cells[tariffIdx] : '');
+      const cancellationDate = normalize(endDateIdx >= 0 ? cells[endDateIdx] : '');
+
+      if (!memberName || !cancelledTariff) continue;
+      if (!/(semestral|trimestral)/i.test(cancelledTariff)) continue;
+
+      const dedupeKey = `${memberName}::${phone}::${cancelledTariff}::${cancellationDate}`;
+      if (seen.has(dedupeKey)) continue;
+      seen.add(dedupeKey);
+
+      results.push({
+        memberName,
+        phone,
+        cancelledTariff,
+        cancellationDate,
+      });
+    }
+
+    return results;
+  });
+}
+
+async function getTariffCancellationRenewals(centerId, referenceDateStr = null) {
+  const config = await getCenterAimHarderConfig(centerId);
+
+  if (!config.username || !config.password) {
+    throw new Error(
+      `Faltan credenciales de AimHarder para ${config.centerName}. Configura las credenciales en la integración del centro.`
+    );
+  }
+
+  const range = getTermRenewalReportRange(referenceDateStr);
+  console.log('[AimHarder] ===== Scraping cancelaciones de tarifa (trimestral/semestral) =====');
+  console.log(`[AimHarder] Rango informe: ${range.startIso} -> ${range.endIso}`);
+
+  const browser = await chromium.launch({ headless: true, slowMo: 0 });
+  try {
+    const context = await browser.newContext({
+      userAgent:
+        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+    });
+
+    const sessionCache = await getSessionCache(config);
+    if (sessionCache.cookies && sessionCache.expiry && Date.now() < sessionCache.expiry) {
+      await context.addCookies(sessionCache.cookies);
+      console.log('[AimHarder] Sesión restaurada desde caché');
+    }
+
+    const page = await context.newPage();
+    await ensureAuthenticatedSession(page, config);
+
+    await setSessionCache(config, {
+      cookies: await context.cookies(),
+      expiry: Date.now() + SESSION_TTL_MS,
+    });
+
+    const reportsUrl = `${config.baseUrl}/reports`;
+    await page.goto(reportsUrl, { waitUntil: 'domcontentloaded', timeout: 45000 });
+    await dismissCookies(page);
+    await page.waitForLoadState('networkidle', { timeout: 20000 }).catch(() => {});
+
+    await page.evaluate(({ startInput, endInput }) => {
+      const normalize = (value) => String(value || '').replace(/\s+/g, ' ').trim().toLowerCase();
+
+      const setDateInput = (input, value) => {
+        if (!input) return;
+        input.focus();
+        input.value = value;
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        input.dispatchEvent(new Event('change', { bubbles: true }));
+        input.blur();
+      };
+
+      const heading = Array.from(document.querySelectorAll('h1,h2,h3,h4,legend,label,strong'))
+        .find((el) => normalize(el.textContent).includes('fechas'));
+
+      let dateInputs = [];
+      if (heading) {
+        const container = heading.closest('fieldset, .box, .panel, .card, form, div') || document;
+        dateInputs = Array.from(container.querySelectorAll('input[type="text"], input[type="date"]'));
+      }
+
+      if (dateInputs.length < 2) {
+        dateInputs = Array.from(document.querySelectorAll('input[type="text"], input[type="date"]'));
+      }
+
+      setDateInput(dateInputs[0], startInput);
+      setDateInput(dateInputs[1], endInput);
+
+      const selects = Array.from(document.querySelectorAll('select'));
+      for (const select of selects) {
+        const labelText = normalize(
+          (select.closest('label') && select.closest('label').textContent) ||
+          (select.parentElement && select.parentElement.textContent) ||
+          ''
+        );
+        const shouldSetNo = labelText.includes('descartar bonos') || labelText.includes('listar clientes');
+        if (!shouldSetNo) continue;
+
+        const noOption = Array.from(select.options).find((option) => normalize(option.textContent) === 'no');
+        if (noOption) {
+          select.value = noOption.value;
+          select.dispatchEvent(new Event('change', { bubbles: true }));
+        }
+      }
+
+      const trigger = Array.from(document.querySelectorAll('button, input[type="button"], input[type="submit"], a'))
+        .find((el) => normalize(el.textContent || el.getAttribute('value')).includes('generar informe'));
+
+      if (trigger) {
+        trigger.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+      }
+    }, { startInput: range.startInput, endInput: range.endInput });
+
+    await page.waitForTimeout(1200).catch(() => {});
+    await page.waitForLoadState('networkidle', { timeout: 25000 }).catch(() => {});
+    await page.waitForFunction(() => {
+      return document.querySelectorAll('table tbody tr').length > 0 || document.querySelectorAll('table tr').length > 1;
+    }, { timeout: 25000 }).catch(() => {});
+
+    const clients = await parseTariffCancellationRows(page);
+    console.log(`[AimHarder] ${clients.length} clientes trimestral/semestral detectados`);
+
+    return {
+      startDate: range.startIso,
+      endDate: range.endIso,
+      clients,
+    };
+  } finally {
+    await browser.close();
+    console.log('[AimHarder] ===== Fin scraping cancelaciones de tarifa =====');
+  }
+}
+
 module.exports = {
   getAbsences,
   getStoredAbsences,
@@ -2285,6 +2502,7 @@ module.exports = {
   setClassReportHandoffStatus,
   getPendingPaymentsWithTPVError,
   getPendingPaymentsWithoutTPVError,
+  getTariffCancellationRenewals,
   getYesterday,
   toDateString,
 };
