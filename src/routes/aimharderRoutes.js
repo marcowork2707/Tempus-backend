@@ -5,6 +5,7 @@ const {
   getOccupancy,
   clearSession,
   syncActiveClients,
+  getActiveClientsSyncStatus,
   getIntegration,
   updateIntegration,
   getClassReports,
@@ -26,6 +27,7 @@ router.get('/occupancy', isAuthenticatedUser, getOccupancy);
 // Fuerza la sincronización de clientes activos
 // POST /api/aimharder/sync-active-clients
 router.post('/sync-active-clients', isAuthenticatedUser, syncActiveClients);
+router.get('/active-clients-sync-status', isAuthenticatedUser, getActiveClientsSyncStatus);
 
 // Limpiar caché de sesión de AimHarder
 // POST /api/aimharder/clear-session

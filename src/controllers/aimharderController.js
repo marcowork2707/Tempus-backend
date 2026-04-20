@@ -19,6 +19,7 @@ const {
 } = require('../services/aimharderService');
 const UserCenterRole = require('../models/UserCenterRole');
 const User = require('../models/User');
+const ActiveClient = require('../models/ActiveClient');
 
 function normalizeName(value = '') {
   return value
@@ -193,6 +194,50 @@ exports.syncActiveClients = async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Error al sincronizar clientes activos desde AimHarder.',
+      detail: process.env.NODE_ENV === 'development' ? err.message : undefined,
+    });
+  }
+};
+
+/**
+ * GET /api/aimharder/active-clients-sync-status?centerId=xxx
+ * Devuelve la última sincronización de clientes activos para un centro.
+ */
+exports.getActiveClientsSyncStatus = async (req, res) => {
+  try {
+    const { centerId } = req.query;
+    if (!centerId) {
+      return res.status(400).json({ success: false, message: 'centerId es obligatorio' });
+    }
+
+    const latest = await ActiveClient.findOne({ center: centerId })
+      .select('reportDate lastSyncedAt')
+      .sort({ lastSyncedAt: -1, updatedAt: -1 });
+
+    if (!latest) {
+      return res.json({
+        success: true,
+        hasData: false,
+        lastSyncAt: null,
+        reportDate: null,
+        count: 0,
+      });
+    }
+
+    const count = await ActiveClient.countDocuments({ center: centerId, reportDate: latest.reportDate });
+
+    return res.json({
+      success: true,
+      hasData: true,
+      lastSyncAt: latest.lastSyncedAt || null,
+      reportDate: latest.reportDate || null,
+      count,
+    });
+  } catch (err) {
+    console.error('[AimHarder Controller] Error getActiveClientsSyncStatus:', err.message);
+    return res.status(500).json({
+      success: false,
+      message: 'Error al obtener el estado de sincronización de clientes activos.',
       detail: process.env.NODE_ENV === 'development' ? err.message : undefined,
     });
   }

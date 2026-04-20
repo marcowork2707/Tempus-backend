@@ -64,13 +64,33 @@ app.use(errorMiddleware);
 
 let lastAimharderSyncDay = null;
 let lastOccupancySyncDay = null;
-async function maybeRunDailyAimharderSync() {
-  const now = new Date();
-  const hours = now.getHours();
-  const minutes = now.getMinutes();
-  const todayKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
 
-  if (hours !== 8 || minutes !== 0 || lastAimharderSyncDay === todayKey) {
+function getMadridClockParts(date = new Date()) {
+  const formatter = new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Europe/Madrid',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  });
+
+  const parts = formatter.formatToParts(date);
+  const map = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+
+  return {
+    todayKey: `${map.year}-${map.month}-${map.day}`,
+    hour: Number(map.hour),
+    minute: Number(map.minute),
+  };
+}
+
+async function maybeRunDailyAimharderSync() {
+  const { hour, todayKey } = getMadridClockParts();
+
+  // Run once per day after 08:00 (Europe/Madrid), including catch-up after restarts.
+  if (hour < 8 || lastAimharderSyncDay === todayKey) {
     return;
   }
 
@@ -92,12 +112,11 @@ async function maybeRunDailyAimharderSync() {
 }
 
 async function maybeRunDailyOccupancySync() {
-  const now = new Date();
-  const hours = now.getHours();
-  const minutes = now.getMinutes();
-  const todayKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+  const { hour, minute, todayKey } = getMadridClockParts();
 
-  if (hours !== 8 || minutes !== 5 || lastOccupancySyncDay === todayKey) {
+  // Run once per day from 08:05 onward (Europe/Madrid), including catch-up after restarts.
+  const afterScheduledTime = hour > 8 || (hour === 8 && minute >= 5);
+  if (!afterScheduledTime || lastOccupancySyncDay === todayKey) {
     return;
   }
 
