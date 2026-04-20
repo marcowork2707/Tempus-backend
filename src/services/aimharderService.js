@@ -2301,8 +2301,8 @@ async function getPendingPaymentsWithoutTPVError(centerId) {
   }
 }
 
-async function parseTariffCancellationRows(page) {
-  return page.evaluate(() => {
+async function parseTariffCancellationRows(context) {
+  return context.evaluate(() => {
     const normalize = (value) => String(value || '').replace(/\s+/g, ' ').trim();
     const includesAny = (source, needles) => needles.some((needle) => source.includes(needle));
 
@@ -2447,27 +2447,48 @@ async function getTariffCancellationRenewals(centerId, referenceDateStr = null) 
     await dismissCookies(page);
     await page.waitForLoadState('networkidle', { timeout: 20000 }).catch(() => {});
 
-    // Asegura que estamos en "Cancelaciones de tarifa" antes de filtrar/generar.
+    // Paso 1: abrir explícitamente "Cancelaciones de tarifa" desde Informes.
     await page.evaluate(() => {
       const normalize = (value) => String(value || '').replace(/\s+/g, ' ').trim().toLowerCase();
-      const target = Array.from(document.querySelectorAll('a, button, li, span, div')).find((el) => {
-        const text = normalize(el.textContent);
-        return text === 'cancelaciones de tarifa' || text.includes('cancelaciones de tarifa');
-      });
 
-      if (target) {
-        target.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+      const cards = Array.from(document.querySelectorAll('div, li, article, section, tr'));
+      const targetCard = cards.find((el) => normalize(el.textContent).includes('cancelaciones de tarifa'));
+      if (!targetCard) return;
+
+      const reportTrigger = Array.from(targetCard.querySelectorAll('a, button, span, div')).find((el) =>
+        normalize(el.textContent || el.getAttribute('value')).includes('ver informe')
+      );
+
+      if (reportTrigger) {
+        reportTrigger.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+      } else {
+        targetCard.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
       }
     });
 
     await page.waitForTimeout(700).catch(() => {});
     await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
 
+    await page.waitForFunction(() => {
+      const text = String(document.body?.textContent || '').toLowerCase();
+      return text.includes('informes') && text.includes('cancelaciones de tarifa') && text.includes('generar informe');
+    }, { timeout: 20000 }).catch(() => {});
+
+    // Paso 2-3: fijar fechas (Desde/Hasta) igual que en UI.
     await page.evaluate(({ startInput, endInput }) => {
       const normalize = (value) => String(value || '').replace(/\s+/g, ' ').trim().toLowerCase();
 
       const setDateInput = (input, value) => {
         if (!input) return;
+
+        try {
+          if (window.jQuery && window.jQuery.fn && typeof window.jQuery(input).datepicker === 'function') {
+            window.jQuery(input).datepicker('setDate', value);
+          }
+        } catch {
+          // fallback manual below
+        }
+
         input.focus();
         input.value = value;
         input.dispatchEvent(new Event('input', { bubbles: true }));
@@ -2508,6 +2529,7 @@ async function getTariffCancellationRenewals(centerId, referenceDateStr = null) 
         }
       }
 
+      // Paso 4: generar informe.
       const trigger = Array.from(document.querySelectorAll('button, input[type="button"], input[type="submit"], a'))
         .find((el) => normalize(el.textContent || el.getAttribute('value')).includes('generar informe'));
 
@@ -2519,10 +2541,34 @@ async function getTariffCancellationRenewals(centerId, referenceDateStr = null) 
     await page.waitForTimeout(1200).catch(() => {});
     await page.waitForLoadState('networkidle', { timeout: 25000 }).catch(() => {});
     await page.waitForFunction(() => {
-      return document.querySelectorAll('table tbody tr').length > 0 || document.querySelectorAll('table tr').length > 1;
+      const headers = Array.from(document.querySelectorAll('table th')).map((th) =>
+        String(th.textContent || '').toLowerCase().replace(/\s+/g, ' ').trim()
+      );
+      const hasTargetTable = headers.some((h) => h.includes('tarifas canceladas'));
+      if (hasTargetTable) return true;
+
+      const bodyText = String(document.body?.textContent || '').toLowerCase();
+      return bodyText.includes('no hay resultados') || bodyText.includes('0 resultados');
     }, { timeout: 25000 }).catch(() => {});
 
-    const clients = await parseTariffCancellationRows(page);
+    let clients = await parseTariffCancellationRows(page);
+
+    // Fallback: algunos layouts de AimHarder renderizan el informe dentro de un iframe.
+    if (!clients.length) {
+      const frames = page.frames().filter((frame) => frame !== page.mainFrame());
+      for (const frame of frames) {
+        try {
+          const frameClients = await parseTariffCancellationRows(frame);
+          if (frameClients.length) {
+            clients = frameClients;
+            break;
+          }
+        } catch {
+          // Ignorar frames no accesibles o sin contenido del informe
+        }
+      }
+    }
+
     console.log(`[AimHarder] ${clients.length} clientes trimestral/semestral detectados`);
 
     return {
