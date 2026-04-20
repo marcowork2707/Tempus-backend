@@ -1287,11 +1287,23 @@ exports.updateCenterExpense = catchAsyncErrors(async (req, res, next) => {
 });
 
 exports.deleteCenterExpense = catchAsyncErrors(async (req, res, next) => {
-  const deleted = await CenterExpense.findOneAndDelete({
+  const expense = await CenterExpense.findOne({
     _id: req.params.expenseId,
     center: req.params.id,
   });
-  if (!deleted) return next(new ErrorHandler('Expense not found', 404));
+
+  if (!expense) return next(new ErrorHandler('Expense not found', 404));
+
+  const shouldDeleteRecurring = String(req.query.deleteRecurringConcept || '').toLowerCase() === 'true';
+  if (shouldDeleteRecurring && expense.recurringConcept) {
+    await RecurringExpenseConcept.findOneAndUpdate(
+      { _id: expense.recurringConcept, center: req.params.id },
+      { active: false, updatedBy: req.user.id },
+      { new: true }
+    );
+  }
+
+  await CenterExpense.findByIdAndDelete(expense._id);
 
   res.status(200).json({ success: true, message: 'Expense deleted' });
 });
@@ -2296,13 +2308,17 @@ exports.updateCenterRecurringExpenseConcept = catchAsyncErrors(async (req, res, 
 });
 
 exports.deleteCenterRecurringExpenseConcept = catchAsyncErrors(async (req, res, next) => {
-  const deleted = await RecurringExpenseConcept.findOneAndDelete({
+  const concept = await RecurringExpenseConcept.findOne({
     _id: req.params.conceptId,
     center: req.params.id,
   });
-  if (!deleted) return next(new ErrorHandler('Recurring concept not found', 404));
+  if (!concept) return next(new ErrorHandler('Recurring concept not found', 404));
 
-  res.status(200).json({ success: true, message: 'Recurring concept deleted' });
+  concept.active = false;
+  concept.updatedBy = req.user.id;
+  await concept.save();
+
+  res.status(200).json({ success: true, message: 'Recurring concept deactivated' });
 });
 
 exports.toggleExpenseChecked = catchAsyncErrors(async (req, res, next) => {
