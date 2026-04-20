@@ -2464,7 +2464,7 @@ async function getTariffCancellationRenewals(centerId, referenceDateStr = null) 
 
     // Paso 1: abrir explícitamente "Cancelaciones de tarifa" desde Informes.
     const cancelacionesCard = page
-      .locator('div, li, article, section, tr')
+      .locator('a, button')
       .filter({ hasText: /cancelaciones de tarifa/i })
       .first();
 
@@ -2475,17 +2475,35 @@ async function getTariffCancellationRenewals(centerId, referenceDateStr = null) 
       throw new Error('No se encontró la tarjeta de "Cancelaciones de tarifa" en Informes');
     }
 
-    const verInformeInCard = cancelacionesCard
-      .locator('a, button, input[type="button"], input[type="submit"], span, div')
-      .filter({ hasText: /ver informe/i })
-      .first();
+    const verMeta = await cancelacionesCard.evaluate((el) => ({
+      tag: el.tagName,
+      text: (el.textContent || '').trim(),
+      id: el.id || null,
+      className: el.className || null,
+      href: el.getAttribute('href'),
+      onclick: el.getAttribute('onclick'),
+    })).catch(() => null);
+    console.log('[AimHarder] Meta Cancelaciones enlace:', verMeta);
 
-    if (await verInformeInCard.count()) {
-      await verInformeInCard.click({ force: true, timeout: 8000 }).catch(async () => {
-        await cancelacionesCard.click({ force: true, timeout: 8000 });
-      });
-    } else {
+    let clicked = false;
+    try {
       await cancelacionesCard.click({ force: true, timeout: 8000 });
+      clicked = true;
+    } catch {
+      clicked = false;
+    }
+
+    if (!clicked && verMeta?.onclick) {
+      const invoked = await page.evaluate((onclickCode) => {
+        try {
+          // eslint-disable-next-line no-eval
+          eval(onclickCode);
+          return true;
+        } catch {
+          return false;
+        }
+      }, verMeta.onclick);
+      console.log('[AimHarder] onclick Cancelaciones ejecutado:', invoked);
     }
 
     await page.waitForTimeout(700).catch(() => {});
@@ -2495,6 +2513,24 @@ async function getTariffCancellationRenewals(centerId, referenceDateStr = null) 
       const text = String(document.body?.textContent || '').toLowerCase();
       return text.includes('informes') && text.includes('cancelaciones de tarifa') && text.includes('generar informe');
     }, { timeout: 20000 }).catch(() => {});
+
+    const screenDiagnostics = await page.evaluate(() => {
+      const norm = (v) => String(v || '').replace(/\s+/g, ' ').trim();
+      const lower = (v) => norm(v).toLowerCase();
+      const bodyText = lower(document.body?.textContent || '');
+      const breadcrumbRaw = Array.from(document.querySelectorAll('h1,h2,h3,h4,.breadcrumb,nav,div,span'))
+        .map((el) => norm(el.textContent))
+        .find((text) => lower(text).includes('informes') && lower(text).includes('cancelaciones de tarifa')) || '';
+      const hasCancelPanel = bodyText.includes('descartar bonos') && bodyText.includes('grupo de tarifas');
+      const breadcrumb = breadcrumbRaw.length > 220 ? `${breadcrumbRaw.slice(0, 220)}...` : breadcrumbRaw;
+      return {
+        url: window.location.href,
+        breadcrumb,
+        hasGenerateReportFn: typeof window.generateReport === 'function',
+        hasCancelPanel,
+      };
+    });
+    console.log('[AimHarder] Diagnostico pantalla:', screenDiagnostics);
 
     const evaluateResult = await page.evaluate(({ startInput, endInput }) => {
       const normalize = (value) => String(value || '').replace(/\s+/g, ' ').trim().toLowerCase();
@@ -2509,12 +2545,22 @@ async function getTariffCancellationRenewals(centerId, referenceDateStr = null) 
         return Number.isNaN(date.getTime()) ? null : date;
       };
 
-      const getDateInputsFromFechasPanel = () => {
-        const containers = Array.from(document.querySelectorAll('form, fieldset, .box, .panel, .card, div'));
-        const candidate = containers.find((container) => {
+      const getFormScope = () => {
+        const containers = Array.from(document.querySelectorAll('form, fieldset, .box, .panel, .card, section, div'));
+        return containers.find((container) => {
           const text = normalize(container.textContent);
-          return text.includes('fechas') && text.includes('desde') && text.includes('hasta');
-        });
+          return (
+            text.includes('cancelaciones de tarifa') &&
+            text.includes('fechas') &&
+            text.includes('desde') &&
+            text.includes('hasta') &&
+            text.includes('generar informe')
+          );
+        }) || null;
+      };
+
+      const getDateInputsFromFechasPanel = () => {
+        const candidate = getFormScope();
 
         if (!candidate) return [];
 
@@ -2570,24 +2616,20 @@ async function getTariffCancellationRenewals(centerId, referenceDateStr = null) 
         }
       }
 
-      // Paso 4: generar informe.
-      const trigger = Array.from(document.querySelectorAll('button, input[type="button"], input[type="submit"], a'))
-        .find((el) => normalize(el.textContent || el.getAttribute('value')) === 'generar informe')
-        || Array.from(document.querySelectorAll('button, input[type="button"], input[type="submit"], a'))
-          .find((el) => normalize(el.textContent || el.getAttribute('value')).includes('generar informe'));
-
-      if (trigger) {
-        trigger.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
-      }
+      const scope = getFormScope() || document;
+      const triggerCandidates = Array.from(scope.querySelectorAll('button, input[type="button"], input[type="submit"], a'))
+        .filter((el) => normalize(el.textContent || el.getAttribute('value')).includes('generar informe'));
 
       return {
         sameInputResolved: fromInput && toInput ? fromInput === toInput : false,
+        scopeFound: !!scope,
         panelInputCount: dateInputsInDatePanel.length,
         fromFound: !!fromInput,
         toFound: !!toInput,
         fromValue: fromInput ? String(fromInput.value || '') : '',
         toValue: toInput ? String(toInput.value || '') : '',
-        triggerFound: !!trigger,
+        triggerFound: triggerCandidates.length > 0,
+        triggerCount: triggerCandidates.length,
       };
     }, { startInput: range.startInput, endInput: range.endInput });
 
@@ -2607,6 +2649,41 @@ async function getTariffCancellationRenewals(centerId, referenceDateStr = null) 
     });
     console.log('[AimHarder] Diagnostico fechas:', dateDiagnostics);
 
+    // Paso 4: click real en el botón visible "Generar informe".
+    const generateCandidates = page.locator('button, input[type="button"], input[type="submit"], a').filter({ hasText: /generar informe/i });
+    const generateCount = await generateCandidates.count();
+    console.log('[AimHarder] Botones generar informe visibles:', generateCount);
+    let generated = false;
+    if (generateCount > 0) {
+      try {
+        await generateCandidates.first().click({ force: true, timeout: 12000 });
+        generated = true;
+      } catch {
+        generated = false;
+      }
+    }
+
+    if (!generated) {
+      const invoked = await page.evaluate(() => {
+        try {
+          if (typeof window.generateReport === 'function') {
+            window.generateReport();
+            return 'window.generateReport';
+          }
+
+          const trigger = document.getElementById('generateReportButton');
+          if (trigger) {
+            trigger.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+            return '#generateReportButton.click';
+          }
+        } catch {
+          // ignore
+        }
+        return null;
+      });
+      console.log('[AimHarder] Fallback generar informe:', invoked || 'no disponible');
+    }
+
     await page.waitForTimeout(1200).catch(() => {});
     await page.waitForLoadState('networkidle', { timeout: 25000 }).catch(() => {});
     await page.waitForFunction(() => {
@@ -2619,6 +2696,24 @@ async function getTariffCancellationRenewals(centerId, referenceDateStr = null) 
       const bodyText = String(document.body?.textContent || '').toLowerCase();
       return bodyText.includes('no hay resultados') || bodyText.includes('0 resultados');
     }, { timeout: 25000 }).catch(() => {});
+
+    const tableDiagnostics = await page.evaluate(() => {
+      const normalize = (value) => String(value || '').replace(/\s+/g, ' ').trim().toLowerCase();
+      const tables = Array.from(document.querySelectorAll('table'));
+      return {
+        url: window.location.href,
+        tables: tables.slice(0, 6).map((table, idx) => {
+          const headers = Array.from(table.querySelectorAll('th')).map((th) => normalize(th.textContent)).filter(Boolean);
+          const rows = table.querySelectorAll('tbody tr').length || Math.max(0, table.querySelectorAll('tr').length - 1);
+          return { idx, rows, headers: headers.slice(0, 10) };
+        }),
+        bodyHints: {
+          hasTarifasCanceladasText: normalize(document.body?.textContent || '').includes('tarifas canceladas'),
+          hasNoResults: normalize(document.body?.textContent || '').includes('no hay resultados') || normalize(document.body?.textContent || '').includes('0 resultados'),
+        },
+      };
+    });
+    console.log('[AimHarder] Diagnostico tablas:', JSON.stringify(tableDiagnostics));
 
     let clients = await parseTariffCancellationRows(page);
 
