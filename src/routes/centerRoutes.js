@@ -66,6 +66,7 @@ const {
   getVacationConflictRules,
   createVacationConflictRule,
   deleteVacationConflictRule,
+  getBalanceRange,
 } = require('../controllers/centerController');
 
 const { isAuthenticatedUser, authorizeRoles } = require('../middleware/auth');
@@ -112,6 +113,7 @@ router.get('/:id/overtime-summary', authorizeRoles('admin'), getCenterMonthlyOve
 router.post('/:id/payroll', authorizeRoles('admin'), upsertCenterPayrollEntry);
 router.delete('/:id/payroll/:entryId', authorizeRoles('admin'), deleteCenterPayrollEntry);
 router.get('/:id/expenses', authorizeRoles('admin'), getCenterExpensesSummary);
+router.get('/:id/balance-range', authorizeRoles('admin'), getBalanceRange);
 router.get('/:id/recurring-expenses', authorizeRoles('admin'), getCenterRecurringExpenseConcepts);
 router.post('/:id/recurring-expenses', authorizeRoles('admin'), createCenterRecurringExpenseConcept);
 router.put('/:id/recurring-expenses/:conceptId', authorizeRoles('admin'), updateCenterRecurringExpenseConcept);

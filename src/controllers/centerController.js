@@ -886,12 +886,19 @@ function parseDataUrlImage(value) {
 }
 
 function buildExpensesSummary({ manualExpenses, salaryExpenses }) {
-  const manualTotal = manualExpenses.reduce((total, item) => total + Number(item.amount || 0), 0);
+  const incomeEntries = manualExpenses.filter((i) => i.entryType === 'income');
+  const expenseEntries = manualExpenses.filter((i) => i.entryType !== 'income');
+
+  const incomeTotal = incomeEntries.reduce((total, item) => total + Number(item.amount || 0), 0);
+  const manualExpenseTotal = expenseEntries.reduce((total, item) => total + Number(item.amount || 0), 0);
   const salaryTotal = salaryExpenses.reduce((total, item) => total + Number(item.amount || 0), 0);
-  const total = manualTotal + salaryTotal;
+  const totalExpenses = manualExpenseTotal + salaryTotal;
+  const manualTotal = manualExpenseTotal; // kept for backwards compat (only expense entries)
+  const total = totalExpenses;
+  const profit = incomeTotal - totalExpenses;
 
   const byCategoryMap = new Map();
-  for (const item of manualExpenses) {
+  for (const item of expenseEntries) {
     const category = item.category || 'General';
     const current = byCategoryMap.get(category) || { category, amount: 0, count: 0 };
     current.amount += Number(item.amount || 0);
@@ -907,7 +914,7 @@ function buildExpensesSummary({ manualExpenses, salaryExpenses }) {
     .sort((a, b) => b.amount - a.amount);
 
   const byTypeMap = new Map();
-  for (const item of manualExpenses) {
+  for (const item of expenseEntries) {
     const type = normalizeExpenseType(item.expenseType);
     const current = byTypeMap.get(type) || { type, amount: 0, count: 0 };
     current.amount += Number(item.amount || 0);
@@ -929,15 +936,34 @@ function buildExpensesSummary({ manualExpenses, salaryExpenses }) {
     }))
     .sort((a, b) => b.amount - a.amount);
 
+  const byIncomeCategoryMap = new Map();
+  for (const item of incomeEntries) {
+    const cat = item.incomeCategory || item.category || 'Ingreso';
+    const current = byIncomeCategoryMap.get(cat) || { category: cat, amount: 0, count: 0 };
+    current.amount += Number(item.amount || 0);
+    current.count += 1;
+    byIncomeCategoryMap.set(cat, current);
+  }
+  const byIncomeCategory = Array.from(byIncomeCategoryMap.values())
+    .map((row) => ({
+      ...row,
+      percentage: incomeTotal > 0 ? Number(((row.amount / incomeTotal) * 100).toFixed(2)) : 0,
+    }))
+    .sort((a, b) => b.amount - a.amount);
+
   return {
     manualTotal: Number(manualTotal.toFixed(2)),
     salaryTotal: Number(salaryTotal.toFixed(2)),
     total: Number(total.toFixed(2)),
-    manualCount: manualExpenses.length,
+    incomeTotal: Number(incomeTotal.toFixed(2)),
+    incomeCount: incomeEntries.length,
+    profit: Number(profit.toFixed(2)),
+    manualCount: expenseEntries.length,
     salaryCount: salaryExpenses.length,
-    averageManualExpense: manualExpenses.length > 0 ? Number((manualTotal / manualExpenses.length).toFixed(2)) : 0,
+    averageManualExpense: expenseEntries.length > 0 ? Number((manualTotal / expenseEntries.length).toFixed(2)) : 0,
     byCategory,
     byType,
+    byIncomeCategory,
   };
 }
 
@@ -1148,6 +1174,8 @@ exports.createCenterExpense = catchAsyncErrors(async (req, res, next) => {
     supplier,
     notes,
     recurringConceptId,
+    entryType,
+    incomeCategory,
   } = req.body;
 
   assertDateFormat(date);
@@ -1178,6 +1206,8 @@ exports.createCenterExpense = catchAsyncErrors(async (req, res, next) => {
     concept: String(concept).trim(),
     category: String(category || 'General').trim(),
     expenseType: normalizeExpenseType(expenseType),
+    entryType: entryType === 'income' ? 'income' : 'expense',
+    incomeCategory: incomeCategory ? String(incomeCategory).trim() : '',
     amount: Number(parsedAmount.toFixed(2)),
     comment: comment ? String(comment).trim() : '',
     paymentMethod: paymentMethod ? String(paymentMethod).trim() : '',
@@ -1203,7 +1233,7 @@ exports.updateCenterExpense = catchAsyncErrors(async (req, res, next) => {
   });
   if (!expense) return next(new ErrorHandler('Expense not found', 404));
 
-  const { date, concept, category, expenseType, amount, comment, paymentMethod, supplier, notes } = req.body;
+  const { date, concept, category, expenseType, amount, comment, paymentMethod, supplier, notes, entryType, incomeCategory } = req.body;
 
   if (date !== undefined) {
     assertDateFormat(date);
@@ -1220,6 +1250,12 @@ exports.updateCenterExpense = catchAsyncErrors(async (req, res, next) => {
   }
   if (expenseType !== undefined) {
     expense.expenseType = normalizeExpenseType(expenseType);
+  }
+  if (entryType !== undefined) {
+    expense.entryType = entryType === 'income' ? 'income' : 'expense';
+  }
+  if (incomeCategory !== undefined) {
+    expense.incomeCategory = String(incomeCategory || '').trim();
   }
   if (amount !== undefined) {
     const parsedAmount = Number(amount);
@@ -2506,5 +2542,62 @@ exports.deleteExpenseCategory = catchAsyncErrors(async (req, res, next) => {
   res.status(200).json({
     success: true,
     categories: center.expenseCategories,
+  });
+});
+
+exports.getBalanceRange = catchAsyncErrors(async (req, res, next) => {
+  const center = await Center.findById(req.params.id);
+  if (!center) return next(new ErrorHandler('Center not found', 404));
+
+  const fromMonth = typeof req.query.from === 'string' && req.query.from ? req.query.from : null;
+  const toMonth = typeof req.query.to === 'string' && req.query.to ? req.query.to : null;
+
+  if (!fromMonth || !toMonth) {
+    return next(new ErrorHandler('from and to query params are required (YYYY-MM)', 400));
+  }
+  assertMonthFormat(fromMonth);
+  assertMonthFormat(toMonth);
+
+  if (fromMonth > toMonth) {
+    return next(new ErrorHandler('from must be <= to', 400));
+  }
+
+  // Build list of months between from and to (inclusive)
+  const months = [];
+  let cursor = fromMonth;
+  while (cursor <= toMonth) {
+    months.push(cursor);
+    const [y, m] = cursor.split('-').map(Number);
+    const next = m === 12 ? `${y + 1}-01` : `${y}-${String(m + 1).padStart(2, '0')}`;
+    cursor = next;
+    if (months.length > 36) break; // safety cap
+  }
+
+  const monthlyData = await Promise.all(
+    months.map(async (month) => {
+      const [manualExpenses, payrollEntries] = await Promise.all([
+        CenterExpense.find({ center: req.params.id, month }).select(
+          'concept amount expenseType entryType incomeCategory category date'
+        ),
+        PayrollEntry.find({ center: req.params.id, month })
+          .populate('user', 'name')
+          .select('netSalary variableAmount month'),
+      ]);
+
+      const safePayroll = payrollEntries.filter((e) => Boolean(e.user));
+      const salaryExpenses = safePayroll.map((e) => ({
+        _id: `salary-${e._id}`,
+        amount: Number(e.netSalary ?? e.variableAmount ?? 0),
+      }));
+
+      const summary = buildExpensesSummary({ manualExpenses, salaryExpenses });
+      return { month, ...summary };
+    })
+  );
+
+  res.status(200).json({
+    success: true,
+    months,
+    monthly: monthlyData,
   });
 });

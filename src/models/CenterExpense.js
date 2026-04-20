@@ -74,6 +74,18 @@ const centerExpenseSchema = new mongoose.Schema(
       default: null,
       index: true,
     },
+    entryType: {
+      type: String,
+      enum: ['expense', 'income'],
+      default: 'expense',
+      index: true,
+    },
+    incomeCategory: {
+      type: String,
+      trim: true,
+      maxlength: 80,
+      default: '',
+    },
     checked: {
       type: Boolean,
       default: false,
