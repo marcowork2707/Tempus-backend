@@ -3707,51 +3707,29 @@ async function getClientRetentionRate(centerId) {
     await page.waitForTimeout(1500).catch(() => {});
     await page.waitForLoadState('networkidle', { timeout: 25000 }).catch(() => {});
 
-    // Extraer valor de retención media
+    // Extraer SOLO el valor asociado a "RETENCION/RETENCIÓN MEDIA".
+    // Evita capturar números de otras columnas como "Permanencia".
     const retentionValue = await page.evaluate(() => {
       const bodyText = String(document.body?.textContent || '');
-      const normalize = (value) => String(value || '').replace(/\s+/g, ' ').trim().toLowerCase();
 
-      // Strategy 1: Buscar "retención" seguido de número y "días"
-      let match = bodyText.match(/retención\s+(?:media)?[:\s]+(\d+(?:[.,]\d+)?)\s*(?:días|days)/i);
-      if (match) {
-        const valueStr = match[1].replace(',', '.');
-        return Number.parseFloat(valueStr);
-      }
+      const patterns = [
+        /retenci[oó]n\s+media\s*[:\-]?\s*(\d+(?:[.,]\d+)?)\s*(?:d[ií]as|days)?/i,
+        /retenci[oó]n\s+media[^\d]{0,30}(\d+(?:[.,]\d+)?)/i,
+      ];
 
-      // Strategy 2: Buscar por líneas que contengan "retención"
-      const lines = bodyText.split('\n');
-      for (let i = 0; i < lines.length; i++) {
-        const line = normalize(lines[i]);
-        if (line.includes('retención')) {
-          // Buscar número en esta línea o en la siguiente
-          let searchText = lines[i];
-          if (i + 1 < lines.length) {
-            searchText += ' ' + lines[i + 1];
-          }
-          const numMatch = searchText.match(/(\d+(?:[.,]\d+)?)\s*(?:días|days|%)?/i);
-          if (numMatch) {
-            const valueStr = numMatch[1].replace(',', '.');
-            const val = Number.parseFloat(valueStr);
-            if (!isNaN(val) && val > 0 && val < 400) {
-              return val;
-            }
-          }
+      for (const pattern of patterns) {
+        const match = bodyText.match(pattern);
+        if (!match) continue;
+        const value = Number.parseFloat(String(match[1]).replace(',', '.'));
+        if (!Number.isNaN(value) && value > 0 && value < 400) {
+          return value;
         }
-      }
-
-      // Strategy 3: Buscar cualquier número seguido de "días"
-      match = bodyText.match(/(\d+(?:[.,]\d+)?)\s*(?:días|days)/i);
-      if (match) {
-        const valueStr = match[1].replace(',', '.');
-        return Number.parseFloat(valueStr);
       }
 
       return null;
     });
 
     if (retentionValue === null) {
-      const pageContent = await page.content();
       console.log('[AimHarder] No se encontró valor de retención media en la página');
       console.log('[AimHarder] Debug: primeros 2000 caracteres del body', (await page.evaluate(() => document.body?.textContent || '')).slice(0, 2000));
       throw new Error('No se pudo extraer el valor de retención media de AimHarder');
