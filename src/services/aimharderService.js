@@ -3669,42 +3669,74 @@ async function getClientRetentionRate(centerId) {
     // Esperar a que cargue la pantalla de retención
     await page.waitForFunction(() => {
       const bodyText = String(document.body?.textContent || '').toLowerCase();
-      return bodyText.includes('retención de clientes') && bodyText.includes('generar informe');
+      return bodyText.includes('retención de clientes')
+        && (bodyText.includes('generar gráfica') || bodyText.includes('generar grafica') || bodyText.includes('generar informe'));
     }, { timeout: 20000 }).catch(() => {});
 
-    // Verificar si "Este mes" ya está seleccionado o si necesitamos seleccionarlo
-    const mouthSelect = page.locator('select').filter((el) => {
-      return el.evaluate((elem) => {
-        const label = elem.closest('label');
-        return label ? label.textContent.includes('período') || label.textContent.includes('mes') : false;
-      });
-    }).first();
-
-    const selectCount = await mouthSelect.count();
-    if (selectCount > 0) {
-      // Intentar seleccionar "Este mes"
-      await mouthSelect.selectOption({ label: /este mes/i }).catch(() => {});
+    // Seleccionar "Este mes" de forma tolerante (si existe un select con esa opción)
+    const selects = page.locator('select');
+    const selectCount = await selects.count();
+    let selectedThisMonth = false;
+    for (let i = 0; i < selectCount; i += 1) {
+      const select = selects.nth(i);
+      const optionTexts = await select.locator('option').allTextContents().catch(() => []);
+      const hasThisMonthOption = optionTexts.some((text) => /este\s+mes/i.test(String(text || '')));
+      if (!hasThisMonthOption) continue;
+      const selected = await select.selectOption({ label: /este\s+mes/i }).catch(() => []);
+      if (Array.isArray(selected) && selected.length > 0) {
+        selectedThisMonth = true;
+        break;
+      }
     }
+    console.log('[AimHarder] Opción "Este mes" seleccionada:', selectedThisMonth);
 
-    // Buscar y hacer clic en "Generar informe"
-    const generateButton = page.locator('button, input[type="button"], input[type="submit"], a').filter({ hasText: /generar informe/i }).first();
-    const generateCount = await generateButton.count();
-    console.log('[AimHarder] Botón generar informe visible:', generateCount > 0);
+    // Buscar y hacer clic en "Generar informe" (preferido) con fallback a "Generar gráfica"
+    const generateGraphButton = page
+      .locator('button, input[type="button"], input[type="submit"], a')
+      .filter({ hasText: /generar\s+gr[aá]fica/i })
+      .first();
+    const generateReportButton = page
+      .locator('button, input[type="button"], input[type="submit"], a')
+      .filter({ hasText: /generar\s+informe/i })
+      .first();
 
-    if (generateCount > 0) {
+    const graphCount = await generateGraphButton.count();
+    const reportCount = await generateReportButton.count();
+    console.log('[AimHarder] Botón "Generar gráfica" visible:', graphCount > 0);
+    console.log('[AimHarder] Botón "Generar informe" visible:', reportCount > 0);
+
+    let generated = false;
+    if (reportCount > 0) {
       try {
-        await generateButton.click({ force: true, timeout: 12000 });
+        await generateReportButton.click({ force: true, timeout: 12000 });
+        generated = true;
       } catch {
-        // Fallback
-        await page.evaluate(() => {
-          if (typeof window.generateReport === 'function') {
-            window.generateReport();
-          }
-        }).catch(() => {});
+        generated = false;
       }
     }
 
-    await page.waitForTimeout(1500).catch(() => {});
+    if (!generated && graphCount > 0) {
+      try {
+        await generateGraphButton.click({ force: true, timeout: 12000 });
+        generated = true;
+      } catch {
+        generated = false;
+      }
+    }
+
+    if (!generated) {
+      // Fallback JS por texto de botón/enlace
+      generated = await page.evaluate(() => {
+        const candidates = Array.from(document.querySelectorAll('button, a, input[type="button"], input[type="submit"]'));
+        const target = candidates.find((el) => /generar\s+gr[áa]fica|generar\s+informe/i.test(String(el.textContent || el.value || '')));
+        if (!target) return false;
+        target.click();
+        return true;
+      }).catch(() => false);
+    }
+    console.log('[AimHarder] Informe/gráfica generado:', generated);
+
+    await page.waitForTimeout(1800).catch(() => {});
     await page.waitForLoadState('networkidle', { timeout: 25000 }).catch(() => {});
 
     // Extraer SOLO el valor asociado a "RETENCION/RETENCIÓN MEDIA".

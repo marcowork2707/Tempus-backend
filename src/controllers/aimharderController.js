@@ -661,7 +661,7 @@ exports.getClientRetentionRate = async (req, res) => {
     }
     res.status(500).json({
       success: false,
-      message: 'Error al obtener retención de clientes desde AimHarder.',
+      message: err?.message || 'Error al obtener retención de clientes desde AimHarder.',
       detail: process.env.NODE_ENV === 'development' ? err.message : undefined,
     });
   }
