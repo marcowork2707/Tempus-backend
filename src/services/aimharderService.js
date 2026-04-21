@@ -3013,7 +3013,14 @@ async function getClientMonthlyReport(centerId, monthStr = null, options = {}) {
 
   const config = await getCenterAimHarderConfig(centerId);
   const activeReport = await getActiveClientsMonthlyReport(centerId, range.month);
-  const dashboardMetrics = await getDashboardMonthlySignupsAndCancellations(config, range.month);
+  let dashboardMetrics = { newSignups: 0, monthlyCancellations: 0 };
+  try {
+    dashboardMetrics = await getDashboardMonthlySignupsAndCancellations(config, range.month);
+  } catch (error) {
+    console.warn(
+      `[AimHarder] No se pudieron extraer ALTAS/BAJAS para ${range.month} en ${config.centerName}: ${error.message}`
+    );
+  }
 
   const saved = await upsertClientMonthlySnapshot(centerId, range.month, {
     startDate: activeReport.startDate,
