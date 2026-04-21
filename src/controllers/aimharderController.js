@@ -16,6 +16,7 @@ const {
   setClassReportHandoffStatus,
   getPendingPaymentsWithTPVError,
   getPendingPaymentsWithoutTPVError,
+  getActiveClientsMonthlyReport,
   getTariffCancellationRenewals,
 } = require('../services/aimharderService');
 const UserCenterRole = require('../models/UserCenterRole');
@@ -549,6 +550,43 @@ exports.getPendingPaymentsNoTpv = async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Error al obtener los pagos pendientes sin fallo TPV de AimHarder.',
+      detail: process.env.NODE_ENV === 'development' ? err.message : undefined,
+    });
+  }
+};
+
+/**
+ * GET /api/aimharder/active-clients-report?centerId=xxx&month=YYYY-MM
+ * Obtiene clientes activos desde "Informes > Clientes activos" para un mes.
+ */
+exports.getActiveClientsReport = async (req, res) => {
+  try {
+    const { centerId, month } = req.query;
+    if (!centerId) {
+      return res.status(400).json({ success: false, message: 'centerId es obligatorio' });
+    }
+    if (month && !/^\d{4}-\d{2}$/.test(String(month))) {
+      return res.status(400).json({ success: false, message: 'Formato de mes inválido. Usa YYYY-MM' });
+    }
+
+    const result = await getActiveClientsMonthlyReport(centerId, month || null);
+    res.json({
+      success: true,
+      month: result.month,
+      startDate: result.startDate,
+      endDate: result.endDate,
+      count: result.clients.length,
+      clients: result.clients,
+      tariffSummary: result.tariffSummary,
+    });
+  } catch (err) {
+    console.error('[AimHarder Controller] Error clientes activos:', err.message);
+    if (err.message.includes('credenciales')) {
+      return res.status(503).json({ success: false, message: err.message });
+    }
+    res.status(500).json({
+      success: false,
+      message: 'Error al obtener clientes activos desde AimHarder.',
       detail: process.env.NODE_ENV === 'development' ? err.message : undefined,
     });
   }
