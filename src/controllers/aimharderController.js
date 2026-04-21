@@ -16,7 +16,7 @@ const {
   setClassReportHandoffStatus,
   getPendingPaymentsWithTPVError,
   getPendingPaymentsWithoutTPVError,
-  getActiveClientsMonthlyReport,
+  getClientMonthlyReport,
   getTariffCancellationRenewals,
 } = require('../services/aimharderService');
 const UserCenterRole = require('../models/UserCenterRole');
@@ -561,7 +561,7 @@ exports.getPendingPaymentsNoTpv = async (req, res) => {
  */
 exports.getActiveClientsReport = async (req, res) => {
   try {
-    const { centerId, month } = req.query;
+    const { centerId, month, refresh, cachedOnly } = req.query;
     if (!centerId) {
       return res.status(400).json({ success: false, message: 'centerId es obligatorio' });
     }
@@ -569,15 +569,23 @@ exports.getActiveClientsReport = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Formato de mes inválido. Usa YYYY-MM' });
     }
 
-    const result = await getActiveClientsMonthlyReport(centerId, month || null);
+    const result = await getClientMonthlyReport(centerId, month || null, {
+      refresh: refresh === 'true',
+      cachedOnly: cachedOnly === 'true',
+    });
     res.json({
       success: true,
       month: result.month,
       startDate: result.startDate,
       endDate: result.endDate,
-      count: result.clients.length,
+      count: result.count,
       clients: result.clients,
       tariffSummary: result.tariffSummary,
+      newSignups: result.newSignups,
+      monthlyCancellations: result.monthlyCancellations,
+      loadedAt: result.loadedAt,
+      fromCache: result.fromCache,
+      hasData: result.hasData,
     });
   } catch (err) {
     console.error('[AimHarder Controller] Error clientes activos:', err.message);

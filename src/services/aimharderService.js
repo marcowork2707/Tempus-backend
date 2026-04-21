@@ -18,6 +18,7 @@ const https = require('https');
 const Center = require('../models/Center');
 const AimHarderIntegration = require('../models/AimHarderIntegration');
 const ActiveClient = require('../models/ActiveClient');
+const AimHarderClientMonthlySnapshot = require('../models/AimHarderClientMonthlySnapshot');
 const AttendanceAbsenceSnapshot = require('../models/AttendanceAbsenceSnapshot');
 const CenterOccupancySnapshot = require('../models/CenterOccupancySnapshot');
 const ClassReport = require('../models/ClassReport');
@@ -2521,6 +2522,148 @@ function buildActiveTariffSummary(clients) {
     .sort((a, b) => b.count - a.count);
 }
 
+function normalizeMonthLabelForCompare(value = '') {
+  return String(value || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, '');
+}
+
+function getTargetMonthLabelCandidates(monthStr) {
+  const [year, month] = String(monthStr || '').split('-').map(Number);
+  if (!year || !month) return [];
+  const date = new Date(year, month - 1, 1);
+  const monthLong = date.toLocaleDateString('es-ES', { month: 'long' });
+  const monthShort = date.toLocaleDateString('es-ES', { month: 'short' });
+  const yearStr = String(year);
+  return [
+    `${monthLong} ${yearStr}`,
+    `${monthShort} ${yearStr}`,
+    `${monthLong}${yearStr}`,
+    `${monthShort}${yearStr}`,
+    `${monthStr}`,
+  ].map(normalizeMonthLabelForCompare);
+}
+
+function parseNumericValueFromText(value = '') {
+  const match = String(value || '').match(/-?\d+(?:[\.,]\d+)?/);
+  if (!match) return null;
+  const normalized = match[0].replace(',', '.');
+  const number = Number.parseFloat(normalized);
+  return Number.isFinite(number) ? number : null;
+}
+
+function tryExtractDashboardMetricsFromPayload(payload, monthStr) {
+  const candidates = getTargetMonthLabelCandidates(monthStr);
+  if (!candidates.length) return null;
+
+  const visit = (node) => {
+    if (!node || typeof node !== 'object') return null;
+
+    if (Array.isArray(node.categories) && Array.isArray(node.series)) {
+      const categories = node.categories.map((item) => normalizeMonthLabelForCompare(item));
+      const idx = categories.findIndex((label) => candidates.some((candidate) => label.includes(candidate) || candidate.includes(label)));
+      if (idx >= 0) {
+        let altas = null;
+        let bajas = null;
+        for (const serie of node.series) {
+          const name = normalizeMonthLabelForCompare(serie?.name || '');
+          const value = Array.isArray(serie?.data) ? parseNumericValueFromText(serie.data[idx]) : null;
+          if (value == null) continue;
+          if (name.includes('alta') || name.includes('signup') || name.includes('new')) altas = value;
+          if (name.includes('baja') || name.includes('drop') || name.includes('cancel')) bajas = value;
+        }
+        if (altas != null || bajas != null) {
+          return {
+            newSignups: altas == null ? 0 : Math.max(0, Math.round(altas)),
+            monthlyCancellations: bajas == null ? 0 : Math.max(0, Math.round(bajas)),
+          };
+        }
+      }
+    }
+
+    if (Array.isArray(node)) {
+      for (const item of node) {
+        if (!item || typeof item !== 'object') continue;
+        const monthLabel = normalizeMonthLabelForCompare(item.month || item.mes || item.label || item.name || item.x || item.date || '');
+        if (!monthLabel) continue;
+        const matches = candidates.some((candidate) => monthLabel.includes(candidate) || candidate.includes(monthLabel));
+        if (!matches) continue;
+        const altas = parseNumericValueFromText(item.altas ?? item.alta ?? item.signups ?? item.newSignups ?? item.new ?? item.y);
+        const bajas = parseNumericValueFromText(item.bajas ?? item.baja ?? item.cancellations ?? item.dropouts ?? item.drops);
+        if (altas != null || bajas != null) {
+          return {
+            newSignups: altas == null ? 0 : Math.max(0, Math.round(altas)),
+            monthlyCancellations: bajas == null ? 0 : Math.max(0, Math.round(bajas)),
+          };
+        }
+      }
+    }
+
+    for (const value of Object.values(node)) {
+      const found = visit(value);
+      if (found) return found;
+    }
+    return null;
+  };
+
+  return visit(payload);
+}
+
+async function tryExtractMetricFromChartHover(page, chartTitleRegex, monthStr) {
+  const candidates = getTargetMonthLabelCandidates(monthStr);
+  if (!candidates.length) return null;
+
+  const heading = page.getByText(chartTitleRegex).first();
+  if (!(await heading.count())) return null;
+
+  const chartContainer = heading.locator('xpath=ancestor::div[1]');
+  const points = chartContainer.locator('svg .highcharts-point, svg circle, svg [class*="point"]');
+  const count = await points.count();
+  if (!count) return null;
+
+  const max = Math.min(count, 24);
+  for (let i = 0; i < max; i += 1) {
+    try {
+      await points.nth(i).hover({ timeout: 1500 });
+      await page.waitForTimeout(120).catch(() => {});
+
+      const tooltipText = await page.evaluate(() => {
+        const selectors = [
+          '.highcharts-tooltip text',
+          '.highcharts-tooltip',
+          '.apexcharts-tooltip',
+          '[class*="tooltip"]',
+        ];
+
+        const lines = [];
+        for (const selector of selectors) {
+          const nodes = Array.from(document.querySelectorAll(selector));
+          for (const node of nodes) {
+            const style = window.getComputedStyle(node);
+            if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') continue;
+            const text = String(node.textContent || '').replace(/\s+/g, ' ').trim();
+            if (text) lines.push(text);
+          }
+        }
+        return lines.join(' ');
+      });
+
+      const normalized = normalizeMonthLabelForCompare(tooltipText);
+      const matches = candidates.some((candidate) => normalized.includes(candidate) || candidate.includes(normalized));
+      if (!matches) continue;
+
+      const value = parseNumericValueFromText(tooltipText);
+      if (value != null) return Math.max(0, Math.round(value));
+    } catch {
+      // Continue with the next point
+    }
+  }
+
+  return null;
+}
+
 async function getActiveClientsMonthlyReport(centerId, monthStr = null) {
   const config = await getCenterAimHarderConfig(centerId);
 
@@ -2719,6 +2862,161 @@ async function getActiveClientsMonthlyReport(centerId, monthStr = null) {
     await browser.close();
     console.log('[AimHarder] ===== Fin scraping clientes activos =====');
   }
+}
+
+async function getDashboardMonthlySignupsAndCancellations(config, monthStr) {
+  const browser = await chromium.launch({ headless: true, slowMo: 0 });
+  try {
+    const context = await browser.newContext({
+      userAgent:
+        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+    });
+
+    const sessionCache = await getSessionCache(config);
+    if (sessionCache.cookies && sessionCache.expiry && Date.now() < sessionCache.expiry) {
+      await context.addCookies(sessionCache.cookies);
+    }
+
+    const page = await context.newPage();
+    const jsonPayloads = [];
+    page.on('response', async (response) => {
+      try {
+        const contentType = response.headers()['content-type'] || '';
+        if (!contentType.includes('application/json')) return;
+        const body = await response.json();
+        jsonPayloads.push(body);
+      } catch {
+        // ignore response parsing failures
+      }
+    });
+
+    const controlUrl = `${config.baseUrl}/control`;
+    await page.goto(controlUrl, { waitUntil: 'domcontentloaded', timeout: 45000 });
+    await dismissCookies(page);
+    await page.waitForLoadState('networkidle', { timeout: 20000 }).catch(() => {});
+
+    if (!isAuthenticatedAimHarderUrl(page.url())) {
+      await login(page, config);
+      await page.goto(controlUrl, { waitUntil: 'domcontentloaded', timeout: 45000 });
+      await dismissCookies(page);
+      await page.waitForLoadState('networkidle', { timeout: 20000 }).catch(() => {});
+    }
+
+    await setSessionCache(config, {
+      cookies: await context.cookies(),
+      expiry: Date.now() + SESSION_TTL_MS,
+    });
+
+    for (const payload of jsonPayloads) {
+      const found = tryExtractDashboardMetricsFromPayload(payload, monthStr);
+      if (found) return found;
+    }
+
+    const altas = await tryExtractMetricFromChartHover(page, /^ALTAS$/i, monthStr);
+    const bajas = await tryExtractMetricFromChartHover(page, /^BAJAS$/i, monthStr);
+
+    if (altas == null && bajas == null) {
+      throw new Error('No se pudieron extraer ALTAS/BAJAS del panel de control de AimHarder');
+    }
+
+    return {
+      newSignups: altas == null ? 0 : altas,
+      monthlyCancellations: bajas == null ? 0 : bajas,
+    };
+  } finally {
+    await browser.close();
+  }
+}
+
+async function getStoredClientMonthlySnapshot(centerId, month) {
+  return AimHarderClientMonthlySnapshot.findOne({ center: centerId, month }).lean();
+}
+
+async function upsertClientMonthlySnapshot(centerId, month, data) {
+  return AimHarderClientMonthlySnapshot.findOneAndUpdate(
+    { center: centerId, month },
+    {
+      $set: {
+        center: centerId,
+        month,
+        startDate: data.startDate,
+        endDate: data.endDate,
+        activeClientsCount: data.activeClientsCount,
+        activeClients: data.activeClients,
+        activeTariffSummary: data.activeTariffSummary,
+        newSignups: data.newSignups,
+        monthlyCancellations: data.monthlyCancellations,
+        loadedAt: new Date(),
+      },
+    },
+    { upsert: true, new: true }
+  ).lean();
+}
+
+async function getClientMonthlyReport(centerId, monthStr = null, options = {}) {
+  const { refresh = false, cachedOnly = false } = options;
+  const range = getMonthlyDateRange(monthStr);
+
+  const stored = await getStoredClientMonthlySnapshot(centerId, range.month);
+  if (stored && !refresh) {
+    return {
+      month: stored.month,
+      startDate: stored.startDate,
+      endDate: stored.endDate,
+      count: stored.activeClientsCount || 0,
+      clients: stored.activeClients || [],
+      tariffSummary: stored.activeTariffSummary || [],
+      newSignups: stored.newSignups || 0,
+      monthlyCancellations: stored.monthlyCancellations || 0,
+      loadedAt: stored.loadedAt || null,
+      fromCache: true,
+      hasData: true,
+    };
+  }
+
+  if (cachedOnly) {
+    return {
+      month: range.month,
+      startDate: range.startIso,
+      endDate: range.endIso,
+      count: 0,
+      clients: [],
+      tariffSummary: [],
+      newSignups: 0,
+      monthlyCancellations: 0,
+      loadedAt: null,
+      fromCache: false,
+      hasData: false,
+    };
+  }
+
+  const config = await getCenterAimHarderConfig(centerId);
+  const activeReport = await getActiveClientsMonthlyReport(centerId, range.month);
+  const dashboardMetrics = await getDashboardMonthlySignupsAndCancellations(config, range.month);
+
+  const saved = await upsertClientMonthlySnapshot(centerId, range.month, {
+    startDate: activeReport.startDate,
+    endDate: activeReport.endDate,
+    activeClientsCount: activeReport.clients.length,
+    activeClients: activeReport.clients,
+    activeTariffSummary: activeReport.tariffSummary,
+    newSignups: dashboardMetrics.newSignups,
+    monthlyCancellations: dashboardMetrics.monthlyCancellations,
+  });
+
+  return {
+    month: saved.month,
+    startDate: saved.startDate,
+    endDate: saved.endDate,
+    count: saved.activeClientsCount || 0,
+    clients: saved.activeClients || [],
+    tariffSummary: saved.activeTariffSummary || [],
+    newSignups: saved.newSignups || 0,
+    monthlyCancellations: saved.monthlyCancellations || 0,
+    loadedAt: saved.loadedAt || null,
+    fromCache: false,
+    hasData: true,
+  };
 }
 
 async function getTariffCancellationRenewals(centerId, referenceDateStr = null) {
@@ -3075,6 +3373,7 @@ module.exports = {
   getPendingPaymentsWithTPVError,
   getPendingPaymentsWithoutTPVError,
   getActiveClientsMonthlyReport,
+  getClientMonthlyReport,
   getTariffCancellationRenewals,
   getYesterday,
   toDateString,
