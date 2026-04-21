@@ -3746,15 +3746,12 @@ async function getClientRetentionRate(centerId) {
       throw new Error('No se pudo extraer el valor de retención media de AimHarder');
     }
 
-    // Dividir entre 365 para obtener retención diaria
-    const dailyRetention = retentionValue / 365;
-
-    console.log(`[AimHarder] Retención media: ${retentionValue}%`);
-    console.log(`[AimHarder] Retención diaria: ${dailyRetention.toFixed(6)}`);
+    // AimHarder devuelve la retención en días (ej: 93.26 días).
+    console.log(`[AimHarder] Retención media: ${retentionValue} días`);
 
     return {
       monthlyRetention: retentionValue,
-      dailyRetention: Number(dailyRetention.toFixed(6)),
+      dailyRetention: retentionValue,
     };
   } finally {
     await browser.close();
