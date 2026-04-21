@@ -3698,18 +3698,23 @@ async function getClientRetentionRate(centerId) {
 
     const retentionScreenDetected = await page.evaluate(() => {
       const text = String(document.body?.innerText || '').toLowerCase();
-      return (text.includes('retención de clientes') || text.includes('retencion de clientes'))
-        && text.includes('generar informe')
-        && text.includes('fechas');
-    }).catch(() => false);
-    if (!retentionScreenDetected) {
+      const hasRetention = text.includes('retenci\u00f3n de clientes') || text.includes('retencion de clientes');
+      const hasGenerar = text.includes('generar informe');
+      return { hasRetention, hasGenerar, snippet: text.substring(0, 500) };
+    }).catch(() => ({ hasRetention: false, hasGenerar: false, snippet: '' }));
+    console.log('[AimHarder] Pantalla tras click Ver informe — hasRetention:', retentionScreenDetected.hasRetention, '| hasGenerar:', retentionScreenDetected.hasGenerar);
+    console.log('[AimHarder] Snippet página:', retentionScreenDetected.snippet);
+    if (!retentionScreenDetected.hasRetention && !retentionScreenDetected.hasGenerar) {
+      await page.screenshot({ path: path.join(DEBUG_DIR, `${Date.now()}_wrong_report.png`), fullPage: true }).catch(() => {});
+      const wrongHtml = await page.content().catch(() => '');
+      if (wrongHtml) fs.writeFileSync(path.join(DEBUG_DIR, `${Date.now()}_wrong_report.html`), wrongHtml, 'utf8');
       throw new Error('Se abrió un informe distinto a "Retención de clientes". No se continúa para evitar datos incorrectos.');
     }
 
-    // Esperar a que cargue la pantalla de retención (breadcrumb exacto)
+    // Esperar a que cargue la pantalla de retención
     await page.waitForFunction(() => {
       const text = String(document.body?.innerText || '').toLowerCase();
-      return text.includes('retención de clientes') && text.includes('generar informe') && text.includes('informes');
+      return (text.includes('retenci\u00f3n de clientes') || text.includes('retencion de clientes')) && text.includes('generar informe');
     }, { timeout: 20000 }).catch(() => {});
 
     // Paso 2: seleccionar botón "Este mes".
