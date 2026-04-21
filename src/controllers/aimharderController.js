@@ -18,6 +18,7 @@ const {
   getPendingPaymentsWithoutTPVError,
   getClientMonthlyReport,
   getTariffCancellationRenewals,
+  getClientRetentionRate,
 } = require('../services/aimharderService');
 const UserCenterRole = require('../models/UserCenterRole');
 const User = require('../models/User');
@@ -630,6 +631,36 @@ exports.getTariffCancellationRenewals = async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Error al obtener cancelaciones de tarifa desde AimHarder.',
+      detail: process.env.NODE_ENV === 'development' ? err.message : undefined,
+    });
+  }
+};
+
+/**
+ * GET /api/aimharder/retention-rate?centerId=X
+ * Obtiene la tasa de retención de clientes del mes actual (dividida entre 365)
+ */
+exports.getClientRetentionRate = async (req, res) => {
+  try {
+    const { centerId } = req.query;
+    if (!centerId) {
+      return res.status(400).json({ success: false, message: 'centerId es obligatorio' });
+    }
+
+    const result = await getClientRetentionRate(centerId);
+    res.json({
+      success: true,
+      monthlyRetention: result.monthlyRetention,
+      dailyRetention: result.dailyRetention,
+    });
+  } catch (err) {
+    console.error('[AimHarder Controller] Error retención de clientes:', err.message);
+    if (err.message.includes('credenciales')) {
+      return res.status(503).json({ success: false, message: err.message });
+    }
+    res.status(500).json({
+      success: false,
+      message: 'Error al obtener retención de clientes desde AimHarder.',
       detail: process.env.NODE_ENV === 'development' ? err.message : undefined,
     });
   }

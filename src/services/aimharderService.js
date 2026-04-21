@@ -31,6 +31,7 @@ const AUTH_URL = 'https://login.aimharder.com';
 const API_BASE_URL = 'https://api.aimharder.com';
 const DEBUG_DIR = path.join(__dirname, '../../debug');
 const PLAYWRIGHT_DEBUG = false;
+const METRICS_DEBUG = String(process.env.AIMHARDER_METRICS_DEBUG || '').toLowerCase() === 'true';
 
 // ── Asegurarse de que el directorio de debug existe ──
 if (PLAYWRIGHT_DEBUG && !fs.existsSync(DEBUG_DIR)) fs.mkdirSync(DEBUG_DIR, { recursive: true });
@@ -2546,6 +2547,11 @@ function getTargetMonthLabelCandidates(monthStr) {
   ].map(normalizeMonthLabelForCompare);
 }
 
+function metricsDebugLog(...args) {
+  if (!METRICS_DEBUG) return;
+  console.log('[AimHarder Metrics DEBUG]', ...args);
+}
+
 function parseNumericValueFromText(value = '') {
   const match = String(value || '').match(/-?\d+(?:[\.,]\d+)?/);
   if (!match) return null;
@@ -2611,17 +2617,152 @@ function tryExtractDashboardMetricsFromPayload(payload, monthStr) {
   return visit(payload);
 }
 
+async function tryExtractMetricFromChartJsData(chartContainer, monthStr) {
+  const candidates = getTargetMonthLabelCandidates(monthStr);
+  if (!candidates.length) return null;
+
+  // Try to extract from page level, not just container
+  const chartValue = await chartContainer.page().evaluate((normalizedCandidates, monthStr) => {
+    const normalize = (value) =>
+      String(value || '')
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .toLowerCase()
+        .replace(/[^a-z0-9]/g, '');
+
+    const parseNumber = (value) => {
+      const match = String(value ?? '').match(/-?\d+(?:[\.,]\d+)?/);
+      if (!match) return null;
+      const parsed = Number.parseFloat(match[0].replace(',', '.'));
+      return Number.isFinite(parsed) ? parsed : null;
+    };
+
+    if (!window.Chart) return null;
+
+    window.__METRICS_DEBUG = window.__METRICS_DEBUG || {};
+
+    const instances = window.Chart.instances;
+    if (!instances) {
+      window.__METRICS_DEBUG.instancesFound = 0;
+      return null;
+    }
+
+    const instanceArray = Array.isArray(instances) ? instances : Object.values(instances);
+    window.__METRICS_DEBUG.instancesScanned = instanceArray.length;
+    window.__METRICS_DEBUG.allInstanceLabels = [];
+    window.__METRICS_DEBUG.instancesWithData = [];
+
+    // Scan all instances looking for one with matching month labels
+    for (let i = 0; i < instanceArray.length; i++) {
+      const instance = instanceArray[i];
+      if (!instance || !instance.data || !instance.data.labels) continue;
+
+      const labels = Array.isArray(instance.data.labels) ? instance.data.labels : [];
+      window.__METRICS_DEBUG.allInstanceLabels.push({
+        index: i,
+        labels: labels.slice(0, 15),
+        normalized: labels.slice(0, 15).map(normalize),
+      });
+
+      const normalizedLabels = labels.map((label) => normalize(String(label || '')));
+
+      // Check if this instance has labels matching our month
+      const targetIndex = normalizedLabels.findIndex((label) =>
+        normalizedCandidates.some((candidate) => label.includes(candidate) || candidate.includes(label))
+      );
+
+      if (targetIndex < 0) continue; // No match, skip this instance
+
+      window.__METRICS_DEBUG.instancesWithData.push({
+        index: i,
+        labelCount: labels.length,
+        targetLabel: labels[targetIndex],
+        datasetCount: (instance.data.datasets || []).length,
+      });
+
+      // Try to extract value from this instance
+      const datasets = Array.isArray(instance.data.datasets) ? instance.data.datasets : [];
+      for (let d = 0; d < datasets.length; d++) {
+        const dataset = datasets[d];
+        if (!dataset || !Array.isArray(dataset.data)) continue;
+
+        const rawValue = dataset.data[targetIndex];
+        const numeric = parseNumber(rawValue);
+
+        if (numeric != null) {
+          window.__METRICS_DEBUG.extractedFrom = {
+            instanceIndex: i,
+            datasetIndex: d,
+            rawValue,
+            numeric,
+          };
+          return Math.max(0, Math.round(numeric));
+        }
+      }
+    }
+
+    return null;
+  }, candidates, monthStr).catch((err) => {
+    metricsDebugLog('chartjs page-level evaluate error', err.message);
+    return null;
+  });
+
+  // Retrieve debug info
+  if (chartValue === null) {
+    const debugInfo = await chartContainer.page().evaluate(() => window.__METRICS_DEBUG).catch(() => null);
+    if (debugInfo) {
+      metricsDebugLog('chartjs page-level debug', debugInfo);
+    }
+  }
+
+  return chartValue;
+}
+
 async function tryExtractMetricFromChartHover(page, chartTitleRegex, monthStr) {
   const candidates = getTargetMonthLabelCandidates(monthStr);
   if (!candidates.length) return null;
 
+  metricsDebugLog('hover candidates', { chart: String(chartTitleRegex), monthStr, candidates });
+
   const heading = page.getByText(chartTitleRegex).first();
-  if (!(await heading.count())) return null;
+  const headingCount = await heading.count();
+  metricsDebugLog('hover heading count', { chart: String(chartTitleRegex), headingCount });
+  if (!headingCount) return null;
 
   const chartContainer = heading.locator('xpath=ancestor::div[1]');
   const points = chartContainer.locator('svg .highcharts-point, svg circle, svg [class*="point"]');
   const count = await points.count();
-  if (!count) return null;
+  metricsDebugLog('hover points found', { chart: String(chartTitleRegex), points: count });
+  if (!count) {
+    const containerDiagnostics = await chartContainer.evaluate((el) => {
+      const text = String(el.textContent || '').replace(/\s+/g, ' ').trim();
+      const chartJs = window.Chart;
+      const chartJsInfo = {
+        hasChartJs: !!chartJs,
+        version: chartJs?.version || null,
+        instanceCount:
+          (chartJs?.instances && Object.keys(chartJs.instances || {}).length) ||
+          (Array.isArray(chartJs?.instances) ? chartJs.instances.length : 0) ||
+          0,
+      };
+
+      return {
+        tag: el.tagName,
+        className: el.className,
+        hasCanvas: el.querySelectorAll('canvas').length,
+        hasSvg: el.querySelectorAll('svg').length,
+        highchartsPoints: el.querySelectorAll('.highcharts-point').length,
+        apexPoints: el.querySelectorAll('.apexcharts-series path, .apexcharts-marker').length,
+        textPreview: text.slice(0, 180),
+        chartJsInfo,
+      };
+    }).catch(() => null);
+    metricsDebugLog('hover container diagnostics', { chart: String(chartTitleRegex), containerDiagnostics });
+
+    const chartJsValue = await tryExtractMetricFromChartJsData(chartContainer, monthStr);
+    metricsDebugLog('chartjs direct extraction', { chart: String(chartTitleRegex), chartJsValue });
+    return chartJsValue;
+  }
 
   const max = Math.min(count, 24);
   for (let i = 0; i < max; i += 1) {
@@ -2652,6 +2793,13 @@ async function tryExtractMetricFromChartHover(page, chartTitleRegex, monthStr) {
 
       const normalized = normalizeMonthLabelForCompare(tooltipText);
       const matches = candidates.some((candidate) => normalized.includes(candidate) || candidate.includes(normalized));
+      metricsDebugLog('hover tooltip scan', {
+        chart: String(chartTitleRegex),
+        point: i,
+        tooltip: tooltipText.slice(0, 140),
+        normalized: normalized.slice(0, 140),
+        matches,
+      });
       if (!matches) continue;
 
       const value = parseNumericValueFromText(tooltipText);
@@ -2900,12 +3048,18 @@ async function getDashboardMonthlySignupsAndCancellations(config, monthStr) {
 
     const page = await context.newPage();
     const jsonPayloads = [];
+    const jsonPayloadMeta = [];
     page.on('response', async (response) => {
       try {
         const contentType = response.headers()['content-type'] || '';
         if (!contentType.includes('application/json')) return;
         const body = await response.json();
         jsonPayloads.push(body);
+        jsonPayloadMeta.push({
+          url: response.url(),
+          contentType,
+          keys: body && typeof body === 'object' ? Object.keys(body).slice(0, 10) : [],
+        });
       } catch {
         // ignore response parsing failures
       }
@@ -2915,6 +3069,7 @@ async function getDashboardMonthlySignupsAndCancellations(config, monthStr) {
     await page.goto(controlUrl, { waitUntil: 'domcontentloaded', timeout: 45000 });
     await dismissCookies(page);
     await page.waitForLoadState('networkidle', { timeout: 20000 }).catch(() => {});
+    metricsDebugLog('control initial url', page.url());
 
     if (!isAuthenticatedAimHarderUrl(page.url())) {
       await login(page, config);
@@ -2923,6 +3078,13 @@ async function getDashboardMonthlySignupsAndCancellations(config, monthStr) {
       await page.waitForLoadState('networkidle', { timeout: 20000 }).catch(() => {});
     }
 
+    metricsDebugLog('control authenticated url', page.url());
+    metricsDebugLog('json payloads captured', jsonPayloadMeta.map((item) => ({
+      url: item.url,
+      contentType: item.contentType,
+      keys: item.keys,
+    })));
+
     await setSessionCache(config, {
       cookies: await context.cookies(),
       expiry: Date.now() + SESSION_TTL_MS,
@@ -2930,11 +3092,17 @@ async function getDashboardMonthlySignupsAndCancellations(config, monthStr) {
 
     for (const payload of jsonPayloads) {
       const found = tryExtractDashboardMetricsFromPayload(payload, monthStr);
-      if (found) return found;
+      if (found) {
+        metricsDebugLog('json payload matched month metrics', found);
+        return found;
+      }
     }
+
+    metricsDebugLog('no JSON payload matched month', monthStr);
 
     const altas = await tryExtractMetricFromChartHover(page, /^ALTAS$/i, monthStr);
     const bajas = await tryExtractMetricFromChartHover(page, /^BAJAS$/i, monthStr);
+    metricsDebugLog('hover extraction result', { altas, bajas, monthStr });
 
     if (altas == null && bajas == null) {
       throw new Error('No se pudieron extraer ALTAS/BAJAS del panel de control de AimHarder');
@@ -3380,6 +3548,186 @@ async function getTariffCancellationRenewals(centerId, referenceDateStr = null) 
   }
 }
 
+async function getClientRetentionRate(centerId) {
+  const config = await getCenterAimHarderConfig(centerId);
+
+  if (!config.username || !config.password) {
+    throw new Error(
+      `Faltan credenciales de AimHarder para ${config.centerName}. Configura las credenciales en la integración del centro.`
+    );
+  }
+
+  console.log('[AimHarder] ===== Scraping retención de clientes =====');
+
+  const browser = await chromium.launch({ headless: true, slowMo: 0 });
+  try {
+    const context = await browser.newContext({
+      userAgent:
+        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+    });
+
+    const sessionCache = await getSessionCache(config);
+    if (sessionCache.cookies && sessionCache.expiry && Date.now() < sessionCache.expiry) {
+      await context.addCookies(sessionCache.cookies);
+      console.log('[AimHarder] Sesión restaurada desde caché');
+    }
+
+    const page = await context.newPage();
+    const reportsUrl = `${config.baseUrl}/reports`;
+
+    console.log('[AimHarder] Navegando a Informes...');
+    await page.goto(reportsUrl, { waitUntil: 'domcontentloaded', timeout: 45000 });
+    await dismissCookies(page);
+    await page.waitForLoadState('networkidle', { timeout: 20000 }).catch(() => {});
+
+    if (!isAuthenticatedAimHarderUrl(page.url())) {
+      console.log('[AimHarder] Sesión no válida en /reports, iniciando login...');
+      await login(page, config);
+      await page.goto(reportsUrl, { waitUntil: 'domcontentloaded', timeout: 45000 });
+      await dismissCookies(page);
+      await page.waitForLoadState('networkidle', { timeout: 20000 }).catch(() => {});
+    }
+
+    await setSessionCache(config, {
+      cookies: await context.cookies(),
+      expiry: Date.now() + SESSION_TTL_MS,
+    });
+
+    // Buscar tarjeta "Retención de clientes"
+    const retentionCard = page
+      .locator('a, button')
+      .filter({ hasText: /retención de clientes/i })
+      .first();
+
+    const cardCount = await retentionCard.count();
+    console.log(`[AimHarder] Card "Retención de clientes" detectada: ${cardCount > 0}`);
+
+    if (!cardCount) {
+      throw new Error('No se encontró la tarjeta de "Retención de clientes" en Informes');
+    }
+
+    // Hacer clic en la tarjeta
+    let clicked = false;
+    try {
+      await retentionCard.click({ force: true, timeout: 8000 });
+      clicked = true;
+    } catch {
+      clicked = false;
+    }
+
+    if (!clicked) {
+      const meta = await retentionCard.evaluate((el) => el.getAttribute('onclick')).catch(() => null);
+      if (meta) {
+        await page.evaluate((onclickCode) => {
+          try {
+            // eslint-disable-next-line no-eval
+            eval(onclickCode);
+          } catch {
+            // ignore
+          }
+        }, meta).catch(() => {});
+      }
+    }
+
+    await page.waitForTimeout(700).catch(() => {});
+    await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
+
+    // Esperar a que cargue la pantalla de retención
+    await page.waitForFunction(() => {
+      const bodyText = String(document.body?.textContent || '').toLowerCase();
+      return bodyText.includes('retención de clientes') && bodyText.includes('generar informe');
+    }, { timeout: 20000 }).catch(() => {});
+
+    // Verificar si "Este mes" ya está seleccionado o si necesitamos seleccionarlo
+    const mouthSelect = page.locator('select').filter((el) => {
+      return el.evaluate((elem) => {
+        const label = elem.closest('label');
+        return label ? label.textContent.includes('período') || label.textContent.includes('mes') : false;
+      });
+    }).first();
+
+    const selectCount = await mouthSelect.count();
+    if (selectCount > 0) {
+      // Intentar seleccionar "Este mes"
+      await mouthSelect.selectOption({ label: /este mes/i }).catch(() => {});
+    }
+
+    // Buscar y hacer clic en "Generar informe"
+    const generateButton = page.locator('button, input[type="button"], input[type="submit"], a').filter({ hasText: /generar informe/i }).first();
+    const generateCount = await generateButton.count();
+    console.log('[AimHarder] Botón generar informe visible:', generateCount > 0);
+
+    if (generateCount > 0) {
+      try {
+        await generateButton.click({ force: true, timeout: 12000 });
+      } catch {
+        // Fallback
+        await page.evaluate(() => {
+          if (typeof window.generateReport === 'function') {
+            window.generateReport();
+          }
+        }).catch(() => {});
+      }
+    }
+
+    await page.waitForTimeout(1500).catch(() => {});
+    await page.waitForLoadState('networkidle', { timeout: 25000 }).catch(() => {});
+
+    // Extraer valor de retención media
+    const retentionValue = await page.evaluate(() => {
+      const bodyText = String(document.body?.textContent || '');
+      const normalize = (value) => String(value || '').replace(/\s+/g, ' ').trim().toLowerCase();
+
+      // Buscar patrón "retención media: XX.XX"
+      const match = bodyText.match(/retención\s+media[:\s]+(\d+(?:[.,]\d+)?)\s*%?/i);
+      if (match) {
+        const valueStr = match[1].replace(',', '.');
+        return Number.parseFloat(valueStr);
+      }
+
+      // Alternativa: buscar en el texto del documento cualquier número percentaje cercano a "retención media"
+      const lines = bodyText.split('\n');
+      for (let i = 0; i < lines.length; i++) {
+        if (normalize(lines[i]).includes('retención media')) {
+          // Buscar número en esta línea o en la siguiente
+          let searchText = lines[i];
+          if (i + 1 < lines.length) {
+            searchText += ' ' + lines[i + 1];
+          }
+          const numMatch = searchText.match(/\d+(?:[.,]\d+)?/);
+          if (numMatch) {
+            const valueStr = numMatch[0].replace(',', '.');
+            return Number.parseFloat(valueStr);
+          }
+        }
+      }
+
+      return null;
+    });
+
+    if (retentionValue === null) {
+      const pageContent = await page.content();
+      console.log('[AimHarder] No se encontró valor de retención media en la página');
+      console.log('[AimHarder] Debug: primeros 2000 caracteres del body', (await page.evaluate(() => document.body?.textContent || '')).slice(0, 2000));
+      throw new Error('No se pudo extraer el valor de retención media de AimHarder');
+    }
+
+    // Dividir entre 365 para obtener retención diaria
+    const dailyRetention = retentionValue / 365;
+
+    console.log(`[AimHarder] Retención media: ${retentionValue}%`);
+    console.log(`[AimHarder] Retención diaria: ${dailyRetention.toFixed(6)}`);
+
+    return {
+      monthlyRetention: retentionValue,
+      dailyRetention: Number(dailyRetention.toFixed(6)),
+    };
+  } finally {
+    await browser.close();
+    console.log('[AimHarder] ===== Fin scraping retención de clientes =====');
+  }
+}
+
 module.exports = {
   getAbsences,
   getStoredAbsences,
@@ -3403,6 +3751,7 @@ module.exports = {
   getActiveClientsMonthlyReport,
   getClientMonthlyReport,
   getTariffCancellationRenewals,
+  getClientRetentionRate,
   getYesterday,
   toDateString,
 };

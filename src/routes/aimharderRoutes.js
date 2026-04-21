@@ -17,6 +17,7 @@ const {
   getPendingPaymentsNoTpv,
   getActiveClientsReport,
   getTariffCancellationRenewals,
+  getClientRetentionRate,
   getOccupancyReport,
 } = require('../controllers/aimharderController');
 const { isAuthenticatedUser, authorizeRoles } = require('../middleware/auth');
@@ -45,6 +46,7 @@ router.get('/tpv-redsys-payments', isAuthenticatedUser, getTpvRedsysPayments);
 router.get('/pending-payments-no-tpv', isAuthenticatedUser, getPendingPaymentsNoTpv);
 router.get('/active-clients-report', isAuthenticatedUser, getActiveClientsReport);
 router.get('/tariff-cancellation-renewals', isAuthenticatedUser, getTariffCancellationRenewals);
+router.get('/retention-rate', isAuthenticatedUser, getClientRetentionRate);
 router.get('/occupancy-report', isAuthenticatedUser, authorizeRoles('admin'), getOccupancyReport);
 
 module.exports = router;
