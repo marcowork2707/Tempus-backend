@@ -3142,6 +3142,34 @@ async function upsertClientMonthlySnapshot(centerId, month, data) {
   ).lean();
 }
 
+async function setClientMonthlyMetricsManual(centerId, month, newSignupsManual, monthlyCancellationsManual) {
+  const updateData = {};
+  
+  if (newSignupsManual !== undefined && newSignupsManual !== null) {
+    updateData.newSignupsManual = Number(newSignupsManual);
+  }
+  
+  if (monthlyCancellationsManual !== undefined && monthlyCancellationsManual !== null) {
+    updateData.monthlyCancellationsManual = Number(monthlyCancellationsManual);
+  }
+
+  if (Object.keys(updateData).length === 0) {
+    throw new Error('Se debe proporcionar al menos newSignupsManual o monthlyCancellationsManual');
+  }
+
+  const result = await AimHarderClientMonthlySnapshot.findOneAndUpdate(
+    { center: centerId, month },
+    { $set: updateData },
+    { upsert: false, new: true }
+  ).lean();
+
+  if (!result) {
+    throw new Error('No se encontró el reporte mensual para este centro y mes. Carga los datos primero.');
+  }
+
+  return result;
+}
+
 async function getClientMonthlyReport(centerId, monthStr = null, options = {}) {
   const { refresh = false, cachedOnly = false } = options;
   const range = getMonthlyDateRange(monthStr);
@@ -3155,8 +3183,10 @@ async function getClientMonthlyReport(centerId, monthStr = null, options = {}) {
       count: stored.activeClientsCount || 0,
       clients: stored.activeClients || [],
       tariffSummary: stored.activeTariffSummary || [],
-      newSignups: stored.newSignups || 0,
-      monthlyCancellations: stored.monthlyCancellations || 0,
+      newSignups: stored.newSignupsManual !== null ? stored.newSignupsManual : (stored.newSignups || 0),
+      monthlyCancellations: stored.monthlyCancellationsManual !== null ? stored.monthlyCancellationsManual : (stored.monthlyCancellations || 0),
+      newSignupsManual: stored.newSignupsManual,
+      monthlyCancellationsManual: stored.monthlyCancellationsManual,
       loadedAt: stored.loadedAt || null,
       fromCache: true,
       hasData: true,
@@ -3173,6 +3203,8 @@ async function getClientMonthlyReport(centerId, monthStr = null, options = {}) {
       tariffSummary: [],
       newSignups: 0,
       monthlyCancellations: 0,
+      newSignupsManual: null,
+      monthlyCancellationsManual: null,
       loadedAt: null,
       fromCache: false,
       hasData: false,
@@ -3207,8 +3239,10 @@ async function getClientMonthlyReport(centerId, monthStr = null, options = {}) {
     count: saved.activeClientsCount || 0,
     clients: saved.activeClients || [],
     tariffSummary: saved.activeTariffSummary || [],
-    newSignups: saved.newSignups || 0,
-    monthlyCancellations: saved.monthlyCancellations || 0,
+    newSignups: saved.newSignupsManual !== null ? saved.newSignupsManual : (saved.newSignups || 0),
+    monthlyCancellations: saved.monthlyCancellationsManual !== null ? saved.monthlyCancellationsManual : (saved.monthlyCancellations || 0),
+    newSignupsManual: saved.newSignupsManual,
+    monthlyCancellationsManual: saved.monthlyCancellationsManual,
     loadedAt: saved.loadedAt || null,
     fromCache: false,
     hasData: true,
@@ -3750,6 +3784,7 @@ module.exports = {
   getPendingPaymentsWithoutTPVError,
   getActiveClientsMonthlyReport,
   getClientMonthlyReport,
+  setClientMonthlyMetricsManual,
   getTariffCancellationRenewals,
   getClientRetentionRate,
   getYesterday,

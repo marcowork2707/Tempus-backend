@@ -64,6 +64,14 @@ const aimHarderClientMonthlySnapshotSchema = new mongoose.Schema(
       type: Number,
       default: 0,
     },
+    newSignupsManual: {
+      type: Number,
+      default: null,
+    },
+    monthlyCancellationsManual: {
+      type: Number,
+      default: null,
+    },
     loadedAt: {
       type: Date,
       default: Date.now,

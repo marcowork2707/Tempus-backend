@@ -18,6 +18,7 @@ const {
   getActiveClientsReport,
   getTariffCancellationRenewals,
   getClientRetentionRate,
+  setClientMonthlyMetricsManual,
   getOccupancyReport,
 } = require('../controllers/aimharderController');
 const { isAuthenticatedUser, authorizeRoles } = require('../middleware/auth');
@@ -47,6 +48,7 @@ router.get('/pending-payments-no-tpv', isAuthenticatedUser, getPendingPaymentsNo
 router.get('/active-clients-report', isAuthenticatedUser, getActiveClientsReport);
 router.get('/tariff-cancellation-renewals', isAuthenticatedUser, getTariffCancellationRenewals);
 router.get('/retention-rate', isAuthenticatedUser, getClientRetentionRate);
+router.put('/monthly-metrics-manual', isAuthenticatedUser, setClientMonthlyMetricsManual);
 router.get('/occupancy-report', isAuthenticatedUser, authorizeRoles('admin'), getOccupancyReport);
 
 module.exports = router;

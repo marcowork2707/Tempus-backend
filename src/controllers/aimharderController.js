@@ -17,6 +17,7 @@ const {
   getPendingPaymentsWithTPVError,
   getPendingPaymentsWithoutTPVError,
   getClientMonthlyReport,
+  setClientMonthlyMetricsManual,
   getTariffCancellationRenewals,
   getClientRetentionRate,
 } = require('../services/aimharderService');
@@ -661,6 +662,54 @@ exports.getClientRetentionRate = async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Error al obtener retención de clientes desde AimHarder.',
+      detail: process.env.NODE_ENV === 'development' ? err.message : undefined,
+    });
+  }
+};
+
+/**
+ * PUT /api/aimharder/monthly-metrics-manual?centerId=X&month=YYYY-MM
+ * Guarda valores manuales de altas y bajas para un mes específico
+ */
+exports.setClientMonthlyMetricsManual = async (req, res) => {
+  try {
+    const { centerId, month } = req.query;
+    const { newSignupsManual, monthlyCancellationsManual } = req.body;
+
+    if (!centerId) {
+      return res.status(400).json({ success: false, message: 'centerId es obligatorio' });
+    }
+    if (!month || !/^\d{4}-\d{2}$/.test(month)) {
+      return res.status(400).json({ success: false, message: 'month es obligatorio (formato: YYYY-MM)' });
+    }
+    if (
+      (newSignupsManual === undefined || newSignupsManual === null) &&
+      (monthlyCancellationsManual === undefined || monthlyCancellationsManual === null)
+    ) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Se debe proporcionar al menos newSignupsManual o monthlyCancellationsManual en el body' 
+      });
+    }
+
+    const result = await setClientMonthlyMetricsManual(
+      centerId,
+      month,
+      newSignupsManual,
+      monthlyCancellationsManual
+    );
+
+    res.json({
+      success: true,
+      month: result.month,
+      newSignupsManual: result.newSignupsManual,
+      monthlyCancellationsManual: result.monthlyCancellationsManual,
+    });
+  } catch (err) {
+    console.error('[AimHarder Controller] Error guardando métricas manuales:', err.message);
+    res.status(err.message.includes('No se encontró') ? 404 : 500).json({
+      success: false,
+      message: err.message || 'Error al guardar métricas manuales.',
       detail: process.env.NODE_ENV === 'development' ? err.message : undefined,
     });
   }
