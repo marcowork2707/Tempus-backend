@@ -3743,10 +3743,16 @@ async function getClientRetentionRate(centerId) {
     await page.waitForTimeout(1800).catch(() => {});
     await page.waitForLoadState('networkidle', { timeout: 25000 }).catch(() => {});
 
+    // Esperar explícitamente al texto visible del informe de retención.
+    await page.waitForFunction(() => {
+      const visibleText = String(document.body?.innerText || '').toLowerCase();
+      return visibleText.includes('retención media') || visibleText.includes('retencion media');
+    }, { timeout: 15000 }).catch(() => {});
+
     // Extraer SOLO el valor asociado a "RETENCION/RETENCIÓN MEDIA".
     // Evita capturar números de otras columnas como "Permanencia".
     const retentionValue = await page.evaluate(() => {
-      const bodyText = String(document.body?.textContent || '');
+      const visibleText = String(document.body?.innerText || '');
 
       const patterns = [
         /retenci[oó]n\s+media\s*[:\-]?\s*(\d+(?:[.,]\d+)?)\s*(?:d[ií]as|days)?/i,
@@ -3754,7 +3760,7 @@ async function getClientRetentionRate(centerId) {
       ];
 
       for (const pattern of patterns) {
-        const match = bodyText.match(pattern);
+        const match = visibleText.match(pattern);
         if (!match) continue;
         const value = Number.parseFloat(String(match[1]).replace(',', '.'));
         if (!Number.isNaN(value) && value > 0 && value < 400) {
@@ -3767,7 +3773,13 @@ async function getClientRetentionRate(centerId) {
 
     if (retentionValue === null) {
       console.log('[AimHarder] No se encontró valor de retención media en la página');
-      console.log('[AimHarder] Debug: primeros 2000 caracteres del body', (await page.evaluate(() => document.body?.textContent || '')).slice(0, 2000));
+      await page.screenshot({ path: path.join(DEBUG_DIR, `${Date.now()}_retention_missing.png`), fullPage: true }).catch(() => {});
+      const htmlDebugPath = path.join(DEBUG_DIR, `${Date.now()}_retention_missing.html`);
+      const htmlDebugContent = await page.content().catch(() => '');
+      if (htmlDebugContent) {
+        fs.writeFileSync(htmlDebugPath, htmlDebugContent, 'utf8');
+      }
+      console.log('[AimHarder] Debug: primeros 2000 caracteres del texto visible', (await page.evaluate(() => document.body?.innerText || '')).slice(0, 2000));
       throw new Error('No se pudo extraer el valor de retención media de AimHarder');
     }
 
