@@ -3660,24 +3660,33 @@ async function getClientRetentionRate(centerId) {
       expiry: Date.now() + SESSION_TTL_MS,
     });
 
-    // Paso 1: abrir ESTRICTAMENTE "Ver informe" de la fila "Retención de clientes".
-    let openedRetentionReport = false;
-    const reportRows = page.locator('tr, li, section, article, div').filter({ hasText: /retenci[oó]n de clientes/i });
-    const reportRowsCount = await reportRows.count();
-    for (let i = 0; i < reportRowsCount; i += 1) {
-      const row = reportRows.nth(i);
-      const rowText = await row.innerText().catch(() => '');
-      if (!/retenci[oó]n de clientes/i.test(String(rowText || ''))) continue;
+    // Paso 1: abrir ESTRICTAMENTE "Ver informe" asociado a "Retención de clientes".
+    const openedRetentionReport = await page.evaluate(() => {
+      const normalize = (value) => String(value || '').replace(/\s+/g, ' ').trim().toLowerCase();
+      const isRetentionLabel = (text) => /retenci[oó]n\s+de\s+clientes/i.test(String(text || ''));
+      const isVerInforme = (text) => /ver\s+informe/i.test(String(text || ''));
 
-      const verInforme = row
-        .locator('a:has-text("Ver informe"), button:has-text("Ver informe"), input[type="button"][value*="Ver informe"], input[type="submit"][value*="Ver informe"]')
-        .first();
-      if (await verInforme.count()) {
-        await verInforme.click({ force: true, timeout: 10000 }).catch(() => {});
-        openedRetentionReport = true;
-        break;
+      const allNodes = Array.from(document.querySelectorAll('h1,h2,h3,h4,h5,strong,b,span,div,td,li,p,a,button'));
+      const retentionNodes = allNodes.filter((el) => isRetentionLabel(normalize(el.textContent)));
+
+      for (const node of retentionNodes) {
+        let container = node;
+        for (let depth = 0; depth < 6 && container; depth += 1) {
+          const candidates = Array.from(container.querySelectorAll('a,button,input[type="button"],input[type="submit"]'));
+          const trigger = candidates.find((el) => {
+            const label = normalize(el.textContent || el.getAttribute('value'));
+            return isVerInforme(label);
+          });
+          if (trigger) {
+            trigger.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+            return true;
+          }
+          container = container.parentElement;
+        }
       }
-    }
+
+      return false;
+    }).catch(() => false);
 
     if (!openedRetentionReport) {
       throw new Error('No se encontró el enlace "Ver informe" de "Retención de clientes" en Informes');
@@ -3685,10 +3694,13 @@ async function getClientRetentionRate(centerId) {
 
     await page.waitForTimeout(900).catch(() => {});
     await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
+    await page.waitForURL(/\/reports/i, { timeout: 15000 }).catch(() => {});
 
     const retentionScreenDetected = await page.evaluate(() => {
       const text = String(document.body?.innerText || '').toLowerCase();
-      return text.includes('retención de clientes') && text.includes('generar informe');
+      return (text.includes('retención de clientes') || text.includes('retencion de clientes'))
+        && text.includes('generar informe')
+        && text.includes('fechas');
     }).catch(() => false);
     if (!retentionScreenDetected) {
       throw new Error('Se abrió un informe distinto a "Retención de clientes". No se continúa para evitar datos incorrectos.');
