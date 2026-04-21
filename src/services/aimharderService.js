@@ -3616,13 +3616,30 @@ async function getClientRetentionRate(centerId) {
         'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
     });
 
+    const ajaxPayloads = [];
+    const page = await context.newPage();
+    page.on('response', async (response) => {
+      try {
+        const req = response.request();
+        const resourceType = req.resourceType();
+        if (resourceType !== 'xhr' && resourceType !== 'fetch') return;
+        const contentType = String(response.headers()['content-type'] || '').toLowerCase();
+        if (!contentType.includes('json') && !contentType.includes('text')) return;
+        const body = await response.text();
+        if (body && body.length < 300000) {
+          ajaxPayloads.push(body);
+        }
+      } catch {
+        // ignore
+      }
+    });
+
     const sessionCache = await getSessionCache(config);
     if (sessionCache.cookies && sessionCache.expiry && Date.now() < sessionCache.expiry) {
       await context.addCookies(sessionCache.cookies);
       console.log('[AimHarder] Sesión restaurada desde caché');
     }
 
-    const page = await context.newPage();
     const reportsUrl = `${config.baseUrl}/reports`;
 
     console.log('[AimHarder] Navegando a Informes...');
@@ -3643,86 +3660,86 @@ async function getClientRetentionRate(centerId) {
       expiry: Date.now() + SESSION_TTL_MS,
     });
 
-    const pageBodyBefore = await page.evaluate(() => String(document.body?.textContent || '').toLowerCase());
-    const alreadyOnRetentionScreen = pageBodyBefore.includes('retención de clientes')
-      && (pageBodyBefore.includes('generar informe') || pageBodyBefore.includes('generar gráfica') || pageBodyBefore.includes('generar grafica') || pageBodyBefore.includes('retención media'));
+    // Paso 1: abrir "Ver informe" de la fila "Retención de clientes".
+    const openedRetentionReport = await page.evaluate(() => {
+      const normalize = (value) => String(value || '').replace(/\s+/g, ' ').trim().toLowerCase();
+      const rows = Array.from(document.querySelectorAll('a, button, div, li, tr, section'));
+      const row = rows.find((el) => {
+        const text = normalize(el.textContent);
+        return text.includes('retención de clientes') && text.includes('ver informe');
+      });
 
-    if (!alreadyOnRetentionScreen) {
-      // Buscar tarjeta "Retención de clientes"
-      const retentionCard = page
-        .locator('a, button, div[role="button"], [onclick]')
-        .filter({ hasText: /retención de clientes/i })
-        .first();
-
-      const cardCount = await retentionCard.count();
-      console.log(`[AimHarder] Card "Retención de clientes" detectada: ${cardCount > 0}`);
-
-      if (!cardCount) {
-        throw new Error('No se encontró la tarjeta de "Retención de clientes" en Informes');
-      }
-
-      // Hacer clic en la tarjeta
-      let clicked = false;
-      try {
-        await retentionCard.click({ force: true, timeout: 8000 });
-        clicked = true;
-      } catch {
-        clicked = false;
-      }
-
-      if (!clicked) {
-        const meta = await retentionCard.evaluate((el) => el.getAttribute('onclick')).catch(() => null);
-        if (meta) {
-          await page.evaluate((onclickCode) => {
-            try {
-              // eslint-disable-next-line no-eval
-              eval(onclickCode);
-            } catch {
-              // ignore
-            }
-          }, meta).catch(() => {});
+      if (row) {
+        const trigger = row.querySelector('a, button, input[type="button"], input[type="submit"]');
+        if (trigger) {
+          trigger.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+          return true;
         }
       }
 
-      await page.waitForTimeout(700).catch(() => {});
-      await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
+      const directTrigger = Array.from(document.querySelectorAll('a, button, input[type="button"], input[type="submit"]')).find((el) => {
+        const text = normalize(el.textContent || el.getAttribute('value'));
+        return text.includes('ver informe') && normalize((el.closest('div,li,tr,section') || el.parentElement || document.body).textContent).includes('retención de clientes');
+      });
+      if (directTrigger) {
+        directTrigger.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+        return true;
+      }
+      return false;
+    }).catch(() => false);
+
+    if (!openedRetentionReport) {
+      const fallbackRetentionCard = page
+        .locator('a, button, div[role="button"], [onclick]')
+        .filter({ hasText: /retención de clientes/i })
+        .first();
+      const cardCount = await fallbackRetentionCard.count();
+      if (!cardCount) {
+        throw new Error('No se encontró "Retención de clientes" en Informes');
+      }
+      await fallbackRetentionCard.click({ force: true, timeout: 10000 }).catch(() => {});
     }
+
+    await page.waitForTimeout(900).catch(() => {});
+    await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
 
     // Esperar a que cargue la pantalla de retención
     await page.waitForFunction(() => {
-      const bodyText = String(document.body?.textContent || '').toLowerCase();
-      return bodyText.includes('retención de clientes')
-        && (bodyText.includes('generar gráfica') || bodyText.includes('generar grafica') || bodyText.includes('generar informe') || bodyText.includes('retención media'));
+      const text = String(document.body?.innerText || '').toLowerCase();
+      return text.includes('retención de clientes') && text.includes('generar informe');
     }, { timeout: 20000 }).catch(() => {});
 
-    // Seleccionar "Este mes" de forma tolerante (si existe un select con esa opción)
-    const selects = page.locator('select');
-    const selectCount = await selects.count();
+    // Paso 2: seleccionar botón "Este mes".
     let selectedThisMonth = false;
-    for (let i = 0; i < selectCount; i += 1) {
-      const select = selects.nth(i);
-      const optionTexts = await select.locator('option').allTextContents().catch(() => []);
-      const hasThisMonthOption = optionTexts.some((text) => /este\s+mes/i.test(String(text || '')));
-      if (!hasThisMonthOption) continue;
-      const selected = await select.selectOption({ label: /este\s+mes/i }).catch(() => []);
-      if (Array.isArray(selected) && selected.length > 0) {
+    const thisMonthButton = page
+      .locator('button:has-text("Este mes"), a:has-text("Este mes"), input[type="button"][value*="Este mes"], input[type="submit"][value*="Este mes"]')
+      .first();
+    if (await thisMonthButton.count()) {
+      try {
+        await thisMonthButton.click({ force: true, timeout: 10000 });
         selectedThisMonth = true;
-        break;
+      } catch {
+        selectedThisMonth = false;
       }
+    }
+    if (!selectedThisMonth) {
+      selectedThisMonth = await page.evaluate(() => {
+        const normalize = (value) => String(value || '').replace(/\s+/g, ' ').trim().toLowerCase();
+        const button = Array.from(document.querySelectorAll('button, a, input[type="button"], input[type="submit"]')).find((el) =>
+          normalize(el.textContent || el.getAttribute('value')).includes('este mes')
+        );
+        if (!button) return false;
+        button.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+        return true;
+      }).catch(() => false);
     }
     console.log('[AimHarder] Opción "Este mes" seleccionada:', selectedThisMonth);
 
-    // Buscar y hacer clic en "Generar informe" (preferido) con fallback a "Generar gráfica"
-    const generateGraphButton = page
-      .locator('button:has-text("Generar gráfica"), button:has-text("Generar grafica"), a:has-text("Generar gráfica"), a:has-text("Generar grafica"), input[type="button"][value*="Generar gráfica"], input[type="button"][value*="Generar grafica"], input[type="submit"][value*="Generar gráfica"], input[type="submit"][value*="Generar grafica"]')
-      .first();
+    // Paso 3: pulsar "Generar informe".
     const generateReportButton = page
       .locator('button:has-text("Generar informe"), a:has-text("Generar informe"), input[type="button"][value*="Generar informe"], input[type="submit"][value*="Generar informe"]')
       .first();
-
-    const graphCount = await generateGraphButton.count();
     const reportCount = await generateReportButton.count();
-    console.log('[AimHarder] Botón "Generar gráfica" visible:', graphCount > 0);
     console.log('[AimHarder] Botón "Generar informe" visible:', reportCount > 0);
 
     let generated = false;
@@ -3735,20 +3752,11 @@ async function getClientRetentionRate(centerId) {
       }
     }
 
-    if (!generated && graphCount > 0) {
-      try {
-        await generateGraphButton.click({ force: true, timeout: 12000 });
-        generated = true;
-      } catch {
-        generated = false;
-      }
-    }
-
     if (!generated) {
       // Fallback JS por texto de botón/enlace
       generated = await page.evaluate(() => {
         const candidates = Array.from(document.querySelectorAll('button, a, input[type="button"], input[type="submit"]'));
-        const target = candidates.find((el) => /generar\s+informe|generar\s+gr[áa]fica/i.test(String(el.textContent || el.value || '')));
+        const target = candidates.find((el) => /generar\s+informe/i.test(String(el.textContent || el.value || '')));
         if (!target) return false;
         target.click();
         return true;
@@ -3770,7 +3778,7 @@ async function getClientRetentionRate(centerId) {
     const parseRetentionFromText = (text = '') => {
       const patterns = [
         /retenci[oó]n\s+media\s*[:\-]?\s*(\d+(?:[.,]\d+)?)\s*(?:d[ií]as|days)?/i,
-        /retenci[oó]n\s+media[^\d]{0,60}(\d+(?:[.,]\d+)?)/i,
+        /retenci[oó]n\s+media[^\d]{0,120}(\d+(?:[.,]\d+)?)/i,
       ];
       for (const pattern of patterns) {
         const match = String(text || '').match(pattern);
@@ -3790,7 +3798,7 @@ async function getClientRetentionRate(centerId) {
 
       const patterns = [
         /retenci[oó]n\s+media\s*[:\-]?\s*(\d+(?:[.,]\d+)?)\s*(?:d[ií]as|days)?/i,
-        /retenci[oó]n\s+media[^\d]{0,60}(\d+(?:[.,]\d+)?)/i,
+        /retenci[oó]n\s+media[^\d]{0,120}(\d+(?:[.,]\d+)?)/i,
       ];
 
       for (const pattern of patterns) {
