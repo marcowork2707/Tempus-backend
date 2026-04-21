@@ -3660,53 +3660,44 @@ async function getClientRetentionRate(centerId) {
       expiry: Date.now() + SESSION_TTL_MS,
     });
 
-    // Paso 1: abrir "Ver informe" de la fila "Retención de clientes".
-    const openedRetentionReport = await page.evaluate(() => {
-      const normalize = (value) => String(value || '').replace(/\s+/g, ' ').trim().toLowerCase();
-      const rows = Array.from(document.querySelectorAll('a, button, div, li, tr, section'));
-      const row = rows.find((el) => {
-        const text = normalize(el.textContent);
-        return text.includes('retención de clientes') && text.includes('ver informe');
-      });
+    // Paso 1: abrir ESTRICTAMENTE "Ver informe" de la fila "Retención de clientes".
+    let openedRetentionReport = false;
+    const reportRows = page.locator('tr, li, section, article, div').filter({ hasText: /retenci[oó]n de clientes/i });
+    const reportRowsCount = await reportRows.count();
+    for (let i = 0; i < reportRowsCount; i += 1) {
+      const row = reportRows.nth(i);
+      const rowText = await row.innerText().catch(() => '');
+      if (!/retenci[oó]n de clientes/i.test(String(rowText || ''))) continue;
 
-      if (row) {
-        const trigger = row.querySelector('a, button, input[type="button"], input[type="submit"]');
-        if (trigger) {
-          trigger.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
-          return true;
-        }
+      const verInforme = row
+        .locator('a:has-text("Ver informe"), button:has-text("Ver informe"), input[type="button"][value*="Ver informe"], input[type="submit"][value*="Ver informe"]')
+        .first();
+      if (await verInforme.count()) {
+        await verInforme.click({ force: true, timeout: 10000 }).catch(() => {});
+        openedRetentionReport = true;
+        break;
       }
-
-      const directTrigger = Array.from(document.querySelectorAll('a, button, input[type="button"], input[type="submit"]')).find((el) => {
-        const text = normalize(el.textContent || el.getAttribute('value'));
-        return text.includes('ver informe') && normalize((el.closest('div,li,tr,section') || el.parentElement || document.body).textContent).includes('retención de clientes');
-      });
-      if (directTrigger) {
-        directTrigger.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
-        return true;
-      }
-      return false;
-    }).catch(() => false);
+    }
 
     if (!openedRetentionReport) {
-      const fallbackRetentionCard = page
-        .locator('a, button, div[role="button"], [onclick]')
-        .filter({ hasText: /retención de clientes/i })
-        .first();
-      const cardCount = await fallbackRetentionCard.count();
-      if (!cardCount) {
-        throw new Error('No se encontró "Retención de clientes" en Informes');
-      }
-      await fallbackRetentionCard.click({ force: true, timeout: 10000 }).catch(() => {});
+      throw new Error('No se encontró el enlace "Ver informe" de "Retención de clientes" en Informes');
     }
 
     await page.waitForTimeout(900).catch(() => {});
     await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
 
-    // Esperar a que cargue la pantalla de retención
-    await page.waitForFunction(() => {
+    const retentionScreenDetected = await page.evaluate(() => {
       const text = String(document.body?.innerText || '').toLowerCase();
       return text.includes('retención de clientes') && text.includes('generar informe');
+    }).catch(() => false);
+    if (!retentionScreenDetected) {
+      throw new Error('Se abrió un informe distinto a "Retención de clientes". No se continúa para evitar datos incorrectos.');
+    }
+
+    // Esperar a que cargue la pantalla de retención (breadcrumb exacto)
+    await page.waitForFunction(() => {
+      const text = String(document.body?.innerText || '').toLowerCase();
+      return text.includes('retención de clientes') && text.includes('generar informe') && text.includes('informes');
     }, { timeout: 20000 }).catch(() => {});
 
     // Paso 2: seleccionar botón "Este mes".
@@ -3735,7 +3726,7 @@ async function getClientRetentionRate(centerId) {
     }
     console.log('[AimHarder] Opción "Este mes" seleccionada:', selectedThisMonth);
 
-    // Paso 3: pulsar "Generar informe".
+    // Paso 3: pulsar SOLO "Generar informe".
     const generateReportButton = page
       .locator('button:has-text("Generar informe"), a:has-text("Generar informe"), input[type="button"][value*="Generar informe"], input[type="submit"][value*="Generar informe"]')
       .first();
@@ -3753,16 +3744,15 @@ async function getClientRetentionRate(centerId) {
     }
 
     if (!generated) {
-      // Fallback JS por texto de botón/enlace
       generated = await page.evaluate(() => {
         const candidates = Array.from(document.querySelectorAll('button, a, input[type="button"], input[type="submit"]'));
         const target = candidates.find((el) => /generar\s+informe/i.test(String(el.textContent || el.value || '')));
         if (!target) return false;
-        target.click();
+        target.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
         return true;
       }).catch(() => false);
     }
-    console.log('[AimHarder] Informe/gráfica generado:', generated);
+    console.log('[AimHarder] Informe generado:', generated);
 
     await page.waitForTimeout(1800).catch(() => {});
     await page.waitForLoadState('networkidle', { timeout: 25000 }).catch(() => {});
