@@ -3627,50 +3627,56 @@ async function getClientRetentionRate(centerId) {
       expiry: Date.now() + SESSION_TTL_MS,
     });
 
-    // Buscar tarjeta "Retención de clientes"
-    const retentionCard = page
-      .locator('a, button')
-      .filter({ hasText: /retención de clientes/i })
-      .first();
+    const pageBodyBefore = await page.evaluate(() => String(document.body?.textContent || '').toLowerCase());
+    const alreadyOnRetentionScreen = pageBodyBefore.includes('retención de clientes')
+      && (pageBodyBefore.includes('generar informe') || pageBodyBefore.includes('generar gráfica') || pageBodyBefore.includes('generar grafica') || pageBodyBefore.includes('retención media'));
 
-    const cardCount = await retentionCard.count();
-    console.log(`[AimHarder] Card "Retención de clientes" detectada: ${cardCount > 0}`);
+    if (!alreadyOnRetentionScreen) {
+      // Buscar tarjeta "Retención de clientes"
+      const retentionCard = page
+        .locator('a, button, div[role="button"], [onclick]')
+        .filter({ hasText: /retención de clientes/i })
+        .first();
 
-    if (!cardCount) {
-      throw new Error('No se encontró la tarjeta de "Retención de clientes" en Informes');
-    }
+      const cardCount = await retentionCard.count();
+      console.log(`[AimHarder] Card "Retención de clientes" detectada: ${cardCount > 0}`);
 
-    // Hacer clic en la tarjeta
-    let clicked = false;
-    try {
-      await retentionCard.click({ force: true, timeout: 8000 });
-      clicked = true;
-    } catch {
-      clicked = false;
-    }
-
-    if (!clicked) {
-      const meta = await retentionCard.evaluate((el) => el.getAttribute('onclick')).catch(() => null);
-      if (meta) {
-        await page.evaluate((onclickCode) => {
-          try {
-            // eslint-disable-next-line no-eval
-            eval(onclickCode);
-          } catch {
-            // ignore
-          }
-        }, meta).catch(() => {});
+      if (!cardCount) {
+        throw new Error('No se encontró la tarjeta de "Retención de clientes" en Informes');
       }
-    }
 
-    await page.waitForTimeout(700).catch(() => {});
-    await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
+      // Hacer clic en la tarjeta
+      let clicked = false;
+      try {
+        await retentionCard.click({ force: true, timeout: 8000 });
+        clicked = true;
+      } catch {
+        clicked = false;
+      }
+
+      if (!clicked) {
+        const meta = await retentionCard.evaluate((el) => el.getAttribute('onclick')).catch(() => null);
+        if (meta) {
+          await page.evaluate((onclickCode) => {
+            try {
+              // eslint-disable-next-line no-eval
+              eval(onclickCode);
+            } catch {
+              // ignore
+            }
+          }, meta).catch(() => {});
+        }
+      }
+
+      await page.waitForTimeout(700).catch(() => {});
+      await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
+    }
 
     // Esperar a que cargue la pantalla de retención
     await page.waitForFunction(() => {
       const bodyText = String(document.body?.textContent || '').toLowerCase();
       return bodyText.includes('retención de clientes')
-        && (bodyText.includes('generar gráfica') || bodyText.includes('generar grafica') || bodyText.includes('generar informe'));
+        && (bodyText.includes('generar gráfica') || bodyText.includes('generar grafica') || bodyText.includes('generar informe') || bodyText.includes('retención media'));
     }, { timeout: 20000 }).catch(() => {});
 
     // Seleccionar "Este mes" de forma tolerante (si existe un select con esa opción)
@@ -3692,12 +3698,10 @@ async function getClientRetentionRate(centerId) {
 
     // Buscar y hacer clic en "Generar informe" (preferido) con fallback a "Generar gráfica"
     const generateGraphButton = page
-      .locator('button, input[type="button"], input[type="submit"], a')
-      .filter({ hasText: /generar\s+gr[aá]fica/i })
+      .locator('button:has-text("Generar gráfica"), button:has-text("Generar grafica"), a:has-text("Generar gráfica"), a:has-text("Generar grafica"), input[type="button"][value*="Generar gráfica"], input[type="button"][value*="Generar grafica"], input[type="submit"][value*="Generar gráfica"], input[type="submit"][value*="Generar grafica"]')
       .first();
     const generateReportButton = page
-      .locator('button, input[type="button"], input[type="submit"], a')
-      .filter({ hasText: /generar\s+informe/i })
+      .locator('button:has-text("Generar informe"), a:has-text("Generar informe"), input[type="button"][value*="Generar informe"], input[type="submit"][value*="Generar informe"]')
       .first();
 
     const graphCount = await generateGraphButton.count();
@@ -3728,7 +3732,7 @@ async function getClientRetentionRate(centerId) {
       // Fallback JS por texto de botón/enlace
       generated = await page.evaluate(() => {
         const candidates = Array.from(document.querySelectorAll('button, a, input[type="button"], input[type="submit"]'));
-        const target = candidates.find((el) => /generar\s+gr[áa]fica|generar\s+informe/i.test(String(el.textContent || el.value || '')));
+        const target = candidates.find((el) => /generar\s+informe|generar\s+gr[áa]fica/i.test(String(el.textContent || el.value || '')));
         if (!target) return false;
         target.click();
         return true;
