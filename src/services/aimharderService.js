@@ -3712,28 +3712,39 @@ async function getClientRetentionRate(centerId) {
       const bodyText = String(document.body?.textContent || '');
       const normalize = (value) => String(value || '').replace(/\s+/g, ' ').trim().toLowerCase();
 
-      // Buscar patrón "retención media: XX.XX"
-      const match = bodyText.match(/retención\s+media[:\s]+(\d+(?:[.,]\d+)?)\s*%?/i);
+      // Strategy 1: Buscar "retención" seguido de número y "días"
+      let match = bodyText.match(/retención\s+(?:media)?[:\s]+(\d+(?:[.,]\d+)?)\s*(?:días|days)/i);
       if (match) {
         const valueStr = match[1].replace(',', '.');
         return Number.parseFloat(valueStr);
       }
 
-      // Alternativa: buscar en el texto del documento cualquier número percentaje cercano a "retención media"
+      // Strategy 2: Buscar por líneas que contengan "retención"
       const lines = bodyText.split('\n');
       for (let i = 0; i < lines.length; i++) {
-        if (normalize(lines[i]).includes('retención media')) {
+        const line = normalize(lines[i]);
+        if (line.includes('retención')) {
           // Buscar número en esta línea o en la siguiente
           let searchText = lines[i];
           if (i + 1 < lines.length) {
             searchText += ' ' + lines[i + 1];
           }
-          const numMatch = searchText.match(/\d+(?:[.,]\d+)?/);
+          const numMatch = searchText.match(/(\d+(?:[.,]\d+)?)\s*(?:días|days|%)?/i);
           if (numMatch) {
-            const valueStr = numMatch[0].replace(',', '.');
-            return Number.parseFloat(valueStr);
+            const valueStr = numMatch[1].replace(',', '.');
+            const val = Number.parseFloat(valueStr);
+            if (!isNaN(val) && val > 0 && val < 400) {
+              return val;
+            }
           }
         }
+      }
+
+      // Strategy 3: Buscar cualquier número seguido de "días"
+      match = bodyText.match(/(\d+(?:[.,]\d+)?)\s*(?:días|days)/i);
+      if (match) {
+        const valueStr = match[1].replace(',', '.');
+        return Number.parseFloat(valueStr);
       }
 
       return null;
@@ -3747,11 +3758,14 @@ async function getClientRetentionRate(centerId) {
     }
 
     // AimHarder devuelve la retención en días (ej: 93.26 días).
+    // Dividir entre 365 para obtener la retención diaria (decimal 0-1)
+    const dailyRetention = retentionValue / 365;
     console.log(`[AimHarder] Retención media: ${retentionValue} días`);
+    console.log(`[AimHarder] Retención diaria: ${(dailyRetention * 100).toFixed(2)}%`);
 
     return {
       monthlyRetention: retentionValue,
-      dailyRetention: retentionValue,
+      dailyRetention: Number(dailyRetention.toFixed(4)),
     };
   } finally {
     await browser.close();
