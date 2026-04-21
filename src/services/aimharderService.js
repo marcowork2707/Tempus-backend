@@ -2801,6 +2801,27 @@ async function getActiveClientsMonthlyReport(centerId, monthStr = null) {
         setDateInput(fromInput, startInput);
         setDateInput(toInput, endInput);
       }
+
+      // Ajuste requerido: en "Estado cuenta" forzar "Cuenta no bloqueada".
+      const selects = Array.from(document.querySelectorAll('select'));
+      for (const select of selects) {
+        const contextText = normalize(
+          (select.closest('label') && select.closest('label').textContent) ||
+          (select.parentElement && select.parentElement.textContent) ||
+          ''
+        );
+
+        if (!contextText.includes('estado cuenta')) continue;
+
+        const option = Array.from(select.options).find((opt) =>
+          normalize(opt.textContent).includes('cuenta no bloqueada')
+        );
+
+        if (option) {
+          select.value = option.value;
+          select.dispatchEvent(new Event('change', { bubbles: true }));
+        }
+      }
     }, { startInput: range.startInput, endInput: range.endInput });
 
     const generateButton = page.locator('button, input[type="button"], input[type="submit"], a').filter({ hasText: /generar informe/i }).first();
