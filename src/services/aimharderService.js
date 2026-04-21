@@ -1315,6 +1315,22 @@ async function getClassReportContext(dateStr = null, centerId, userName = '', is
     }
 
     const page = await context.newPage();
+    const ajaxPayloads = [];
+    page.on('response', async (response) => {
+      try {
+        const request = response.request();
+        const resourceType = request.resourceType();
+        if (!['xhr', 'fetch'].includes(resourceType)) return;
+        const contentType = String(response.headers()['content-type'] || '').toLowerCase();
+        if (!contentType.includes('json') && !contentType.includes('text')) return;
+        const body = await response.text();
+        if (body && body.length < 300000) {
+          ajaxPayloads.push(body);
+        }
+      } catch {
+        // ignore network parsing issues
+      }
+    });
     await ensureAuthenticatedSession(page, config);
 
     await setSessionCache(config, {
@@ -3750,17 +3766,35 @@ async function getClientRetentionRate(centerId) {
     }, { timeout: 15000 }).catch(() => {});
 
     // Extraer SOLO el valor asociado a "RETENCION/RETENCIÓN MEDIA".
-    // Evita capturar números de otras columnas como "Permanencia".
-    const retentionValue = await page.evaluate(() => {
+    // Intentar documento visible, textContent, iframes y payloads AJAX.
+    const parseRetentionFromText = (text = '') => {
+      const patterns = [
+        /retenci[oó]n\s+media\s*[:\-]?\s*(\d+(?:[.,]\d+)?)\s*(?:d[ií]as|days)?/i,
+        /retenci[oó]n\s+media[^\d]{0,60}(\d+(?:[.,]\d+)?)/i,
+      ];
+      for (const pattern of patterns) {
+        const match = String(text || '').match(pattern);
+        if (!match) continue;
+        const value = Number.parseFloat(String(match[1]).replace(',', '.'));
+        if (!Number.isNaN(value) && value > 0 && value < 400) {
+          return value;
+        }
+      }
+      return null;
+    };
+
+    let retentionValue = await page.evaluate(() => {
       const visibleText = String(document.body?.innerText || '');
+      const contentText = String(document.body?.textContent || '');
+      const combined = `${visibleText}\n${contentText}`;
 
       const patterns = [
         /retenci[oó]n\s+media\s*[:\-]?\s*(\d+(?:[.,]\d+)?)\s*(?:d[ií]as|days)?/i,
-        /retenci[oó]n\s+media[^\d]{0,30}(\d+(?:[.,]\d+)?)/i,
+        /retenci[oó]n\s+media[^\d]{0,60}(\d+(?:[.,]\d+)?)/i,
       ];
 
       for (const pattern of patterns) {
-        const match = visibleText.match(pattern);
+        const match = combined.match(pattern);
         if (!match) continue;
         const value = Number.parseFloat(String(match[1]).replace(',', '.'));
         if (!Number.isNaN(value) && value > 0 && value < 400) {
@@ -3772,12 +3806,38 @@ async function getClientRetentionRate(centerId) {
     });
 
     if (retentionValue === null) {
+      const frames = page.frames();
+      for (const frame of frames) {
+        const frameText = await frame.evaluate(() => `${String(document.body?.innerText || '')}\n${String(document.body?.textContent || '')}`).catch(() => '');
+        const parsed = parseRetentionFromText(frameText);
+        if (parsed !== null) {
+          retentionValue = parsed;
+          break;
+        }
+      }
+    }
+
+    if (retentionValue === null && ajaxPayloads.length > 0) {
+      for (const payload of ajaxPayloads) {
+        const parsed = parseRetentionFromText(payload);
+        if (parsed !== null) {
+          retentionValue = parsed;
+          break;
+        }
+      }
+    }
+
+    if (retentionValue === null) {
       console.log('[AimHarder] No se encontró valor de retención media en la página');
       await page.screenshot({ path: path.join(DEBUG_DIR, `${Date.now()}_retention_missing.png`), fullPage: true }).catch(() => {});
       const htmlDebugPath = path.join(DEBUG_DIR, `${Date.now()}_retention_missing.html`);
       const htmlDebugContent = await page.content().catch(() => '');
       if (htmlDebugContent) {
         fs.writeFileSync(htmlDebugPath, htmlDebugContent, 'utf8');
+      }
+      if (ajaxPayloads.length > 0) {
+        const ajaxDebugPath = path.join(DEBUG_DIR, `${Date.now()}_retention_ajax_debug.json`);
+        fs.writeFileSync(ajaxDebugPath, JSON.stringify(ajaxPayloads.slice(-20), null, 2), 'utf8');
       }
       console.log('[AimHarder] Debug: primeros 2000 caracteres del texto visible', (await page.evaluate(() => document.body?.innerText || '')).slice(0, 2000));
       throw new Error('No se pudo extraer el valor de retención media de AimHarder');
