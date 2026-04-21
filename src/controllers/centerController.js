@@ -13,6 +13,7 @@ const PayrollEntry = require('../models/PayrollEntry');
 const CenterExpense = require('../models/CenterExpense');
 const RecurringExpenseConcept = require('../models/RecurringExpenseConcept');
 const WeeklyPlanning = require('../models/WeeklyPlanning');
+const CenterDashboardReview = require('../models/CenterDashboardReview');
 const TimeEntry = require('../models/TimeEntry');
 const Checklist = require('../models/Checklist');
 const ErrorHandler = require('../utils/errorHandler');
@@ -21,6 +22,83 @@ const { buildPlanningMessage } = require('../services/weeklyPlanningService');
 
 const hasResolvedUser = (record) => Boolean(record?.user && record.user._id);
 const OVERTIME_AGGREGATION_MODES = ['net', 'positive_only'];
+const DASHBOARD_REVIEW_ALLOWED_STATUSES = ['pending', 'ok', 'fail'];
+
+const DASHBOARD_REVIEW_TEMPLATE = [
+  {
+    key: 'producto',
+    title: 'PRODUCTO',
+    items: [
+      { key: 'pizarra', label: 'Pizarra' },
+      { key: 'two-min-rule', label: '2-Min-Rule' },
+      { key: 'warm-up-general-movilidad', label: 'Warm Up General + Movilidad' },
+      { key: 'nombres-3-veces-por-clase', label: 'Nombres (3 Veces por clase)' },
+      { key: 'efi', label: 'EFI (EJERCICIOS-FLOW-INTENCION)' },
+      { key: 'funcionario-de-carceles', label: 'Funcionario de carceles' },
+      { key: 'feedback', label: 'Feedback' },
+      { key: 'clase-termina-en-tiempo', label: 'Clase termina en tiempo' },
+      { key: 'informado-sobre-promos-en-pizarra', label: 'Informado sobre promos en pizarra' },
+      { key: 'scaling', label: 'Scaling' },
+    ],
+  },
+];
+
+const buildDefaultDashboardReviewSections = () =>
+  DASHBOARD_REVIEW_TEMPLATE.map((section) => ({
+    key: section.key,
+    title: section.title,
+    items: section.items.map((item) => ({
+      key: item.key,
+      label: item.label,
+      status: 'pending',
+      comment: '',
+    })),
+  }));
+
+const normalizeDashboardReviewSections = (incomingSections) => {
+  const sections = Array.isArray(incomingSections) ? incomingSections : [];
+  const incomingBySectionKey = new Map();
+
+  for (const section of sections) {
+    if (!section || typeof section !== 'object') continue;
+    const key = String(section.key || '').trim();
+    if (!key) continue;
+    incomingBySectionKey.set(key, section);
+  }
+
+  return DASHBOARD_REVIEW_TEMPLATE.map((sectionTemplate) => {
+    const incomingSection = incomingBySectionKey.get(sectionTemplate.key);
+    const incomingItems = Array.isArray(incomingSection?.items) ? incomingSection.items : [];
+    const incomingByItemKey = new Map();
+
+    for (const item of incomingItems) {
+      if (!item || typeof item !== 'object') continue;
+      const key = String(item.key || '').trim();
+      if (!key) continue;
+      incomingByItemKey.set(key, item);
+    }
+
+    return {
+      key: sectionTemplate.key,
+      title: sectionTemplate.title,
+      items: sectionTemplate.items.map((itemTemplate) => {
+        const incomingItem = incomingByItemKey.get(itemTemplate.key);
+        const candidateStatus = String(incomingItem?.status || 'pending').trim().toLowerCase();
+        const status = DASHBOARD_REVIEW_ALLOWED_STATUSES.includes(candidateStatus)
+          ? candidateStatus
+          : 'pending';
+        const comment = typeof incomingItem?.comment === 'string' ? incomingItem.comment.trim().slice(0, 1200) : '';
+
+        return {
+          key: itemTemplate.key,
+          label: itemTemplate.label,
+          status,
+          comment,
+        };
+      }),
+    };
+  });
+};
 
 const startOfDayLocal = (date) => {
   const value = new Date(date);
@@ -1376,6 +1454,80 @@ exports.createCenterWeeklyPlanning = catchAsyncErrors(async (req, res, next) => 
     .populate('uploadedBy', 'name email');
 
   res.status(201).json({ success: true, planning: populated });
+});
+
+exports.getCenterDashboardReview = catchAsyncErrors(async (req, res, next) => {
+  const center = await Center.findById(req.params.id).select('_id');
+  if (!center) return next(new ErrorHandler('Center not found', 404));
+
+  const month = typeof req.query.month === 'string' && req.query.month
+    ? req.query.month
+    : new Date().toISOString().slice(0, 7);
+
+  if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(month)) {
+    return next(new ErrorHandler('month must be in format YYYY-MM', 400));
+  }
+
+  const review = await CenterDashboardReview.findOne({
+    center: req.params.id,
+    month,
+  }).populate('updatedBy', 'name email');
+
+  const normalizedSections = review
+    ? normalizeDashboardReviewSections(review.sections)
+    : buildDefaultDashboardReviewSections();
+
+  res.status(200).json({
+    success: true,
+    month,
+    review: {
+      center: req.params.id,
+      month,
+      sections: normalizedSections,
+      updatedBy: review?.updatedBy || null,
+      updatedAt: review?.updatedAt || null,
+    },
+  });
+});
+
+exports.upsertCenterDashboardReview = catchAsyncErrors(async (req, res, next) => {
+  const center = await Center.findById(req.params.id).select('_id');
+  if (!center) return next(new ErrorHandler('Center not found', 404));
+
+  const month = typeof req.body.month === 'string' ? req.body.month : '';
+  if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(month)) {
+    return next(new ErrorHandler('month is required in format YYYY-MM', 400));
+  }
+
+  const sections = normalizeDashboardReviewSections(req.body.sections);
+  const review = await CenterDashboardReview.findOneAndUpdate(
+    { center: req.params.id, month },
+    {
+      $set: {
+        sections,
+        updatedBy: req.user.id,
+      },
+      $setOnInsert: {
+        createdBy: req.user.id,
+      },
+    },
+    {
+      new: true,
+      upsert: true,
+      setDefaultsOnInsert: true,
+    }
+  ).populate('updatedBy', 'name email');
+
+  res.status(200).json({
+    success: true,
+    review: {
+      center: req.params.id,
+      month,
+      sections: normalizeDashboardReviewSections(review.sections),
+      updatedBy: review.updatedBy || null,
+      updatedAt: review.updatedAt || null,
+    },
+  });
 });
 
 // ─── SHIFT DEFINITIONS ──────────────────────────────────────────────────────

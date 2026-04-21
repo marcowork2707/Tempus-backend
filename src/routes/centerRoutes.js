@@ -44,6 +44,8 @@ const {
   deleteExpenseCategory,
   getCenterWeeklyPlanning,
   createCenterWeeklyPlanning,
+  getCenterDashboardReview,
+  upsertCenterDashboardReview,
   getCenterShifts,
   createShift,
   updateShift,
@@ -132,6 +134,8 @@ router.put('/:id/expense-categories', authorizeRoles('admin'), updateExpenseCate
 router.delete('/:id/expense-categories', authorizeRoles('admin'), deleteExpenseCategory);
 router.get('/:id/weekly-planning', authorizeRoles('admin', 'encargado', 'coach'), getCenterWeeklyPlanning);
 router.post('/:id/weekly-planning', authorizeRoles('admin', 'encargado', 'coach'), createCenterWeeklyPlanning);
+router.get('/:id/dashboard-review', authorizeRoles('admin'), getCenterDashboardReview);
+router.put('/:id/dashboard-review', authorizeRoles('admin'), upsertCenterDashboardReview);
 
 // ─── Shift definitions ──────────────────────────────────────────────────────
 router.get('/:id/shifts', authorizeRoles('admin'), getCenterShifts);
