@@ -2774,79 +2774,79 @@ exports.getBalanceRange = catchAsyncErrors(async (req, res, next) => {
     success: true,
     months,
     monthly: monthlyData,
+  });
+});
 
-  // ─── KPI Objectives ──────────────────────────────────────────────────────────
+// ─── KPI Objectives ──────────────────────────────────────────────────────────
 
-  const ALLOWED_KPI_KEYS = [
-    'facturacion',
-    'costes',
-    'beneficio_neto',
-    'ticket_medio',
-    'tarifas_activas',
-    'nuevas_altas',
-    'bajas_mensuales',
-    'retencion_socios',
-    'faltas_asistencia',
-    'capacidad_clases',
-    'resenas_nuevas',
-    'nota_revision_clases',
-    'eventos_anio',
-  ];
+const ALLOWED_KPI_KEYS = [
+  'facturacion',
+  'costes',
+  'beneficio_neto',
+  'ticket_medio',
+  'tarifas_activas',
+  'nuevas_altas',
+  'bajas_mensuales',
+  'retencion_socios',
+  'faltas_asistencia',
+  'capacidad_clases',
+  'resenas_nuevas',
+  'nota_revision_clases',
+  'eventos_anio',
+];
 
-  exports.getCenterKpiObjectives = catchAsyncErrors(async (req, res, next) => {
-    const center = await Center.findById(req.params.id);
-    if (!center) return next(new ErrorHandler('Center not found', 404));
+exports.getCenterKpiObjectives = catchAsyncErrors(async (req, res, next) => {
+  const center = await Center.findById(req.params.id);
+  if (!center) return next(new ErrorHandler('Center not found', 404));
 
-    const year = parseInt(req.query.year, 10);
-    if (!year || year < 2000 || year > 2100) {
-      return next(new ErrorHandler('Valid year query param is required', 400));
+  const year = parseInt(req.query.year, 10);
+  if (!year || year < 2000 || year > 2100) {
+    return next(new ErrorHandler('Valid year query param is required', 400));
+  }
+
+  const doc = await CenterKpiObjectives.findOne({ center: req.params.id, year });
+
+  // Return objectives or empty defaults for all allowed keys
+  const objectivesMap = {};
+  if (doc) {
+    for (const obj of doc.objectives) {
+      objectivesMap[obj.key] = obj.monthly;
     }
+  }
 
-    const doc = await CenterKpiObjectives.findOne({ center: req.params.id, year });
+  const objectives = ALLOWED_KPI_KEYS.map((key) => ({
+    key,
+    monthly: objectivesMap[key] ?? Array(12).fill(null),
+  }));
 
-    // Return objectives or empty defaults for all allowed keys
-    const objectivesMap = {};
-    if (doc) {
-      for (const obj of doc.objectives) {
-        objectivesMap[obj.key] = obj.monthly;
-      }
-    }
+  res.status(200).json({ success: true, year, objectives });
+});
 
-    const objectives = ALLOWED_KPI_KEYS.map((key) => ({
-      key,
-      monthly: objectivesMap[key] ?? Array(12).fill(null),
-    }));
+exports.upsertCenterKpiObjectives = catchAsyncErrors(async (req, res, next) => {
+  const center = await Center.findById(req.params.id);
+  if (!center) return next(new ErrorHandler('Center not found', 404));
 
-    res.status(200).json({ success: true, year, objectives });
+  const year = parseInt(req.body.year, 10);
+  if (!year || year < 2000 || year > 2100) {
+    return next(new ErrorHandler('Valid year in body is required', 400));
+  }
+
+  const incoming = Array.isArray(req.body.objectives) ? req.body.objectives : [];
+
+  // Validate and sanitise
+  const objectives = ALLOWED_KPI_KEYS.map((key) => {
+    const found = incoming.find((o) => o.key === key);
+    const monthly = Array.isArray(found?.monthly) && found.monthly.length === 12
+      ? found.monthly.map((v) => (v === null || v === undefined ? null : Number(v)))
+      : Array(12).fill(null);
+    return { key, monthly };
   });
 
-  exports.upsertCenterKpiObjectives = catchAsyncErrors(async (req, res, next) => {
-    const center = await Center.findById(req.params.id);
-    if (!center) return next(new ErrorHandler('Center not found', 404));
+  const doc = await CenterKpiObjectives.findOneAndUpdate(
+    { center: req.params.id, year },
+    { center: req.params.id, year, objectives },
+    { upsert: true, new: true, runValidators: true }
+  );
 
-    const year = parseInt(req.body.year, 10);
-    if (!year || year < 2000 || year > 2100) {
-      return next(new ErrorHandler('Valid year in body is required', 400));
-    }
-
-    const incoming = Array.isArray(req.body.objectives) ? req.body.objectives : [];
-
-    // Validate and sanitise
-    const objectives = ALLOWED_KPI_KEYS.map((key) => {
-      const found = incoming.find((o) => o.key === key);
-      const monthly = Array.isArray(found?.monthly) && found.monthly.length === 12
-        ? found.monthly.map((v) => (v === null || v === undefined ? null : Number(v)))
-        : Array(12).fill(null);
-      return { key, monthly };
-    });
-
-    const doc = await CenterKpiObjectives.findOneAndUpdate(
-      { center: req.params.id, year },
-      { center: req.params.id, year, objectives },
-      { upsert: true, new: true, runValidators: true }
-    );
-
-    res.status(200).json({ success: true, year, objectives: doc.objectives });
-  });
-  });
+  res.status(200).json({ success: true, year, objectives: doc.objectives });
 });

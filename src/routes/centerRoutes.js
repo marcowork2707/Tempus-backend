@@ -69,11 +69,6 @@ const {
   createVacationConflictRule,
   deleteVacationConflictRule,
   getBalanceRange,
-} = require('../controllers/centerController');
-  getVacationConflictRules,
-  createVacationConflictRule,
-  deleteVacationConflictRule,
-  getBalanceRange,
   getCenterKpiObjectives,
   upsertCenterKpiObjectives,
 } = require('../controllers/centerController');
