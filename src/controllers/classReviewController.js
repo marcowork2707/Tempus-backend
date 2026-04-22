@@ -1,6 +1,8 @@
 const ClassReview = require('../models/ClassReview');
 const User = require('../models/User');
 const Center = require('../models/Center');
+const Role = require('../models/Role');
+const UserCenterRole = require('../models/UserCenterRole');
 const ErrorHandler = require('../utils/errorHandler');
 
 // Definir los datos de revisión de clases
@@ -186,37 +188,36 @@ exports.getReviewTemplate = async (req, res) => {
 
 /**
  * GET /api/class-reviews/:centerId/workers
- * Obtener trabajadores del centro
+ * Obtener trabajadores (coaches) del centro
  */
 exports.getCenterWorkers = async (req, res) => {
   try {
     const { centerId } = req.params;
-    const UserCenterRole = require('../models/UserCenterRole');
 
-    // Buscar todos los registros de UserCenterRole para este centro
-    const userRoles = await UserCenterRole.find({ center: centerId, active: true })
+    // Obtener el rol de coach
+    const coachRole = await Role.findOne({ name: 'coach' });
+    if (!coachRole) {
+      return res.status(200).json({ success: true, data: [] });
+    }
+
+    // Buscar todos los coaches activos en este centro
+    const assignments = await UserCenterRole.find({
+      center: centerId,
+      role: coachRole._id,
+      active: true,
+    })
       .populate('user', 'firstName lastName email _id')
-      .populate('role', 'name');
+      .sort({ 'user.firstName': 1 });
 
-    // Filtrar solo trainers/instructors y extraer usuarios únicos
-    const trainerRoles = userRoles.filter(ur => {
-      const roleName = ur.role?.name?.toLowerCase() || '';
-      return roleName.includes('trainer') || roleName.includes('instructor') || roleName.includes('coach');
-    });
-
-    const workers = trainerRoles.map(ur => ({
-      _id: ur.user._id,
-      firstName: ur.user.firstName,
-      lastName: ur.user.lastName,
-      email: ur.user.email,
+    // Transformar a formato simple
+    const workers = assignments.map((assignment) => ({
+      _id: assignment.user._id,
+      firstName: assignment.user.firstName,
+      lastName: assignment.user.lastName,
+      email: assignment.user.email,
     }));
 
-    // Eliminar duplicados por _id
-    const uniqueWorkers = Array.from(
-      new Map(workers.map(w => [w._id.toString(), w])).values()
-    ).sort((a, b) => a.firstName.localeCompare(b.firstName));
-
-    res.status(200).json({ success: true, data: uniqueWorkers });
+    res.status(200).json({ success: true, data: workers });
   } catch (error) {
     console.error('Error fetching center workers:', error);
     res.status(500).json({ success: false, message: error.message });
