@@ -279,6 +279,9 @@ exports.getCenterWorkers = async (req, res) => {
 
     const workersMap = new Map();
     assignments.forEach((assignment) => {
+      if (assignment?.role?.name !== 'coach') {
+        return;
+      }
       if (assignment.user && assignment.user._id) {
         const userId = assignment.user._id.toString();
         if (!workersMap.has(userId)) {
