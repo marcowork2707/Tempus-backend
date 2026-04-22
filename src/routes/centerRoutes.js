@@ -70,6 +70,13 @@ const {
   deleteVacationConflictRule,
   getBalanceRange,
 } = require('../controllers/centerController');
+  getVacationConflictRules,
+  createVacationConflictRule,
+  deleteVacationConflictRule,
+  getBalanceRange,
+  getCenterKpiObjectives,
+  upsertCenterKpiObjectives,
+} = require('../controllers/centerController');
 
 const { isAuthenticatedUser, authorizeRoles } = require('../middleware/auth');
 
@@ -167,5 +174,10 @@ router.patch('/:id/vacation-requests/:requestId', reviewVacationRequest);
 router.get('/:id/vacation-conflicts', getVacationConflictRules);
 router.post('/:id/vacation-conflicts', createVacationConflictRule);
 router.delete('/:id/vacation-conflicts/:ruleId', deleteVacationConflictRule);
+router.delete('/:id/vacation-conflicts/:ruleId', deleteVacationConflictRule);
+
+// ─── KPI Objectives ──────────────────────────────────────────────────────────
+router.get('/:id/kpi-objectives', authorizeRoles('admin'), getCenterKpiObjectives);
+router.put('/:id/kpi-objectives', authorizeRoles('admin'), upsertCenterKpiObjectives);
 
 module.exports = router;
