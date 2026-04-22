@@ -188,34 +188,40 @@ exports.getReviewTemplate = async (req, res) => {
 
 /**
  * GET /api/class-reviews/:centerId/workers
- * Obtener trabajadores (coaches) del centro
+ * Obtener trabajadores activos del centro
  */
 exports.getCenterWorkers = async (req, res) => {
   try {
     const { centerId } = req.params;
 
-    // Obtener el rol de coach
-    const coachRole = await Role.findOne({ name: 'coach' });
-    if (!coachRole) {
-      return res.status(200).json({ success: true, data: [] });
-    }
-
-    // Buscar todos los coaches activos en este centro
+    // Buscar todos los UserCenterRole activos en este centro
     const assignments = await UserCenterRole.find({
       center: centerId,
-      role: coachRole._id,
       active: true,
     })
       .populate('user', 'firstName lastName email _id')
-      .sort({ 'user.firstName': 1 });
+      .populate('role', 'name');
 
-    // Transformar a formato simple
-    const workers = assignments.map((assignment) => ({
-      _id: assignment.user._id,
-      firstName: assignment.user.firstName,
-      lastName: assignment.user.lastName,
-      email: assignment.user.email,
-    }));
+    // Mapear y devolver trabajadores únicos
+    const workersMap = new Map();
+    assignments.forEach((assignment) => {
+      if (assignment.user && assignment.user._id) {
+        const userId = assignment.user._id.toString();
+        if (!workersMap.has(userId)) {
+          workersMap.set(userId, {
+            _id: assignment.user._id,
+            firstName: assignment.user.firstName,
+            lastName: assignment.user.lastName,
+            email: assignment.user.email,
+            name: `${assignment.user.firstName} ${assignment.user.lastName}`,
+          });
+        }
+      }
+    });
+
+    const workers = Array.from(workersMap.values()).sort((a, b) =>
+      a.firstName.localeCompare(b.firstName)
+    );
 
     res.status(200).json({ success: true, data: workers });
   } catch (error) {
