@@ -5,6 +5,10 @@ const Role = require('../models/Role');
 const UserCenterRole = require('../models/UserCenterRole');
 const ErrorHandler = require('../utils/errorHandler');
 
+function getCenterIdFromParams(params = {}) {
+  return params.centerId || params.id;
+}
+
 // Definir los datos de revisión de clases
 const REVIEW_TEMPLATE = [
   {
@@ -71,8 +75,12 @@ const REVIEW_TEMPLATE = [
  */
 exports.getClassReviews = async (req, res) => {
   try {
-    const { centerId } = req.params;
+    const centerId = getCenterIdFromParams(req.params);
     const { workerId, month, year } = req.query;
+
+    if (!centerId) {
+      return res.status(400).json({ success: false, message: 'Center ID is required' });
+    }
 
     const filter = { center: centerId };
     if (workerId) filter.worker = workerId;
@@ -98,7 +106,12 @@ exports.getClassReviews = async (req, res) => {
  */
 exports.getClassReview = async (req, res) => {
   try {
-    const { centerId, reviewId } = req.params;
+    const centerId = getCenterIdFromParams(req.params);
+    const { reviewId } = req.params;
+
+    if (!centerId) {
+      return res.status(400).json({ success: false, message: 'Center ID is required' });
+    }
 
     const review = await ClassReview.findOne({ _id: reviewId, center: centerId })
       .populate('worker', 'firstName lastName email')
@@ -120,9 +133,13 @@ exports.getClassReview = async (req, res) => {
  */
 exports.upsertClassReview = async (req, res) => {
   try {
-    const { centerId } = req.params;
+    const centerId = getCenterIdFromParams(req.params);
     const { workerId, month, year, sections, notes } = req.body;
     const userId = req.user._id;
+
+    if (!centerId) {
+      return res.status(400).json({ success: false, message: 'Center ID is required' });
+    }
 
     if (!workerId || !month || !year) {
       return res.status(400).json({ success: false, message: 'Missing required fields' });
@@ -192,7 +209,11 @@ exports.getReviewTemplate = async (req, res) => {
  */
 exports.getCenterWorkers = async (req, res) => {
   try {
-    const { centerId } = req.params;
+    const centerId = getCenterIdFromParams(req.params);
+
+    if (!centerId) {
+      return res.status(400).json({ success: false, message: 'Center ID is required' });
+    }
 
     // Buscar todos los UserCenterRole activos en este centro
     const assignments = await UserCenterRole.find({
@@ -236,7 +257,12 @@ exports.getCenterWorkers = async (req, res) => {
  */
 exports.deleteClassReview = async (req, res) => {
   try {
-    const { centerId, reviewId } = req.params;
+    const centerId = getCenterIdFromParams(req.params);
+    const { reviewId } = req.params;
+
+    if (!centerId) {
+      return res.status(400).json({ success: false, message: 'Center ID is required' });
+    }
 
     const review = await ClassReview.findOneAndDelete({ _id: reviewId, center: centerId });
 

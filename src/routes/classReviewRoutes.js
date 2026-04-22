@@ -26,9 +26,9 @@ router.get('/workers', getCenterWorkers);
 router.get('/:reviewId', getClassReview);
 
 // POST /api/centers/:centerId/class-reviews - Crear/actualizar revisión
-router.post('/', authorizeRoles('admin', 'manager'), upsertClassReview);
+router.post('/', authorizeRoles('admin', 'encargado', 'manager'), upsertClassReview);
 
 // DELETE /api/centers/:centerId/class-reviews/:reviewId - Eliminar revisión
-router.delete('/:reviewId', authorizeRoles('admin', 'manager'), deleteClassReview);
+router.delete('/:reviewId', authorizeRoles('admin', 'encargado', 'manager'), deleteClassReview);
 
 module.exports = router;
