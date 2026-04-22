@@ -5,6 +5,7 @@ const {
   getClassReview,
   upsertClassReview,
   getReviewTemplate,
+  upsertReviewTemplate,
   getCenterWorkers,
   deleteClassReview,
 } = require('../controllers/classReviewController');
@@ -18,6 +19,9 @@ router.get('/', getClassReviews);
 
 // GET /api/centers/:centerId/class-reviews/template - Obtener template
 router.get('/template', getReviewTemplate);
+
+// PUT /api/centers/:centerId/class-reviews/template - Guardar template
+router.put('/template', authorizeRoles('admin', 'encargado', 'manager'), upsertReviewTemplate);
 
 // GET /api/centers/:centerId/class-reviews/workers - Obtener trabajadores
 router.get('/workers', getCenterWorkers);

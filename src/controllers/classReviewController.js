@@ -1,19 +1,16 @@
 const ClassReview = require('../models/ClassReview');
 const User = require('../models/User');
 const Center = require('../models/Center');
-const Role = require('../models/Role');
 const UserCenterRole = require('../models/UserCenterRole');
-const ErrorHandler = require('../utils/errorHandler');
+const ClassReviewTemplate = require('../models/ClassReviewTemplate');
 
 function getCenterIdFromParams(params = {}) {
   return params.centerId || params.id;
 }
 
-// Definir los datos de revisión de clases
-const REVIEW_TEMPLATE = [
+const DEFAULT_REVIEW_TEMPLATE = [
   {
     title: "2' Rule",
-    weight: 0.15,
     items: [
       'Intercepta al idoneo (nuevo, lesionado o menos integrado)',
       'No habla de sí mismo/a',
@@ -23,12 +20,10 @@ const REVIEW_TEMPLATE = [
   },
   {
     title: 'Warm Up General + Movilidad',
-    weight: 0.11,
     items: ['Atención activa: lanza correcciones', 'Creativo y dinámico', 'Pasa lista'],
   },
   {
     title: 'Bloque Específico',
-    weight: 0.3,
     items: [
       'Warm Up específico',
       'Funcionario Cárceles',
@@ -40,22 +35,18 @@ const REVIEW_TEMPLATE = [
   },
   {
     title: 'WOD',
-    weight: 0.15,
     items: ['EFI', 'Está conectado con la clase', 'Recorre metros (no se queda parado)', 'Escala si es necesario', 'Correcciones'],
   },
   {
     title: 'Estirar + Vuelta a la calma',
-    weight: 0.04,
     items: ['Da las gracias y aplaude'],
   },
   {
-    title: '2\' Rule (Cierre)',
-    weight: 0.04,
+    title: "2' Rule (Cierre)",
     items: [],
   },
   {
     title: 'Aspectos Generales',
-    weight: 0.22,
     items: [
       'Presencia y actitud',
       'Manejo del Grupo',
@@ -69,10 +60,44 @@ const REVIEW_TEMPLATE = [
   },
 ];
 
-/**
- * GET /api/class-reviews/:centerId
- * Obtener revisiones de un centro
- */
+function sanitizeTemplateSections(sections = []) {
+  if (!Array.isArray(sections)) return [];
+
+  return sections
+    .map((section) => {
+      const title = String(section?.title || '').trim();
+      const items = Array.isArray(section?.items)
+        ? section.items
+            .map((item) => String(item || '').trim())
+            .filter(Boolean)
+        : [];
+
+      return { title, items };
+    })
+    .filter((section) => section.title);
+}
+
+function applyDynamicWeights(sections = []) {
+  const totalItems = sections.reduce(
+    (sum, section) => sum + (Array.isArray(section.items) ? section.items.length : 0),
+    0
+  );
+
+  return sections.map((section) => ({
+    title: section.title,
+    weight: totalItems > 0 ? (Array.isArray(section.items) ? section.items.length : 0) / totalItems : 0,
+    items: Array.isArray(section.items) ? section.items : [],
+  }));
+}
+
+async function getTemplateSectionsForCenter(centerId) {
+  const templateDoc = await ClassReviewTemplate.findOne({ center: centerId }).lean();
+  if (!templateDoc?.sections?.length) {
+    return sanitizeTemplateSections(DEFAULT_REVIEW_TEMPLATE);
+  }
+  return sanitizeTemplateSections(templateDoc.sections);
+}
+
 exports.getClassReviews = async (req, res) => {
   try {
     const centerId = getCenterIdFromParams(req.params);
@@ -85,8 +110,8 @@ exports.getClassReviews = async (req, res) => {
     const filter = { center: centerId };
     if (workerId) filter.worker = workerId;
     if (month && year) {
-      filter.month = parseInt(month);
-      filter.year = parseInt(year);
+      filter.month = parseInt(month, 10);
+      filter.year = parseInt(year, 10);
     }
 
     const reviews = await ClassReview.find(filter)
@@ -100,10 +125,6 @@ exports.getClassReviews = async (req, res) => {
   }
 };
 
-/**
- * GET /api/class-reviews/:centerId/:reviewId
- * Obtener una revisión específica
- */
 exports.getClassReview = async (req, res) => {
   try {
     const centerId = getCenterIdFromParams(req.params);
@@ -127,15 +148,11 @@ exports.getClassReview = async (req, res) => {
   }
 };
 
-/**
- * POST /api/class-reviews/:centerId
- * Crear o actualizar una revisión
- */
 exports.upsertClassReview = async (req, res) => {
   try {
     const centerId = getCenterIdFromParams(req.params);
     const { workerId, month, year, sections, notes } = req.body;
-    const userId = req.user._id;
+    const userId = req.user?.id;
 
     if (!centerId) {
       return res.status(400).json({ success: false, message: 'Center ID is required' });
@@ -145,36 +162,34 @@ exports.upsertClassReview = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Missing required fields' });
     }
 
-    // Validar que el trabajador exista en el centro
     const worker = await User.findById(workerId);
     if (!worker) {
       return res.status(404).json({ success: false, message: 'Worker not found' });
     }
 
-    // Calcular nota total
+    const incomingSections = Array.isArray(sections) ? sections : [];
+    const weightedSections = applyDynamicWeights(
+      incomingSections.map((section) => ({
+        title: String(section?.title || ''),
+        items: Array.isArray(section?.items) ? section.items : [],
+      }))
+    );
+
     let totalScore = 0;
-    let validSections = 0;
-
-    if (sections && Array.isArray(sections)) {
-      sections.forEach((section) => {
-        if (!section.items || section.items.length === 0) return;
-
-        const ticks = section.items.filter((item) => item.tick === true).length;
-        const crosses = section.items.filter((item) => item.tick === false).length;
-        const total = ticks + crosses;
-
-        if (total > 0) {
-          const sectionScore = (ticks / total) * 10 * section.weight;
-          totalScore += sectionScore;
-          validSections += 1;
-        }
-      });
-    }
+    weightedSections.forEach((section) => {
+      if (!section.items || section.items.length === 0) return;
+      const ticks = section.items.filter((item) => item.tick === true).length;
+      const crosses = section.items.filter((item) => item.tick === false).length;
+      const answered = ticks + crosses;
+      if (answered > 0) {
+        totalScore += (ticks / answered) * 10 * section.weight;
+      }
+    });
 
     const review = await ClassReview.findOneAndUpdate(
       { center: centerId, worker: workerId, month, year },
       {
-        sections,
+        sections: weightedSections,
         totalScore: Number(totalScore.toFixed(2)),
         notes,
         reviewedBy: userId,
@@ -191,22 +206,62 @@ exports.upsertClassReview = async (req, res) => {
   }
 };
 
-/**
- * GET /api/class-reviews/:centerId/template
- * Obtener el template de revisión
- */
 exports.getReviewTemplate = async (req, res) => {
   try {
-    res.status(200).json({ success: true, data: REVIEW_TEMPLATE });
+    const centerId = getCenterIdFromParams(req.params);
+    if (!centerId) {
+      return res.status(400).json({ success: false, message: 'Center ID is required' });
+    }
+
+    const sections = await getTemplateSectionsForCenter(centerId);
+    const weightedTemplate = applyDynamicWeights(sections);
+
+    res.status(200).json({ success: true, data: weightedTemplate });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }
 };
 
-/**
- * GET /api/class-reviews/:centerId/workers
- * Obtener trabajadores activos del centro
- */
+exports.upsertReviewTemplate = async (req, res) => {
+  try {
+    const centerId = getCenterIdFromParams(req.params);
+    if (!centerId) {
+      return res.status(400).json({ success: false, message: 'Center ID is required' });
+    }
+
+    const sections = sanitizeTemplateSections(req.body?.sections || []);
+    if (!sections.length) {
+      return res.status(400).json({ success: false, message: 'La plantilla debe tener al menos un titulo' });
+    }
+
+    const centerExists = await Center.findById(centerId).select('_id');
+    if (!centerExists) {
+      return res.status(404).json({ success: false, message: 'Center not found' });
+    }
+
+    const updated = await ClassReviewTemplate.findOneAndUpdate(
+      { center: centerId },
+      {
+        sections,
+        updatedBy: req.user?.id || null,
+      },
+      {
+        upsert: true,
+        new: true,
+        setDefaultsOnInsert: true,
+      }
+    ).lean();
+
+    res.status(200).json({
+      success: true,
+      data: applyDynamicWeights(updated.sections || []),
+      message: 'Plantilla de revision guardada',
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
 exports.getCenterWorkers = async (req, res) => {
   try {
     const centerId = getCenterIdFromParams(req.params);
@@ -215,33 +270,32 @@ exports.getCenterWorkers = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Center ID is required' });
     }
 
-    // Buscar todos los UserCenterRole activos en este centro
     const assignments = await UserCenterRole.find({
       center: centerId,
       active: true,
     })
-      .populate('user', 'firstName lastName email _id')
+      .populate('user', 'name email firstName lastName _id')
       .populate('role', 'name');
 
-    // Mapear y devolver trabajadores únicos
     const workersMap = new Map();
     assignments.forEach((assignment) => {
       if (assignment.user && assignment.user._id) {
         const userId = assignment.user._id.toString();
         if (!workersMap.has(userId)) {
+          const fullName = assignment.user.name || `${assignment.user.firstName || ''} ${assignment.user.lastName || ''}`.trim();
           workersMap.set(userId, {
             _id: assignment.user._id,
-            firstName: assignment.user.firstName,
-            lastName: assignment.user.lastName,
+            firstName: assignment.user.firstName || '',
+            lastName: assignment.user.lastName || '',
             email: assignment.user.email,
-            name: `${assignment.user.firstName} ${assignment.user.lastName}`,
+            name: fullName,
           });
         }
       }
     });
 
     const workers = Array.from(workersMap.values()).sort((a, b) =>
-      a.firstName.localeCompare(b.firstName)
+      (a.name || '').localeCompare(b.name || '')
     );
 
     res.status(200).json({ success: true, data: workers });
@@ -251,10 +305,6 @@ exports.getCenterWorkers = async (req, res) => {
   }
 };
 
-/**
- * DELETE /api/class-reviews/:centerId/:reviewId
- * Eliminar una revisión
- */
 exports.deleteClassReview = async (req, res) => {
   try {
     const centerId = getCenterIdFromParams(req.params);
