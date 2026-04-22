@@ -1205,6 +1205,20 @@ async function parseReservationsHtmlForClassReports(page) {
       extractInstructorNameFromText($class.find('.rvTop, .rvHead, .cabeceraClase').first().text()) ||
       extractInstructorNameFromText(classText);
     const members = [];
+    const nodeOrder = new Map($class.find('*').toArray().map((node, index) => [node, index]));
+    const cancellationMarker = $class
+      .find('*')
+      .filter((__, el) => {
+        const text = $(el).text().replace(/\s+/g, ' ').trim();
+        if (!text || !/cancelaciones/i.test(text)) return false;
+        if ($(el).find('.atletaClase').length) return false;
+
+        return /(?:^|[^a-zA-Z])\d+\s*cancelaciones\b/i.test(text);
+      })
+      .first();
+    const cancellationMarkerIndex = cancellationMarker.length
+      ? nodeOrder.get(cancellationMarker.get(0)) ?? Number.POSITIVE_INFINITY
+      : Number.POSITIVE_INFINITY;
 
     if (/open/i.test(className)) return;
 
@@ -1225,6 +1239,17 @@ async function parseReservationsHtmlForClassReports(page) {
 
     memberCards.forEach((athleteEl) => {
       const $athlete = $(athleteEl);
+      const athleteIndex = nodeOrder.get(athleteEl);
+
+      // Si aparece el bloque "X CANCELACIONES", solo se procesan clientes por encima de ese separador.
+      if (
+        Number.isFinite(cancellationMarkerIndex) &&
+        Number.isFinite(athleteIndex) &&
+        athleteIndex > cancellationMarkerIndex
+      ) {
+        return;
+      }
+
       const waitlistContainer = $athlete.closest(
         '[class*="espera"], [class*="wait"], [id*="espera"], [id*="wait"], .waitList, .listaEspera'
       );
