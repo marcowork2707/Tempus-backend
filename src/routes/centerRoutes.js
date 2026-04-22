@@ -175,4 +175,7 @@ router.delete('/:id/vacation-conflicts/:ruleId', deleteVacationConflictRule);
 router.get('/:id/kpi-objectives', authorizeRoles('admin'), getCenterKpiObjectives);
 router.put('/:id/kpi-objectives', authorizeRoles('admin'), upsertCenterKpiObjectives);
 
+// ─── Class Reviews ───────────────────────────────────────────────────────────
+router.use('/:id/class-reviews', require('./classReviewRoutes'));
+
 module.exports = router;
