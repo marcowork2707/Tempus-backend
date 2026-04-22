@@ -8,6 +8,7 @@ const {
   upsertReviewTemplate,
   getCenterWorkers,
   deleteClassReview,
+  getClassReviewMonthSummary,
 } = require('../controllers/classReviewController');
 const { isAuthenticatedUser, authorizeRoles } = require('../middleware/auth');
 
@@ -25,6 +26,9 @@ router.put('/template', authorizeRoles('admin', 'encargado', 'manager'), upsertR
 
 // GET /api/centers/:centerId/class-reviews/workers - Obtener trabajadores
 router.get('/workers', getCenterWorkers);
+
+// GET /api/centers/:centerId/class-reviews/month-summary - Resumen mensual para cuadro de mandos
+router.get('/month-summary', authorizeRoles('admin', 'encargado', 'manager'), getClassReviewMonthSummary);
 
 // GET /api/centers/:centerId/class-reviews/:reviewId - Obtener una revisión
 router.get('/:reviewId', getClassReview);

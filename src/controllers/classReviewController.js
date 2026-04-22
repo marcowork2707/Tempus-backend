@@ -3,6 +3,7 @@ const User = require('../models/User');
 const Center = require('../models/Center');
 const UserCenterRole = require('../models/UserCenterRole');
 const ClassReviewTemplate = require('../models/ClassReviewTemplate');
+const CenterKpiObjectives = require('../models/CenterKpiObjectives');
 
 function getCenterIdFromParams(params = {}) {
   return params.centerId || params.id;
@@ -325,6 +326,69 @@ exports.deleteClassReview = async (req, res) => {
 
     res.status(200).json({ success: true, message: 'Review deleted successfully' });
   } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+exports.getClassReviewMonthSummary = async (req, res) => {
+  try {
+    const centerId = getCenterIdFromParams(req.params);
+    if (!centerId) {
+      return res.status(400).json({ success: false, message: 'Center ID is required' });
+    }
+
+    const { month } = req.query; // expected format: YYYY-MM
+    if (!month || !/^\d{4}-(0[1-9]|1[0-2])$/.test(month)) {
+      return res.status(400).json({ success: false, message: 'month must be in format YYYY-MM' });
+    }
+
+    const [yearStr, monthStr] = month.split('-');
+    const year = parseInt(yearStr, 10);
+    const monthNum = parseInt(monthStr, 10); // 1-12
+    const monthIndex = monthNum - 1; // 0-based for monthly array
+
+    // Get objetivo from CenterKpiObjectives
+    let objetivo = null;
+    const kpiDoc = await CenterKpiObjectives.findOne({ center: centerId, year });
+    if (kpiDoc) {
+      const kpiEntry = kpiDoc.objectives.find((o) => o.key === 'nota_revision_clases');
+      if (kpiEntry && Array.isArray(kpiEntry.monthly) && kpiEntry.monthly[monthIndex] != null) {
+        objetivo = kpiEntry.monthly[monthIndex];
+      }
+    }
+
+    // Get all class reviews for this center+month+year
+    const reviews = await ClassReview.find({ center: centerId, month: monthNum, year })
+      .populate('worker', 'name firstName lastName')
+      .select('totalScore worker');
+
+    const coachCount = reviews.length;
+    let resultado = null;
+    const coaches = [];
+
+    if (coachCount > 0) {
+      let totalScore = 0;
+      for (const review of reviews) {
+        const score = Number(review.totalScore) || 0;
+        totalScore += score;
+        const workerName = review.worker
+          ? review.worker.name || `${review.worker.firstName || ''} ${review.worker.lastName || ''}`.trim()
+          : 'Desconocido';
+        coaches.push({ name: workerName, score: Number(score.toFixed(2)) });
+      }
+      resultado = Number((totalScore / coachCount).toFixed(2));
+    }
+
+    res.status(200).json({
+      success: true,
+      month,
+      objetivo,
+      resultado,
+      coachCount,
+      coaches,
+    });
+  } catch (error) {
+    console.error('Error fetching class review month summary:', error);
     res.status(500).json({ success: false, message: error.message });
   }
 };
