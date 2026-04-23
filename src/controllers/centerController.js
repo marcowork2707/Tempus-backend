@@ -15,6 +15,8 @@ const CenterExpense = require('../models/CenterExpense');
 const RecurringExpenseConcept = require('../models/RecurringExpenseConcept');
 const WeeklyPlanning = require('../models/WeeklyPlanning');
 const CenterDashboardReview = require('../models/CenterDashboardReview');
+const AimHarderClientMonthlySnapshot = require('../models/AimHarderClientMonthlySnapshot');
+const AttendanceAbsenceSnapshot = require('../models/AttendanceAbsenceSnapshot');
 const TimeEntry = require('../models/TimeEntry');
 const Checklist = require('../models/Checklist');
 const ErrorHandler = require('../utils/errorHandler');
@@ -79,6 +81,16 @@ const DASHBOARD_REVIEW_TEMPLATE = [
       { key: 'recurrencia-objetivo', label: 'Recurrencia objetivo (10/año)' },
       { key: 'comunicacion-difusion', label: 'Comunicación y difusión' },
       { key: 'fotos', label: 'Fotos' },
+    ],
+  },
+  {
+    key: 'kpis',
+    title: 'KPIS',
+    items: [
+      { key: 'tarifas-activas', label: 'Tarifas Activas' },
+      { key: 'altas', label: 'Altas' },
+      { key: 'altas-bajas-plus', label: 'Altas-Bajas (+)' },
+      { key: 'faltas-asistencia-menor-40', label: 'Faltas de asistencia (<40)' },
     ],
   },
 ];
@@ -147,6 +159,149 @@ const resetDashboardReviewProgress = (sections = []) => {
       subItems: resetDashboardReviewSubItemsProgress(item.subItems),
     })),
   }));
+};
+
+const getNextMonth = (month) => {
+  const [year, monthIndex] = String(month).split('-').map(Number);
+  if (!year || !monthIndex) return null;
+  if (monthIndex === 12) return `${year + 1}-01`;
+  return `${year}-${String(monthIndex + 1).padStart(2, '0')}`;
+};
+
+const readObjectiveMonthlyValue = (objectivesMap, key, monthIndex) => {
+  const monthly = objectivesMap[key];
+  if (!Array.isArray(monthly)) return null;
+  const value = monthly[monthIndex];
+  if (value === null || value === undefined || Number.isNaN(Number(value))) return null;
+  return Number(value);
+};
+
+const evaluateKpiAgainstObjective = ({
+  actual,
+  objective,
+  comparator,
+  fallbackObjective = null,
+}) => {
+  const safeActual = Number.isFinite(Number(actual)) ? Number(actual) : 0;
+  const target = objective ?? fallbackObjective;
+
+  if (target === null || target === undefined || Number.isNaN(Number(target))) {
+    return {
+      status: 'pending',
+      comment: `Actual: ${safeActual}`,
+      objective: null,
+      actual: safeActual,
+    };
+  }
+
+  const safeTarget = Number(target);
+  const passed = comparator === 'lte' ? safeActual <= safeTarget : safeActual >= safeTarget;
+  const objectiveLabel = comparator === 'lte' ? 'Objetivo máximo' : 'Objetivo';
+
+  return {
+    status: passed ? 'ok' : 'fail',
+    comment: `Actual: ${safeActual} · ${objectiveLabel}: ${safeTarget}`,
+    objective: safeTarget,
+    actual: safeActual,
+  };
+};
+
+const computeDashboardKpiAutoEvaluation = async ({ centerId, month }) => {
+  const monthIndex = Number(month.split('-')[1]) - 1;
+  const year = Number(month.split('-')[0]);
+  const nextMonth = getNextMonth(month);
+  const startDate = `${month}-01`;
+
+  const [snapshot, absenceSnapshots, objectiveDoc] = await Promise.all([
+    AimHarderClientMonthlySnapshot.findOne({ center: centerId, month })
+      .select('activeClientsCount newSignups newSignupsManual monthlyCancellations monthlyCancellationsManual')
+      .lean(),
+    nextMonth
+      ? AttendanceAbsenceSnapshot.find({
+        center: centerId,
+        date: { $gte: startDate, $lt: `${nextMonth}-01` },
+      })
+        .select('absences')
+        .lean()
+      : Promise.resolve([]),
+    CenterKpiObjectives.findOne({ center: centerId, year })
+      .select('objectives')
+      .lean(),
+  ]);
+
+  const objectivesMap = {};
+  for (const objective of objectiveDoc?.objectives || []) {
+    if (!objective?.key) continue;
+    objectivesMap[objective.key] = objective.monthly;
+  }
+
+  const tarifasActivas = Number(snapshot?.activeClientsCount || 0);
+  const altas = Number(
+    snapshot?.newSignupsManual ?? snapshot?.newSignups ?? 0
+  );
+  const bajas = Number(
+    snapshot?.monthlyCancellationsManual ?? snapshot?.monthlyCancellations ?? 0
+  );
+  const altasBajasPlus = altas - bajas;
+  const faltasAsistencia = (absenceSnapshots || []).reduce(
+    (total, current) => total + (Array.isArray(current.absences) ? current.absences.length : 0),
+    0
+  );
+
+  return {
+    tarifasActivas: evaluateKpiAgainstObjective({
+      actual: tarifasActivas,
+      objective: readObjectiveMonthlyValue(objectivesMap, 'tarifas_activas', monthIndex),
+      comparator: 'gte',
+    }),
+    altas: evaluateKpiAgainstObjective({
+      actual: altas,
+      objective: readObjectiveMonthlyValue(objectivesMap, 'nuevas_altas', monthIndex),
+      comparator: 'gte',
+    }),
+    altasBajasPlus: evaluateKpiAgainstObjective({
+      actual: altasBajasPlus,
+      objective: readObjectiveMonthlyValue(objectivesMap, 'altas_bajas_plus', monthIndex),
+      comparator: 'gte',
+      fallbackObjective: 1,
+    }),
+    faltasAsistencia: evaluateKpiAgainstObjective({
+      actual: faltasAsistencia,
+      objective: readObjectiveMonthlyValue(objectivesMap, 'faltas_asistencia', monthIndex),
+      comparator: 'lte',
+      fallbackObjective: 40,
+    }),
+  };
+};
+
+const applyDashboardKpiAutoEvaluation = (sections = [], kpiAuto = null) => {
+  if (!kpiAuto) return sections;
+
+  const byItemKey = {
+    'tarifas-activas': kpiAuto.tarifasActivas,
+    altas: kpiAuto.altas,
+    'altas-bajas-plus': kpiAuto.altasBajasPlus,
+    'faltas-asistencia-menor-40': kpiAuto.faltasAsistencia,
+  };
+
+  return sections.map((section) => {
+    if (section.key !== 'kpis') return section;
+
+    return {
+      ...section,
+      items: (section.items || []).map((item) => {
+        const evaluation = byItemKey[item.key];
+        if (!evaluation) return item;
+        if (Array.isArray(item.subItems) && item.subItems.length > 0) return item;
+
+        return {
+          ...item,
+          status: evaluation.status,
+          comment: item.comment?.trim() ? item.comment : evaluation.comment,
+        };
+      }),
+    };
+  });
 };
 
 const normalizeDashboardReviewSections = (incomingSections) => {
@@ -1594,9 +1749,17 @@ exports.getCenterDashboardReview = catchAsyncErrors(async (req, res, next) => {
     }
   }
 
+  const kpiAuto = await computeDashboardKpiAutoEvaluation({
+    centerId: req.params.id,
+    month,
+  });
+
+  normalizedSections = applyDashboardKpiAutoEvaluation(normalizedSections, kpiAuto);
+
   res.status(200).json({
     success: true,
     month,
+    kpiAuto,
     review: {
       center: req.params.id,
       month,
@@ -2902,6 +3065,7 @@ const ALLOWED_KPI_KEYS = [
   'ticket_medio',
   'tarifas_activas',
   'nuevas_altas',
+  'altas_bajas_plus',
   'bajas_mensuales',
   'retencion_socios',
   'faltas_asistencia',
