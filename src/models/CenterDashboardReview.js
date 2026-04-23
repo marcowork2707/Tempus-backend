@@ -23,6 +23,10 @@ const reviewItemSchema = new mongoose.Schema(
       trim: true,
       maxlength: 1200,
     },
+    value: {
+      type: Number,
+      default: null,
+    },
   },
   { _id: false }
 );

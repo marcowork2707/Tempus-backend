@@ -58,9 +58,9 @@ const DASHBOARD_REVIEW_TEMPLATE = [
     key: 'online',
     title: 'ONLINE',
     items: [
-      { key: 'razon-de-ser', label: 'Razón de ser' },
-      { key: 'resenas-google', label: 'Reseñas Google' },
-      { key: 'fotos-y-stories', label: 'Fotos y Stories' },
+      { key: 'resenas-google', label: 'Reseñas' },
+      { key: 'stories-por-dia', label: 'Frecuencia mínima stories/día' },
+      { key: 'publicaciones-por-mes', label: 'Frecuencia mínima publicaciones/mes' },
     ],
   },
   {
@@ -108,6 +108,12 @@ const buildDefaultDashboardReviewSections = () =>
     })),
   }));
 
+const normalizeDashboardReviewValue = (value) => {
+  if (value === null || value === undefined || value === '') return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+};
+
 const normalizeDashboardReviewSubItems = (incomingSubItems) => {
   if (!Array.isArray(incomingSubItems)) return [];
 
@@ -126,6 +132,7 @@ const normalizeDashboardReviewSubItems = (incomingSubItems) => {
       ? candidateStatus
       : 'pending';
     const comment = typeof subItem.comment === 'string' ? subItem.comment.trim().slice(0, 1200) : '';
+    const value = normalizeDashboardReviewValue(subItem.value);
 
     const nestedSubItems = normalizeDashboardReviewSubItems(subItem.subItems);
 
@@ -134,6 +141,7 @@ const normalizeDashboardReviewSubItems = (incomingSubItems) => {
       label,
       status: nestedSubItems.length > 0 ? 'pending' : status,
       comment: nestedSubItems.length > 0 ? '' : comment,
+      value: nestedSubItems.length > 0 ? null : value,
       subItems: nestedSubItems,
     });
     seenKeys.add(key);
@@ -146,6 +154,7 @@ const resetDashboardReviewSubItemsProgress = (subItems = []) => {
   return (Array.isArray(subItems) ? subItems : []).map((subItem) => ({
     ...subItem,
     status: 'pending',
+    value: null,
     subItems: resetDashboardReviewSubItemsProgress(subItem.subItems),
   }));
 };
@@ -156,6 +165,7 @@ const resetDashboardReviewProgress = (sections = []) => {
     items: (Array.isArray(section.items) ? section.items : []).map((item) => ({
       ...item,
       status: 'pending',
+      value: null,
       subItems: resetDashboardReviewSubItemsProgress(item.subItems),
     })),
   }));
@@ -206,13 +216,69 @@ const evaluateKpiAgainstObjective = ({
   };
 };
 
+const getCenterKpiObjectivesMap = async (centerId, year) => {
+  const objectiveDoc = await CenterKpiObjectives.findOne({ center: centerId, year })
+    .select('objectives')
+    .lean();
+
+  const objectivesMap = {};
+  for (const objective of objectiveDoc?.objectives || []) {
+    if (!objective?.key) continue;
+    objectivesMap[objective.key] = objective.monthly;
+  }
+
+  return objectivesMap;
+};
+
+const getDashboardOnlineObjectives = (objectivesMap, monthIndex) => ({
+  resenasGoogle: readObjectiveMonthlyValue(objectivesMap, 'online_resenas', monthIndex),
+  storiesPorDia: readObjectiveMonthlyValue(objectivesMap, 'online_stories_min_dia', monthIndex),
+  publicacionesPorMes: readObjectiveMonthlyValue(objectivesMap, 'online_publicaciones_min_mes', monthIndex),
+});
+
+const evaluateDashboardOnlineItems = (sections = [], onlineObjectives) => {
+  const objectiveByItemKey = {
+    'resenas-google': onlineObjectives?.resenasGoogle ?? null,
+    'stories-por-dia': onlineObjectives?.storiesPorDia ?? null,
+    'publicaciones-por-mes': onlineObjectives?.publicacionesPorMes ?? null,
+  };
+
+  return sections.map((section) => {
+    if (section.key !== 'online') return section;
+
+    return {
+      ...section,
+      items: (section.items || []).map((item) => {
+        const objective = objectiveByItemKey[item.key];
+        if (objective === undefined) return item;
+        if (Array.isArray(item.subItems) && item.subItems.length > 0) return item;
+
+        const value = normalizeDashboardReviewValue(item.value);
+        if (value === null || objective === null) {
+          return {
+            ...item,
+            value,
+            status: 'pending',
+          };
+        }
+
+        return {
+          ...item,
+          value,
+          status: value >= objective ? 'ok' : 'fail',
+        };
+      }),
+    };
+  });
+};
+
 const computeDashboardKpiAutoEvaluation = async ({ centerId, month }) => {
   const monthIndex = Number(month.split('-')[1]) - 1;
   const year = Number(month.split('-')[0]);
   const nextMonth = getNextMonth(month);
   const startDate = `${month}-01`;
 
-  const [snapshot, absenceSnapshots, objectiveDoc] = await Promise.all([
+  const [snapshot, absenceSnapshots, objectivesMap] = await Promise.all([
     AimHarderClientMonthlySnapshot.findOne({ center: centerId, month })
       .select('activeClientsCount newSignups newSignupsManual monthlyCancellations monthlyCancellationsManual')
       .lean(),
@@ -224,16 +290,8 @@ const computeDashboardKpiAutoEvaluation = async ({ centerId, month }) => {
         .select('absences')
         .lean()
       : Promise.resolve([]),
-    CenterKpiObjectives.findOne({ center: centerId, year })
-      .select('objectives')
-      .lean(),
+    getCenterKpiObjectivesMap(centerId, year),
   ]);
-
-  const objectivesMap = {};
-  for (const objective of objectiveDoc?.objectives || []) {
-    if (!objective?.key) continue;
-    objectivesMap[objective.key] = objective.monthly;
-  }
 
   const tarifasActivas = Number(snapshot?.activeClientsCount || 0);
   const altas = Number(
@@ -338,6 +396,7 @@ const normalizeDashboardReviewSections = (incomingSections) => {
           ? candidateStatus
           : 'pending';
         const comment = typeof incomingItem?.comment === 'string' ? incomingItem.comment.trim().slice(0, 1200) : '';
+        const value = normalizeDashboardReviewValue(incomingItem?.value);
 
         return {
           key: itemTemplate.key,
@@ -345,6 +404,7 @@ const normalizeDashboardReviewSections = (incomingSections) => {
           // If an item has subItems, status/comment belongs to each subItem, not the parent.
           status: normalizedSubItems.length > 0 ? 'pending' : status,
           comment: normalizedSubItems.length > 0 ? '' : comment,
+          value: normalizedSubItems.length > 0 ? null : value,
           subItems: normalizedSubItems,
         };
       }),
@@ -1749,17 +1809,24 @@ exports.getCenterDashboardReview = catchAsyncErrors(async (req, res, next) => {
     }
   }
 
+  const monthIndex = Number(month.split('-')[1]) - 1;
+  const year = Number(month.split('-')[0]);
+  const objectivesMap = await getCenterKpiObjectivesMap(req.params.id, year);
+
   const kpiAuto = await computeDashboardKpiAutoEvaluation({
     centerId: req.params.id,
     month,
   });
+  const onlineObjectives = getDashboardOnlineObjectives(objectivesMap, monthIndex);
 
   normalizedSections = applyDashboardKpiAutoEvaluation(normalizedSections, kpiAuto);
+  normalizedSections = evaluateDashboardOnlineItems(normalizedSections, onlineObjectives);
 
   res.status(200).json({
     success: true,
     month,
     kpiAuto,
+    onlineObjectives,
     review: {
       center: req.params.id,
       month,
@@ -1779,7 +1846,15 @@ exports.upsertCenterDashboardReview = catchAsyncErrors(async (req, res, next) =>
     return next(new ErrorHandler('month is required in format YYYY-MM', 400));
   }
 
-  const sections = normalizeDashboardReviewSections(req.body.sections);
+  let sections = normalizeDashboardReviewSections(req.body.sections);
+
+  const monthIndex = Number(month.split('-')[1]) - 1;
+  const year = Number(month.split('-')[0]);
+  const objectivesMap = await getCenterKpiObjectivesMap(req.params.id, year);
+  const onlineObjectives = getDashboardOnlineObjectives(objectivesMap, monthIndex);
+
+  sections = evaluateDashboardOnlineItems(sections, onlineObjectives);
+
   const review = await CenterDashboardReview.findOneAndUpdate(
     { center: req.params.id, month },
     {
@@ -3073,6 +3148,9 @@ const ALLOWED_KPI_KEYS = [
   'resenas_nuevas',
   'nota_revision_clases',
   'eventos_anio',
+  'online_resenas',
+  'online_stories_min_dia',
+  'online_publicaciones_min_mes',
 ];
 
 exports.getCenterKpiObjectives = catchAsyncErrors(async (req, res, next) => {
