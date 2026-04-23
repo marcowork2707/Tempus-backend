@@ -72,6 +72,15 @@ const DASHBOARD_REVIEW_TEMPLATE = [
       { key: '14-days-historico', label: '14 Days Histórico' },
     ],
   },
+  {
+    key: 'eventos',
+    title: 'EVENTOS',
+    items: [
+      { key: 'recurrencia-objetivo', label: 'Recurrencia objetivo (10/año)' },
+      { key: 'comunicacion-difusion', label: 'Comunicación y difusión' },
+      { key: 'fotos', label: 'Fotos' },
+    ],
+  },
 ];
 
 const buildDefaultDashboardReviewSections = () =>
