@@ -42,6 +42,16 @@ const DASHBOARD_REVIEW_TEMPLATE = [
       { key: 'scaling', label: 'Scaling' },
     ],
   },
+  {
+    key: 'personal',
+    title: 'PERSONAL',
+    items: [
+      { key: 'formacion', label: 'Formación' },
+      { key: 'implicacion-responsabilidad', label: 'Implicación y Responsabilidad' },
+      { key: 'desarrollo-cultura-crecimiento', label: 'Desarrollo y cultura de crecimiento' },
+      { key: 'bonificacion-trimestre', label: 'Bonificación trimestre' },
+    ],
+  },
 ];
 
 const buildDefaultDashboardReviewSections = () =>
@@ -53,8 +63,40 @@ const buildDefaultDashboardReviewSections = () =>
       label: item.label,
       status: 'pending',
       comment: '',
+      subItems: [],
     })),
   }));
+
+const normalizeDashboardReviewSubItems = (incomingSubItems) => {
+  if (!Array.isArray(incomingSubItems)) return [];
+
+  const seenKeys = new Set();
+  const normalized = [];
+
+  for (const subItem of incomingSubItems) {
+    if (!subItem || typeof subItem !== 'object') continue;
+
+    const key = String(subItem.key || '').trim();
+    const label = String(subItem.label || '').trim();
+    if (!key || !label || seenKeys.has(key)) continue;
+
+    const candidateStatus = String(subItem.status || 'pending').trim().toLowerCase();
+    const status = DASHBOARD_REVIEW_ALLOWED_STATUSES.includes(candidateStatus)
+      ? candidateStatus
+      : 'pending';
+    const comment = typeof subItem.comment === 'string' ? subItem.comment.trim().slice(0, 1200) : '';
+
+    normalized.push({
+      key,
+      label,
+      status,
+      comment,
+    });
+    seenKeys.add(key);
+  }
+
+  return normalized;
+};
 
 const normalizeDashboardReviewSections = (incomingSections) => {
   const sections = Array.isArray(incomingSections) ? incomingSections : [];
@@ -84,6 +126,7 @@ const normalizeDashboardReviewSections = (incomingSections) => {
       title: sectionTemplate.title,
       items: sectionTemplate.items.map((itemTemplate) => {
         const incomingItem = incomingByItemKey.get(itemTemplate.key);
+        const normalizedSubItems = normalizeDashboardReviewSubItems(incomingItem?.subItems);
         const candidateStatus = String(incomingItem?.status || 'pending').trim().toLowerCase();
         const status = DASHBOARD_REVIEW_ALLOWED_STATUSES.includes(candidateStatus)
           ? candidateStatus
@@ -93,8 +136,10 @@ const normalizeDashboardReviewSections = (incomingSections) => {
         return {
           key: itemTemplate.key,
           label: itemTemplate.label,
-          status,
-          comment,
+          // If an item has subItems, status/comment belongs to each subItem, not the parent.
+          status: normalizedSubItems.length > 0 ? 'pending' : status,
+          comment: normalizedSubItems.length > 0 ? '' : comment,
+          subItems: normalizedSubItems,
         };
       }),
     };

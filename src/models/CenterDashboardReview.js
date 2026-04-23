@@ -27,6 +27,40 @@ const reviewItemSchema = new mongoose.Schema(
   { _id: false }
 );
 
+const reviewSubItemSchema = new mongoose.Schema(
+  {
+    key: {
+      type: String,
+      required: true,
+      trim: true,
+    },
+    label: {
+      type: String,
+      required: true,
+      trim: true,
+    },
+    status: {
+      type: String,
+      enum: ['pending', 'ok', 'fail'],
+      default: 'pending',
+    },
+    comment: {
+      type: String,
+      default: '',
+      trim: true,
+      maxlength: 1200,
+    },
+  },
+  { _id: false }
+);
+
+reviewItemSchema.add({
+  subItems: {
+    type: [reviewSubItemSchema],
+    default: [],
+  },
+});
+
 const reviewSectionSchema = new mongoose.Schema(
   {
     key: {
