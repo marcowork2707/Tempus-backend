@@ -90,7 +90,7 @@ const DASHBOARD_REVIEW_TEMPLATE = [
       { key: 'tarifas-activas', label: 'Tarifas Activas' },
       { key: 'altas', label: 'Altas' },
       { key: 'altas-bajas-plus', label: 'Altas-Bajas (+)' },
-      { key: 'faltas-asistencia-menor-40', label: 'Faltas de asistencia (<40)' },
+      { key: 'faltas-asistencia-menor-40', label: 'Faltas de asistencia' },
     ],
   },
 ];
@@ -357,6 +357,49 @@ const applyDashboardKpiAutoEvaluation = (sections = [], kpiAuto = null) => {
           status: evaluation.status,
           comment: item.comment?.trim() ? item.comment : evaluation.comment,
         };
+      }),
+    };
+  });
+};
+
+const computeEventosYearToDate = async (centerId, year, currentMonth, sectionsForCurrentMonth) => {
+  const eventosSection = (sectionsForCurrentMonth || []).find((s) => s.key === 'eventos');
+  const recurrenciaItem = (eventosSection?.items || []).find((i) => i.key === 'recurrencia-objetivo');
+  const currentValue = Number(recurrenciaItem?.value ?? 0);
+
+  const previousReviews = await CenterDashboardReview.find({
+    center: centerId,
+    month: { $gte: `${year}-01`, $lt: currentMonth },
+  })
+    .select('sections')
+    .lean();
+
+  let previousTotal = 0;
+  for (const review of previousReviews) {
+    const es = (review.sections || []).find((s) => s.key === 'eventos');
+    const ri = (es?.items || []).find((i) => i.key === 'recurrencia-objetivo');
+    previousTotal += Number(ri?.value ?? 0);
+  }
+
+  return { total: previousTotal + currentValue, previousTotal, currentValue };
+};
+
+const applyEventosRecurrenciaEvaluation = (sections, eventosYTD, objective, monthNumber) => {
+  const isDecember = monthNumber === 12;
+
+  return sections.map((section) => {
+    if (section.key !== 'eventos') return section;
+
+    return {
+      ...section,
+      items: (section.items || []).map((item) => {
+        if (item.key !== 'recurrencia-objetivo') return item;
+        if (Array.isArray(item.subItems) && item.subItems.length > 0) return item;
+
+        if (isDecember && objective !== null) {
+          return { ...item, status: eventosYTD.total >= objective ? 'ok' : 'fail' };
+        }
+        return { ...item, status: 'pending' };
       }),
     };
   });
@@ -1822,11 +1865,18 @@ exports.getCenterDashboardReview = catchAsyncErrors(async (req, res, next) => {
   normalizedSections = applyDashboardKpiAutoEvaluation(normalizedSections, kpiAuto);
   normalizedSections = evaluateDashboardOnlineItems(normalizedSections, onlineObjectives);
 
+  const monthNumber = monthIndex + 1;
+  const eventosObjective = readObjectiveMonthlyValue(objectivesMap, 'eventos_anio', 0);
+  const eventosYTD = await computeEventosYearToDate(req.params.id, year, month, normalizedSections);
+  normalizedSections = applyEventosRecurrenciaEvaluation(normalizedSections, eventosYTD, eventosObjective, monthNumber);
+
   res.status(200).json({
     success: true,
     month,
     kpiAuto,
     onlineObjectives,
+    eventosYTD,
+    eventosObjective,
     review: {
       center: req.params.id,
       month,
@@ -1854,6 +1904,11 @@ exports.upsertCenterDashboardReview = catchAsyncErrors(async (req, res, next) =>
   const onlineObjectives = getDashboardOnlineObjectives(objectivesMap, monthIndex);
 
   sections = evaluateDashboardOnlineItems(sections, onlineObjectives);
+
+  const monthNumber = monthIndex + 1;
+  const eventosObjective = readObjectiveMonthlyValue(objectivesMap, 'eventos_anio', 0);
+  const eventosYTD = await computeEventosYearToDate(req.params.id, year, month, sections);
+  sections = applyEventosRecurrenciaEvaluation(sections, eventosYTD, eventosObjective, monthNumber);
 
   const review = await CenterDashboardReview.findOneAndUpdate(
     { center: req.params.id, month },
