@@ -3,6 +3,7 @@ const mongoose = require('mongoose');
 const classReviewItemSchema = new mongoose.Schema({
   name: String,
   tick: Boolean, // true = tick, false = cross, null = no marcado
+  comment: String,
 });
 
 const classReviewSectionSchema = new mongoose.Schema({
