@@ -52,6 +52,15 @@ const DASHBOARD_REVIEW_TEMPLATE = [
       { key: 'bonificacion-trimestre', label: 'Bonificación trimestre' },
     ],
   },
+  {
+    key: 'online',
+    title: 'ONLINE',
+    items: [
+      { key: 'razon-de-ser', label: 'Razón de ser' },
+      { key: 'resenas-google', label: 'Reseñas Google' },
+      { key: 'fotos-y-stories', label: 'Fotos y Stories' },
+    ],
+  },
 ];
 
 const buildDefaultDashboardReviewSections = () =>
@@ -105,7 +114,6 @@ const resetDashboardReviewSubItemsProgress = (subItems = []) => {
   return (Array.isArray(subItems) ? subItems : []).map((subItem) => ({
     ...subItem,
     status: 'pending',
-    comment: '',
     subItems: resetDashboardReviewSubItemsProgress(subItem.subItems),
   }));
 };
@@ -116,7 +124,6 @@ const resetDashboardReviewProgress = (sections = []) => {
     items: (Array.isArray(section.items) ? section.items : []).map((item) => ({
       ...item,
       status: 'pending',
-      comment: '',
       subItems: resetDashboardReviewSubItemsProgress(item.subItems),
     })),
   }));
