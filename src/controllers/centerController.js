@@ -61,6 +61,17 @@ const DASHBOARD_REVIEW_TEMPLATE = [
       { key: 'fotos-y-stories', label: 'Fotos y Stories' },
     ],
   },
+  {
+    key: 'back-office',
+    title: 'BACK OFFICE',
+    items: [
+      { key: 'tareas-diarias', label: 'Tareas Diarias' },
+      { key: 'pagos-ult-dia', label: 'Pagos Ult. Dia' },
+      { key: 'mr-septiembre', label: 'Mr Septiembre' },
+      { key: 'mr-enero', label: 'Mr Enero' },
+      { key: '14-days-historico', label: '14 Days Histórico' },
+    ],
+  },
 ];
 
 const buildDefaultDashboardReviewSections = () =>
