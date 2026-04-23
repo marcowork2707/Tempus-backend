@@ -86,16 +86,40 @@ const normalizeDashboardReviewSubItems = (incomingSubItems) => {
       : 'pending';
     const comment = typeof subItem.comment === 'string' ? subItem.comment.trim().slice(0, 1200) : '';
 
+    const nestedSubItems = normalizeDashboardReviewSubItems(subItem.subItems);
+
     normalized.push({
       key,
       label,
-      status,
-      comment,
+      status: nestedSubItems.length > 0 ? 'pending' : status,
+      comment: nestedSubItems.length > 0 ? '' : comment,
+      subItems: nestedSubItems,
     });
     seenKeys.add(key);
   }
 
   return normalized;
+};
+
+const resetDashboardReviewSubItemsProgress = (subItems = []) => {
+  return (Array.isArray(subItems) ? subItems : []).map((subItem) => ({
+    ...subItem,
+    status: 'pending',
+    comment: '',
+    subItems: resetDashboardReviewSubItemsProgress(subItem.subItems),
+  }));
+};
+
+const resetDashboardReviewProgress = (sections = []) => {
+  return (Array.isArray(sections) ? sections : []).map((section) => ({
+    ...section,
+    items: (Array.isArray(section.items) ? section.items : []).map((item) => ({
+      ...item,
+      status: 'pending',
+      comment: '',
+      subItems: resetDashboardReviewSubItemsProgress(item.subItems),
+    })),
+  }));
 };
 
 const normalizeDashboardReviewSections = (incomingSections) => {
@@ -1519,9 +1543,29 @@ exports.getCenterDashboardReview = catchAsyncErrors(async (req, res, next) => {
     month,
   }).populate('updatedBy', 'name email');
 
-  const normalizedSections = review
-    ? normalizeDashboardReviewSections(review.sections)
-    : buildDefaultDashboardReviewSections();
+  let normalizedSections = [];
+
+  if (review) {
+    normalizedSections = normalizeDashboardReviewSections(review.sections);
+  } else {
+    // If there's no review for the requested month, inherit structure from latest previous month.
+    // This keeps subapartado changes for future months, while preserving historical months untouched.
+    const previousReview = await CenterDashboardReview.findOne({
+      center: req.params.id,
+      month: { $lt: month },
+    })
+      .sort({ month: -1 })
+      .select('sections')
+      .lean();
+
+    if (previousReview?.sections?.length) {
+      normalizedSections = resetDashboardReviewProgress(
+        normalizeDashboardReviewSections(previousReview.sections)
+      );
+    } else {
+      normalizedSections = buildDefaultDashboardReviewSections();
+    }
+  }
 
   res.status(200).json({
     success: true,
