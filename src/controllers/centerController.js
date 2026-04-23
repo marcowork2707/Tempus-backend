@@ -78,7 +78,7 @@ const DASHBOARD_REVIEW_TEMPLATE = [
     key: 'eventos',
     title: 'EVENTOS',
     items: [
-      { key: 'recurrencia-objetivo', label: 'Recurrencia objetivo (10/año)' },
+      { key: 'recurrencia-objetivo', label: 'Recurrencia objetivo' },
       { key: 'comunicacion-difusion', label: 'Comunicación y difusión' },
       { key: 'fotos', label: 'Fotos' },
     ],
