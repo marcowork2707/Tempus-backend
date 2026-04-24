@@ -65,6 +65,7 @@ const {
   getVacationRequests,
   createVacationRequest,
   reviewVacationRequest,
+  deleteVacationRequest,
   getVacationConflictRules,
   createVacationConflictRule,
   deleteVacationConflictRule,
@@ -166,9 +167,9 @@ router.delete('/:id/shift-overrides/:overrideId', authorizeRoles('admin'), delet
 router.get('/:id/vacation-requests', getVacationRequests);
 router.post('/:id/vacation-requests', createVacationRequest);
 router.patch('/:id/vacation-requests/:requestId', reviewVacationRequest);
+router.delete('/:id/vacation-requests/:requestId', deleteVacationRequest);
 router.get('/:id/vacation-conflicts', getVacationConflictRules);
 router.post('/:id/vacation-conflicts', createVacationConflictRule);
-router.delete('/:id/vacation-conflicts/:ruleId', deleteVacationConflictRule);
 router.delete('/:id/vacation-conflicts/:ruleId', deleteVacationConflictRule);
 
 // ─── KPI Objectives ──────────────────────────────────────────────────────────

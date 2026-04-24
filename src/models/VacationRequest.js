@@ -20,6 +20,15 @@ const vacationRequestSchema = new mongoose.Schema(
       type: Date,
       required: true,
     },
+    attributedYear: {
+      type: Number,
+      min: [2000, 'Attributed year must be >= 2000'],
+      max: [2100, 'Attributed year must be <= 2100'],
+      default: function attributedYearDefault() {
+        const baseDate = this.startDate ? new Date(this.startDate) : new Date();
+        return baseDate.getFullYear();
+      },
+    },
     reason: {
       type: String,
       required: true,

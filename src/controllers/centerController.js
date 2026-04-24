@@ -2202,6 +2202,20 @@ function _canManageVacationRequests(roleName, globalRole) {
   return globalRole === 'admin' || roleName === 'admin' || roleName === 'encargado';
 }
 
+function _normalizeVacationAttributionYear(rawYear, fallbackDate) {
+  const fallback = _startOfDay(fallbackDate).getFullYear();
+  if (rawYear === undefined || rawYear === null || rawYear === '') {
+    return fallback;
+  }
+
+  const parsed = Number(rawYear);
+  if (!Number.isInteger(parsed) || parsed < 2000 || parsed > 2100) {
+    throw new ErrorHandler('attributedYear must be an integer between 2000 and 2100', 400);
+  }
+
+  return parsed;
+}
+
 async function _assertVacationConflictRules(centerId, userId, start, end, ignoreRequestId = null) {
   const rules = await VacationConflictRule.find({
     center: centerId,
@@ -2358,7 +2372,24 @@ async function _backfillVacationRequestsFromOverrides(centerId, reviewedByUserId
     status: { $in: ['pending', 'approved'] },
   })
     .sort({ startDate: 1 })
-    .select('_id user startDate endDate');
+    .select('_id user startDate endDate attributedYear');
+
+  const normalizeYearOps = [];
+  for (const request of existingRequests) {
+    if (!Number.isInteger(request.attributedYear)) {
+      normalizeYearOps.push({
+        updateOne: {
+          filter: { _id: request._id },
+          update: { $set: { attributedYear: _startOfDay(request.startDate).getFullYear() } },
+        },
+      });
+      request.attributedYear = _startOfDay(request.startDate).getFullYear();
+    }
+  }
+
+  if (normalizeYearOps.length > 0) {
+    await VacationRequest.bulkWrite(normalizeYearOps);
+  }
 
   const requestsById = new Map();
   const requestsByUser = new Map();
@@ -2451,6 +2482,7 @@ async function _backfillVacationRequestsFromOverrides(centerId, reviewedByUserId
         user: userId,
         startDate: startOfDayLocal(range.startDate),
         endDate: startOfDayLocal(range.endDate),
+        attributedYear: startOfDayLocal(range.startDate).getFullYear(),
         reason: (range.notes || '').trim() || 'Vacaciones asignadas desde horario semanal',
         status: 'approved',
         reviewedBy: reviewedByUserId || null,
@@ -2517,7 +2549,7 @@ exports.getVacationRequests = catchAsyncErrors(async (req, res, next) => {
 });
 
 exports.createVacationRequest = catchAsyncErrors(async (req, res, next) => {
-  const { startDate, endDate, reason, userId } = req.body;
+  const { startDate, endDate, reason, userId, attributedYear } = req.body;
   const center = await Center.findById(req.params.id);
   if (!center) return next(new ErrorHandler('Center not found', 404));
 
@@ -2557,12 +2589,17 @@ exports.createVacationRequest = catchAsyncErrors(async (req, res, next) => {
   }
 
   const createAsApproved = canManage && Boolean(userId);
+  const normalizedAttributedYear = _normalizeVacationAttributionYear(
+    canManage ? attributedYear : undefined,
+    start
+  );
 
   const request = await VacationRequest.create({
     center: req.params.id,
     user: targetUserId,
     startDate: start,
     endDate: end,
+    attributedYear: normalizedAttributedYear,
     reason: reason.trim(),
     status: createAsApproved ? 'approved' : 'pending',
     reviewedBy: createAsApproved ? req.user.id : null,
@@ -2581,7 +2618,7 @@ exports.createVacationRequest = catchAsyncErrors(async (req, res, next) => {
 });
 
 exports.reviewVacationRequest = catchAsyncErrors(async (req, res, next) => {
-  const { status, reviewNotes, startDate, endDate } = req.body;
+  const { status, reviewNotes, startDate, endDate, attributedYear } = req.body;
   const request = await VacationRequest.findOne({ _id: req.params.requestId, center: req.params.id });
   if (!request) return next(new ErrorHandler('Vacation request not found', 404));
 
@@ -2623,6 +2660,7 @@ exports.reviewVacationRequest = catchAsyncErrors(async (req, res, next) => {
   }
 
   const nextStatus = status || request.status;
+  const nextAttributedYear = _normalizeVacationAttributionYear(attributedYear, nextStartDate);
 
   if (nextStatus === 'approved') {
     await _assertVacationConflictRules(req.params.id, request.user, nextStartDate, nextEndDate, request._id);
@@ -2630,6 +2668,7 @@ exports.reviewVacationRequest = catchAsyncErrors(async (req, res, next) => {
 
   request.startDate = nextStartDate;
   request.endDate = nextEndDate;
+  request.attributedYear = nextAttributedYear;
   request.status = nextStatus;
   if (reviewNotes !== undefined) {
     request.reviewNotes = reviewNotes || undefined;
@@ -2654,6 +2693,26 @@ exports.reviewVacationRequest = catchAsyncErrors(async (req, res, next) => {
     .populate('reviewedBy', 'name email');
 
   res.status(200).json({ success: true, request: populated });
+});
+
+exports.deleteVacationRequest = catchAsyncErrors(async (req, res, next) => {
+  const request = await VacationRequest.findOne({ _id: req.params.requestId, center: req.params.id });
+  if (!request) return next(new ErrorHandler('Vacation request not found', 404));
+
+  const roleName = await _getRoleNameInCenter(req.user.id, req.params.id);
+  if (!_canManageVacationRequests(roleName, req.user.role)) {
+    return next(new ErrorHandler('Unauthorized to delete vacation requests', 403));
+  }
+
+  await ShiftOverride.deleteMany({
+    center: req.params.id,
+    user: request.user,
+    vacationRequest: request._id,
+  });
+
+  await VacationRequest.deleteOne({ _id: request._id });
+
+  res.status(200).json({ success: true, message: 'Vacation request deleted' });
 });
 
 exports.getVacationConflictRules = catchAsyncErrors(async (req, res, next) => {
@@ -3027,7 +3086,20 @@ exports.deleteShiftPattern = catchAsyncErrors(async (req, res, next) => {
 });
 
 exports.upsertShiftOverride = catchAsyncErrors(async (req, res, next) => {
-  const { userId, date, endDate, label, startTime, endTime, segments, isOff, notes, reasonType, vacationRequestId } = req.body;
+  const {
+    userId,
+    date,
+    endDate,
+    label,
+    startTime,
+    endTime,
+    segments,
+    isOff,
+    notes,
+    reasonType,
+    vacationRequestId,
+    attributedYear,
+  } = req.body;
 
   if (!userId || !date) {
     return next(new ErrorHandler('userId and date are required', 400));
@@ -3060,6 +3132,12 @@ exports.upsertShiftOverride = catchAsyncErrors(async (req, res, next) => {
   let linkedVacationRequest = null;
 
   if (normalizedReasonType === 'vacation') {
+    const normalizedAttributedYear = (
+      attributedYear !== undefined && attributedYear !== null && attributedYear !== ''
+    )
+      ? _normalizeVacationAttributionYear(attributedYear, start)
+      : null;
+
     await _assertVacationRangeAlignedWithWorkCycle(req.params.id, userId, start, end, vacationRequestId || null);
     await _assertVacationConflictRules(req.params.id, userId, start, end, vacationRequestId || null);
 
@@ -3086,6 +3164,7 @@ exports.upsertShiftOverride = catchAsyncErrors(async (req, res, next) => {
         {
           startDate: start,
           endDate: end,
+          ...(normalizedAttributedYear !== null ? { attributedYear: normalizedAttributedYear } : {}),
           reason: notes?.trim() || 'Vacaciones asignadas manualmente',
           status: 'approved',
           reviewedBy: req.user.id,
@@ -3101,6 +3180,7 @@ exports.upsertShiftOverride = catchAsyncErrors(async (req, res, next) => {
         user: userId,
         startDate: start,
         endDate: end,
+        attributedYear: normalizedAttributedYear !== null ? normalizedAttributedYear : start.getFullYear(),
         reason: notes?.trim() || 'Vacaciones asignadas manualmente',
         status: 'approved',
         reviewedBy: req.user.id,
