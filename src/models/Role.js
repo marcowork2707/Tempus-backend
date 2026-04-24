@@ -5,7 +5,7 @@ const roleSchema = new mongoose.Schema(
     name: {
       type: String,
       required: [true, 'Please provide a role name'],
-      enum: ['admin', 'encargado', 'coach'],
+      enum: ['admin', 'encargado', 'coach', 'limpieza'],
       unique: true,
     },
     description: String,

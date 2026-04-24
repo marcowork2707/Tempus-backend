@@ -21,6 +21,7 @@ const crypto = require('crypto');
 
 const ROLE_LABEL_BY_NAME = {
   coach: 'coach',
+  limpieza: 'limpieza',
   encargado: 'encargado',
   admin: 'administrador',
 };
@@ -157,7 +158,14 @@ exports.createUser = catchAsyncErrors(async (req, res, next) => {
       let roleName = center.roleName;
 
       if (!roleId && center.roleName) {
-        const role = await Role.findOne({ name: center.roleName });
+        let role = await Role.findOne({ name: center.roleName });
+        if (!role && center.roleName === 'limpieza') {
+          role = await Role.create({
+            name: 'limpieza',
+            description: 'Limpieza - Completes cleaning tasks and check-in/out',
+            permissions: ['view_own_tasks', 'complete_tasks', 'view_checklist', 'check_in_out'],
+          });
+        }
         if (!role) {
           return next(new ErrorHandler(`Role '${center.roleName}' not found`, 404));
         }

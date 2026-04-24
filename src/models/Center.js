@@ -68,6 +68,35 @@ const centerSchema = new mongoose.Schema(
           'stock-control',
         ],
       },
+      cleaningTasks: {
+        type: [
+          {
+            key: { type: String, required: true },
+            label: { type: String, required: true },
+            daysOfWeek: {
+              type: [Number],
+              default: [],
+            },
+          },
+        ],
+        default: [
+          {
+            key: 'limpieza-vestuarios',
+            label: 'Limpieza vestuarios',
+            daysOfWeek: [1, 3, 5],
+          },
+          {
+            key: 'limpieza-caucho',
+            label: 'Limpieza caucho',
+            daysOfWeek: [2, 4],
+          },
+          {
+            key: 'limpieza-accesorios',
+            label: 'Limpieza accesorios',
+            daysOfWeek: [6],
+          },
+        ],
+      },
     },
     overtimeSettings: {
       monthlyAggregationMode: {

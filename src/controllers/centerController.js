@@ -786,7 +786,7 @@ exports.updateCenter = catchAsyncErrors(async (req, res, next) => {
 
 // Update Checklist Templates (Admin only)
 exports.updateChecklistTemplates = catchAsyncErrors(async (req, res, next) => {
-  const { openingTasks, closingTasks, dailyTaskKeys } = req.body;
+  const { openingTasks, closingTasks, dailyTaskKeys, cleaningTasks } = req.body;
 
   let center = await Center.findById(req.params.id);
 
@@ -806,6 +806,26 @@ exports.updateChecklistTemplates = catchAsyncErrors(async (req, res, next) => {
     center.checklistTemplates.dailyTaskKeys = dailyTaskKeys
       .map((key) => String(key || '').trim())
       .filter(Boolean);
+  }
+
+  if (Array.isArray(cleaningTasks)) {
+    const normalizedCleaningTasks = cleaningTasks
+      .map((task) => ({
+        key: String(task?.key || '').trim(),
+        label: String(task?.label || '').trim(),
+        daysOfWeek: Array.isArray(task?.daysOfWeek)
+          ? task.daysOfWeek
+            .map((day) => Number(day))
+            .filter((day) => Number.isInteger(day) && day >= 0 && day <= 6)
+          : [],
+      }))
+      .filter((task) => task.key && task.label)
+      .map((task) => ({
+        ...task,
+        daysOfWeek: Array.from(new Set(task.daysOfWeek)).sort((a, b) => a - b),
+      }));
+
+    center.checklistTemplates.cleaningTasks = normalizedCleaningTasks;
   }
 
   await center.save();
@@ -858,7 +878,14 @@ exports.addUserToCenter = catchAsyncErrors(async (req, res, next) => {
   const center = await Center.findById(req.params.id);
   if (!center) return next(new ErrorHandler('Center not found', 404));
 
-  const role = await Role.findOne({ name: roleName });
+  let role = await Role.findOne({ name: roleName });
+  if (!role && roleName === 'limpieza') {
+    role = await Role.create({
+      name: 'limpieza',
+      description: 'Limpieza - Completes cleaning tasks and check-in/out',
+      permissions: ['view_own_tasks', 'complete_tasks', 'view_checklist', 'check_in_out'],
+    });
+  }
   if (!role) return next(new ErrorHandler(`Role '${roleName}' not found`, 404));
 
   const existing = await UserCenterRole.findOne({ user: userId, center: req.params.id });
@@ -892,7 +919,14 @@ exports.updateUserCenterRole = catchAsyncErrors(async (req, res, next) => {
   if (!assignment) return next(new ErrorHandler('Assignment not found', 404));
 
   if (roleName !== undefined) {
-    const role = await Role.findOne({ name: roleName });
+    let role = await Role.findOne({ name: roleName });
+    if (!role && roleName === 'limpieza') {
+      role = await Role.create({
+        name: 'limpieza',
+        description: 'Limpieza - Completes cleaning tasks and check-in/out',
+        permissions: ['view_own_tasks', 'complete_tasks', 'view_checklist', 'check_in_out'],
+      });
+    }
     if (!role) return next(new ErrorHandler(`Role '${roleName}' not found`, 404));
     assignment.role = role._id;
   }

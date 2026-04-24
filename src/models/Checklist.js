@@ -34,7 +34,7 @@ const checklistSchema = new mongoose.Schema(
     },
     type: {
       type: String,
-      enum: ['daily', 'opening', 'closing'],
+      enum: ['daily', 'opening', 'closing', 'cleaning'],
       default: 'daily',
     },
     items: {

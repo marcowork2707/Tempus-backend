@@ -35,7 +35,7 @@ exports.createChecklist = catchAsyncErrors(async (req, res, next) => {
   const uniquenessFilter =
     checklistType === 'daily'
       ? { center: centerId, type: checklistType, date: { $gte: start, $lt: end } }
-      : { center: centerId, type: checklistType, date: { $gte: start, $lt: end } };
+      : { center: centerId, type: checklistType, assignedUser: assignedUserId, date: { $gte: start, $lt: end } };
 
   const existingChecklist = await Checklist.findOne(uniquenessFilter)
     .populate('assignedUser', 'name email')

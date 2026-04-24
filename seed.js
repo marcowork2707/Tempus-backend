@@ -58,6 +58,17 @@ const seedDatabase = async () => {
       ],
     });
 
+    const limpieza = await Role.create({
+      name: 'limpieza',
+      description: 'Limpieza - Completes cleaning tasks and check-in/out',
+      permissions: [
+        'view_own_tasks',
+        'complete_tasks',
+        'view_checklist',
+        'check_in_out',
+      ],
+    });
+
     console.log('✓ Roles created');
 
     // Create Centers
@@ -196,6 +207,12 @@ const seedDatabase = async () => {
       user: coachUser3._id,
       center: centerFuncional._id,
       role: coach._id,
+    });
+
+    await UserCenterRole.create({
+      user: coachUser2._id,
+      center: centerFuncional._id,
+      role: limpieza._id,
     });
 
     console.log('✓ User-Center-Role assignments created');
