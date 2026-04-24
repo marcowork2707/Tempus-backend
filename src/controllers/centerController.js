@@ -88,8 +88,6 @@ const DASHBOARD_REVIEW_TEMPLATE = [
     title: 'PROMOCIONES',
     items: [
       { key: 'recurrencia-objetivo', label: 'Recurrencia objetivo' },
-      { key: 'comunicacion-difusion', label: 'Comunicación y difusión' },
-      { key: 'fotos', label: 'Fotos' },
     ],
   },
   {
@@ -3275,7 +3273,6 @@ const ALLOWED_KPI_KEYS = [
   'retencion_socios',
   'faltas_asistencia',
   'capacidad_clases',
-  'resenas_nuevas',
   'nota_revision_clases',
   'eventos_anio',
   'promociones_anio',
