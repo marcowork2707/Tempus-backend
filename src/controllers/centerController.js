@@ -82,6 +82,15 @@ const DASHBOARD_REVIEW_TEMPLATE = [
     ],
   },
   {
+    key: 'instalaciones',
+    title: 'INSTALACIONES',
+    items: [
+      { key: 'limpieza-orden', label: 'Limpieza y orden' },
+      { key: 'inversion-anual', label: 'Inversión anual' },
+      { key: 'coherencia-estetica', label: 'Coherencia estética' },
+    ],
+  },
+  {
     key: 'kpis',
     title: 'KPIS',
     items: [
@@ -404,6 +413,207 @@ const applySectionRecurrenciaEvaluation = (sections, sectionKey, ytd, objective,
           return { ...item, status: ytd.total >= objective ? 'ok' : 'fail' };
         }
         return { ...item, status: 'pending' };
+      }),
+    };
+  });
+};
+
+const stripDiacritics = (value) => String(value || '')
+  .normalize('NFD')
+  .replace(/[\u0300-\u036f]/g, '')
+  .toLowerCase();
+
+const buildMonthDateRange = (month) => {
+  const [year, monthIndex] = String(month).split('-').map(Number);
+  const start = new Date(year, monthIndex - 1, 1);
+  start.setHours(0, 0, 0, 0);
+  const end = new Date(year, monthIndex, 0);
+  end.setHours(0, 0, 0, 0);
+  return { start, end, year, monthIndex };
+};
+
+const computeInstalacionesCleaningAuto = async (centerId, month) => {
+  const center = await Center.findById(centerId)
+    .select('checklistTemplates.cleaningTasks')
+    .lean();
+
+  const cleaningTasks = Array.isArray(center?.checklistTemplates?.cleaningTasks)
+    ? center.checklistTemplates.cleaningTasks
+    : [];
+
+  if (cleaningTasks.length === 0) {
+    return {
+      status: 'pending',
+      comment: 'No hay tareas de limpieza configuradas para este centro.',
+      subItems: [],
+    };
+  }
+
+  const { start: monthStart, end: monthEnd } = buildMonthDateRange(month);
+  const today = startOfDayLocal(new Date());
+  const effectiveEnd = monthEnd < today ? monthEnd : today;
+
+  const checklists = effectiveEnd < monthStart
+    ? []
+    : await Checklist.find({
+      center: centerId,
+      type: 'cleaning',
+      date: { $gte: monthStart, $lte: effectiveEnd },
+    })
+      .select('date items')
+      .lean();
+
+  const checklistsByDate = new Map();
+  for (const checklist of checklists) {
+    const dateKey = formatLocalDateKey(checklist.date);
+    const list = checklistsByDate.get(dateKey) || [];
+    list.push(checklist);
+    checklistsByDate.set(dateKey, list);
+  }
+
+  const subItems = cleaningTasks.map((task) => {
+    const taskKey = String(task.key || '').trim();
+    const taskLabel = String(task.label || taskKey || 'Tarea').trim();
+    const normalizedTaskKey = stripDiacritics(taskKey);
+    const normalizedTaskLabel = stripDiacritics(taskLabel);
+    const daysOfWeek = Array.isArray(task.daysOfWeek) ? task.daysOfWeek : [];
+
+    let expectedDays = 0;
+    let completedDays = 0;
+
+    let cursor = new Date(monthStart);
+    while (cursor <= effectiveEnd) {
+      const shouldRunThatDay = daysOfWeek.length > 0 ? daysOfWeek.includes(cursor.getDay()) : true;
+      if (shouldRunThatDay) {
+        expectedDays += 1;
+        const dateKey = formatLocalDateKey(cursor);
+        const dayChecklists = checklistsByDate.get(dateKey) || [];
+
+        const doneThatDay = dayChecklists.some((checklist) =>
+          (checklist.items || []).some((item) => {
+            const normalizedItemLabel = stripDiacritics(item.label || '');
+            const isSameTask = normalizedItemLabel === normalizedTaskLabel
+              || normalizedItemLabel === normalizedTaskKey;
+            return isSameTask && Boolean(item.done);
+          })
+        );
+
+        if (doneThatDay) completedDays += 1;
+      }
+      cursor.setDate(cursor.getDate() + 1);
+    }
+
+    const missingDays = Math.max(0, expectedDays - completedDays);
+    const subStatus = expectedDays === 0 ? 'pending' : missingDays === 0 ? 'ok' : 'fail';
+    const comment = expectedDays === 0
+      ? 'Sin días programados en este periodo.'
+      : missingDays === 0
+        ? `Completada todos los días programados (${expectedDays}/${expectedDays}).`
+        : `No completada ${missingDays} ${missingDays === 1 ? 'vez' : 'veces'} en el mes (${completedDays}/${expectedDays}).`;
+
+    return {
+      key: taskKey || stripDiacritics(taskLabel).replace(/[^a-z0-9]+/g, '-'),
+      label: taskLabel,
+      status: subStatus,
+      comment,
+      value: null,
+      subItems: [],
+    };
+  });
+
+  const hasFailures = subItems.some((subItem) => subItem.status === 'fail');
+  const hasAtLeastOneExpectedDay = subItems.some((subItem) => !String(subItem.comment || '').startsWith('Sin días programados'));
+  const totalMisses = subItems.reduce((total, subItem) => {
+    const match = String(subItem.comment || '').match(/No completada\s+(\d+)/i);
+    return total + (match ? Number(match[1]) : 0);
+  }, 0);
+
+  return {
+    status: hasFailures ? 'fail' : hasAtLeastOneExpectedDay ? 'ok' : 'pending',
+    comment: hasFailures
+      ? `Faltan tareas de limpieza en ${totalMisses} ${totalMisses === 1 ? 'ocasión' : 'ocasiones'} durante el mes.`
+      : hasAtLeastOneExpectedDay
+        ? 'Todas las tareas de limpieza se han completado durante el mes.'
+        : 'Sin días programados para tareas de limpieza en este mes.',
+    subItems,
+  };
+};
+
+const isInvestmentExpense = (expense) => {
+  if (!expense || expense.entryType === 'income') return false;
+  const normalizedType = stripDiacritics(normalizeExpenseType(expense.expenseType));
+  const normalizedCategory = stripDiacritics(expense.category || '');
+  return normalizedType.includes('inversion') || normalizedCategory.includes('inversion');
+};
+
+const computeInstalacionesInvestmentYearToDate = async (centerId, month) => {
+  const { year } = buildMonthDateRange(month);
+  const expenses = await CenterExpense.find({
+    center: centerId,
+    month: { $gte: `${year}-01`, $lte: month },
+    entryType: { $ne: 'income' },
+  })
+    .select('month amount expenseType category entryType')
+    .lean();
+
+  let total = 0;
+  let currentValue = 0;
+
+  for (const expense of expenses) {
+    if (!isInvestmentExpense(expense)) continue;
+    const amount = Number(expense.amount || 0);
+    total += amount;
+    if (expense.month === month) {
+      currentValue += amount;
+    }
+  }
+
+  return {
+    total: Number(total.toFixed(2)),
+    previousTotal: Number((total - currentValue).toFixed(2)),
+    currentValue: Number(currentValue.toFixed(2)),
+  };
+};
+
+const applyInstalacionesAutoEvaluation = (sections = [], payload = {}) => {
+  const { cleaningAuto, investmentYTD, investmentObjective, monthNumber } = payload;
+  const isDecember = monthNumber === 12;
+
+  return sections.map((section) => {
+    if (section.key !== 'instalaciones') return section;
+
+    return {
+      ...section,
+      items: (section.items || []).map((item) => {
+        if (item.key === 'limpieza-orden') {
+          return {
+            ...item,
+            status: cleaningAuto?.status || 'pending',
+            comment: cleaningAuto?.comment || '',
+            value: null,
+            subItems: Array.isArray(cleaningAuto?.subItems) ? cleaningAuto.subItems : [],
+          };
+        }
+
+        if (item.key === 'inversion-anual') {
+          const total = Number(investmentYTD?.total || 0);
+          const objective = investmentObjective;
+          const status = isDecember && objective !== null && objective !== undefined
+            ? (total >= objective ? 'ok' : 'fail')
+            : 'pending';
+          const remaining = objective != null ? Math.max(0, Number(objective) - total) : null;
+
+          return {
+            ...item,
+            status,
+            comment: objective == null
+              ? `Acumulado anual: ${total.toFixed(2)} € · Objetivo sin definir`
+              : `Acumulado anual: ${total.toFixed(2)} € · Objetivo: ${Number(objective).toFixed(2)} € · Restante: ${remaining.toFixed(2)} €`,
+            value: Number(total.toFixed(2)),
+          };
+        }
+
+        return item;
       }),
     };
   });
@@ -1937,6 +2147,16 @@ exports.getCenterDashboardReview = catchAsyncErrors(async (req, res, next) => {
     monthNumber
   );
 
+  const cleaningAuto = await computeInstalacionesCleaningAuto(req.params.id, month);
+  const inversionObjective = readObjectiveMonthlyValue(objectivesMap, 'inversion_anual', 0);
+  const inversionYTD = await computeInstalacionesInvestmentYearToDate(req.params.id, month);
+  normalizedSections = applyInstalacionesAutoEvaluation(normalizedSections, {
+    cleaningAuto,
+    investmentYTD: inversionYTD,
+    investmentObjective: inversionObjective,
+    monthNumber,
+  });
+
   res.status(200).json({
     success: true,
     month,
@@ -1946,6 +2166,8 @@ exports.getCenterDashboardReview = catchAsyncErrors(async (req, res, next) => {
     eventosObjective,
     promocionesYTD,
     promocionesObjective,
+    inversionYTD,
+    inversionObjective,
     review: {
       center: req.params.id,
       month,
@@ -2007,6 +2229,16 @@ exports.upsertCenterDashboardReview = catchAsyncErrors(async (req, res, next) =>
     promocionesObjective,
     monthNumber
   );
+
+  const cleaningAuto = await computeInstalacionesCleaningAuto(req.params.id, month);
+  const inversionObjective = readObjectiveMonthlyValue(objectivesMap, 'inversion_anual', 0);
+  const inversionYTD = await computeInstalacionesInvestmentYearToDate(req.params.id, month);
+  sections = applyInstalacionesAutoEvaluation(sections, {
+    cleaningAuto,
+    investmentYTD: inversionYTD,
+    investmentObjective: inversionObjective,
+    monthNumber,
+  });
 
   const review = await CenterDashboardReview.findOneAndUpdate(
     { center: req.params.id, month },
@@ -3854,6 +4086,7 @@ const ALLOWED_KPI_KEYS = [
   'nota_revision_clases',
   'eventos_anio',
   'promociones_anio',
+  'inversion_anual',
   'online_resenas',
   'online_stories_min_dia',
   'online_publicaciones_min_mes',
