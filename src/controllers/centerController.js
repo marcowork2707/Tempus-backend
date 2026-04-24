@@ -2311,6 +2311,38 @@ async function _assertVacationRangeAlignedWithWorkCycle(centerId, userId, start,
   }
 }
 
+async function _syncApprovedVacationOverrides(centerId, request) {
+  await ShiftOverride.deleteMany({
+    center: centerId,
+    user: request.user,
+    vacationRequest: request._id,
+  });
+
+  let current = new Date(_startOfDay(request.startDate));
+  const end = _startOfDay(request.endDate);
+
+  while (current <= end) {
+    const dateOnly = _startOfDay(current);
+    await ShiftOverride.findOneAndUpdate(
+      { center: centerId, user: request.user, date: dateOnly },
+      {
+        center: centerId,
+        user: request.user,
+        vacationRequest: request._id,
+        date: dateOnly,
+        label: 'Vacaciones',
+        startTime: undefined,
+        endTime: undefined,
+        isOff: true,
+        reasonType: 'vacation',
+        notes: request.reason,
+      },
+      { new: true, upsert: true, setDefaultsOnInsert: true }
+    );
+    current.setDate(current.getDate() + 1);
+  }
+}
+
 exports.getVacationRequests = catchAsyncErrors(async (req, res, next) => {
   const center = await Center.findById(req.params.id);
   if (!center) return next(new ErrorHandler('Center not found', 404));
@@ -2345,14 +2377,18 @@ exports.getVacationRequests = catchAsyncErrors(async (req, res, next) => {
 });
 
 exports.createVacationRequest = catchAsyncErrors(async (req, res, next) => {
-  const { startDate, endDate, reason } = req.body;
+  const { startDate, endDate, reason, userId } = req.body;
   const center = await Center.findById(req.params.id);
   if (!center) return next(new ErrorHandler('Center not found', 404));
 
   const roleName = await _getRoleNameInCenter(req.user.id, req.params.id);
-  if (!['coach', 'limpieza', 'encargado'].includes(roleName)) {
+  const canManage = _canManageVacationRequests(roleName, req.user.role);
+  const requesterCanSelfRequest = ['coach', 'limpieza', 'encargado'].includes(roleName);
+  if (!canManage && !requesterCanSelfRequest) {
     return next(new ErrorHandler('Only workers and managers can request vacation from Mis turnos', 403));
   }
+
+  const targetUserId = canManage && userId ? userId : req.user.id;
 
   if (!startDate || !endDate || !reason?.trim()) {
     return next(new ErrorHandler('startDate, endDate and reason are required', 400));
@@ -2364,13 +2400,13 @@ exports.createVacationRequest = catchAsyncErrors(async (req, res, next) => {
     return next(new ErrorHandler('endDate cannot be earlier than startDate', 400));
   }
 
-  await _assertVacationRangeAlignedWithWorkCycle(req.params.id, req.user.id, start, end);
+  await _assertVacationRangeAlignedWithWorkCycle(req.params.id, targetUserId, start, end);
 
-  await _assertVacationConflictRules(req.params.id, req.user.id, start, end);
+  await _assertVacationConflictRules(req.params.id, targetUserId, start, end);
 
   const overlapping = await VacationRequest.findOne({
     center: req.params.id,
-    user: req.user.id,
+    user: targetUserId,
     status: { $in: ['pending', 'approved'] },
     startDate: { $lte: end },
     endDate: { $gte: start },
@@ -2380,13 +2416,22 @@ exports.createVacationRequest = catchAsyncErrors(async (req, res, next) => {
     return next(new ErrorHandler('You already have a vacation request overlapping those dates', 400));
   }
 
+  const createAsApproved = canManage && Boolean(userId);
+
   const request = await VacationRequest.create({
     center: req.params.id,
-    user: req.user.id,
+    user: targetUserId,
     startDate: start,
     endDate: end,
     reason: reason.trim(),
+    status: createAsApproved ? 'approved' : 'pending',
+    reviewedBy: createAsApproved ? req.user.id : null,
+    reviewedAt: createAsApproved ? new Date() : null,
   });
+
+  if (createAsApproved) {
+    await _syncApprovedVacationOverrides(req.params.id, request);
+  }
 
   const populated = await VacationRequest.findById(request._id)
     .populate('user', 'name email')
@@ -2461,29 +2506,7 @@ exports.reviewVacationRequest = catchAsyncErrors(async (req, res, next) => {
   });
 
   if (nextStatus === 'approved') {
-    let current = new Date(_startOfDay(request.startDate));
-    const end = _startOfDay(request.endDate);
-
-    while (current <= end) {
-      const dateOnly = _startOfDay(current);
-      await ShiftOverride.findOneAndUpdate(
-        { center: req.params.id, user: request.user, date: dateOnly },
-        {
-          center: req.params.id,
-          user: request.user,
-          vacationRequest: request._id,
-          date: dateOnly,
-          label: 'Vacaciones',
-          startTime: undefined,
-          endTime: undefined,
-          isOff: true,
-          reasonType: 'vacation',
-          notes: request.reason,
-        },
-        { new: true, upsert: true, setDefaultsOnInsert: true }
-      );
-      current.setDate(current.getDate() + 1);
-    }
+    await _syncApprovedVacationOverrides(req.params.id, request);
   }
 
   const populated = await VacationRequest.findById(request._id)
@@ -2864,7 +2887,7 @@ exports.deleteShiftPattern = catchAsyncErrors(async (req, res, next) => {
 });
 
 exports.upsertShiftOverride = catchAsyncErrors(async (req, res, next) => {
-  const { userId, date, endDate, label, startTime, endTime, segments, isOff, notes, reasonType } = req.body;
+  const { userId, date, endDate, label, startTime, endTime, segments, isOff, notes, reasonType, vacationRequestId } = req.body;
 
   if (!userId || !date) {
     return next(new ErrorHandler('userId and date are required', 400));
@@ -2894,6 +2917,64 @@ exports.upsertShiftOverride = catchAsyncErrors(async (req, res, next) => {
   }
 
   const savedOverrides = [];
+  let linkedVacationRequest = null;
+
+  if (normalizedReasonType === 'vacation') {
+    await _assertVacationRangeAlignedWithWorkCycle(req.params.id, userId, start, end, vacationRequestId || null);
+    await _assertVacationConflictRules(req.params.id, userId, start, end, vacationRequestId || null);
+
+    const overlapFilter = {
+      center: req.params.id,
+      user: userId,
+      status: { $in: ['pending', 'approved'] },
+      startDate: { $lte: end },
+      endDate: { $gte: start },
+    };
+
+    if (vacationRequestId) {
+      overlapFilter._id = { $ne: vacationRequestId };
+    }
+
+    const overlappingRequest = await VacationRequest.findOne(overlapFilter);
+    if (overlappingRequest) {
+      return next(new ErrorHandler('This user already has another vacation request overlapping those dates', 400));
+    }
+
+    if (vacationRequestId) {
+      linkedVacationRequest = await VacationRequest.findOneAndUpdate(
+        { _id: vacationRequestId, center: req.params.id, user: userId },
+        {
+          startDate: start,
+          endDate: end,
+          reason: notes?.trim() || 'Vacaciones asignadas manualmente',
+          status: 'approved',
+          reviewedBy: req.user.id,
+          reviewedAt: new Date(),
+        },
+        { new: true }
+      );
+    }
+
+    if (!linkedVacationRequest) {
+      linkedVacationRequest = await VacationRequest.create({
+        center: req.params.id,
+        user: userId,
+        startDate: start,
+        endDate: end,
+        reason: notes?.trim() || 'Vacaciones asignadas manualmente',
+        status: 'approved',
+        reviewedBy: req.user.id,
+        reviewedAt: new Date(),
+      });
+    }
+
+    await ShiftOverride.deleteMany({
+      center: req.params.id,
+      user: userId,
+      vacationRequest: linkedVacationRequest._id,
+    });
+  }
+
   let current = new Date(start);
   while (current <= end) {
     const dateOnly = _startOfDay(current);
@@ -2902,6 +2983,7 @@ exports.upsertShiftOverride = catchAsyncErrors(async (req, res, next) => {
       {
         center: req.params.id,
         user: userId,
+        vacationRequest: normalizedReasonType === 'vacation' ? linkedVacationRequest?._id : undefined,
         date: dateOnly,
         label: label || (normalizedReasonType === 'vacation' ? 'Vacaciones' : normalizedReasonType === 'holiday' ? 'Festivo' : undefined),
         startTime: isOff ? undefined : effectiveStartTime,
@@ -2969,6 +3051,20 @@ exports.getShiftCalendar = catchAsyncErrors(async (req, res, next) => {
     computeOccurrences(patterns.filter(hasResolvedUser), fromDate, toDate),
     overrides.filter(hasResolvedUser)
   );
+
+  occurrences = occurrences.map((occurrence) => {
+    const matchedOverride = overrides.find((override) => (
+      String(override.user?._id || '') === String(occurrence.userId)
+      && _formatLocalDate(override.date) === occurrence.date
+      && occurrence.isOverride
+    ));
+
+    return {
+      ...occurrence,
+      vacationRequestId: matchedOverride?.vacationRequest ? String(matchedOverride.vacationRequest) : undefined,
+    };
+  });
+
   if (roleName === 'coach') {
     occurrences = occurrences.filter((occ) => occ.userId === req.user.id || occ.reasonType === 'vacation');
   }
