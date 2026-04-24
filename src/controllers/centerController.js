@@ -512,10 +512,10 @@ const computeInstalacionesCleaningAuto = async (centerId, month) => {
     const missingDays = Math.max(0, expectedDays - completedDays);
     const subStatus = expectedDays === 0 ? 'pending' : missingDays === 0 ? 'ok' : 'fail';
     const comment = expectedDays === 0
-      ? 'Sin días programados en este periodo.'
+      ? 'Sin días programados'
       : missingDays === 0
-        ? `Completada todos los días programados (${expectedDays}/${expectedDays}).`
-        : `No completada ${missingDays} ${missingDays === 1 ? 'vez' : 'veces'} en el mes (${completedDays}/${expectedDays}).`;
+        ? `${completedDays}/${expectedDays} días completados`
+        : `${completedDays}/${expectedDays} — faltan ${missingDays} ${missingDays === 1 ? 'día' : 'días'}`;
 
     return {
       key: taskKey || stripDiacritics(taskLabel).replace(/[^a-z0-9]+/g, '-'),
@@ -528,9 +528,10 @@ const computeInstalacionesCleaningAuto = async (centerId, month) => {
   });
 
   const hasFailures = subItems.some((subItem) => subItem.status === 'fail');
-  const hasAtLeastOneExpectedDay = subItems.some((subItem) => !String(subItem.comment || '').startsWith('Sin días programados'));
+  const hasAtLeastOneExpectedDay = subItems.some((subItem) => subItem.status !== 'pending');
   const totalMisses = subItems.reduce((total, subItem) => {
-    const match = String(subItem.comment || '').match(/No completada\s+(\d+)/i);
+    if (subItem.status !== 'fail') return total;
+    const match = String(subItem.comment || '').match(/faltan\s+(\d+)/i);
     return total + (match ? Number(match[1]) : 0);
   }, 0);
 
