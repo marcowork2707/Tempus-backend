@@ -29,19 +29,10 @@ const DASHBOARD_REVIEW_ALLOWED_STATUSES = ['pending', 'ok', 'fail'];
 
 const DASHBOARD_REVIEW_TEMPLATE = [
   {
-    key: 'producto',
-    title: 'PRODUCTO',
+    key: 'revision-clases',
+    title: 'REVISION DE CLASES',
     items: [
-      { key: 'pizarra', label: 'Pizarra' },
-      { key: 'two-min-rule', label: '2-Min-Rule' },
-      { key: 'warm-up-general-movilidad', label: 'Warm Up General + Movilidad' },
-      { key: 'nombres-3-veces-por-clase', label: 'Nombres (3 Veces por clase)' },
-      { key: 'efi', label: 'EFI (EJERCICIOS-FLOW-INTENCION)' },
-      { key: 'funcionario-de-carceles', label: 'Funcionario de carceles' },
-      { key: 'feedback', label: 'Feedback' },
-      { key: 'clase-termina-en-tiempo', label: 'Clase termina en tiempo' },
-      { key: 'informado-sobre-promos-en-pizarra', label: 'Informado sobre promos en pizarra' },
-      { key: 'scaling', label: 'Scaling' },
+      { key: 'nota_revision_clases', label: 'Resultado mensual de revision de clases' },
     ],
   },
   {
