@@ -433,12 +433,18 @@ const buildMonthDateRange = (month) => {
 };
 
 const computeInstalacionesCleaningAuto = async (centerId, month) => {
+  // Do NOT use .lean() here: lean() skips Mongoose schema defaults, so centers
+  // created before cleaningTasks was added to the schema would return undefined.
   const center = await Center.findById(centerId)
-    .select('checklistTemplates.cleaningTasks')
-    .lean();
+    .select('checklistTemplates.cleaningTasks');
 
-  const cleaningTasks = Array.isArray(center?.checklistTemplates?.cleaningTasks)
-    ? center.checklistTemplates.cleaningTasks
+  const rawTasks = center?.checklistTemplates?.cleaningTasks;
+  const cleaningTasks = Array.isArray(rawTasks) && rawTasks.length > 0
+    ? rawTasks.map((t) => ({
+      key: String(t.key || ''),
+      label: String(t.label || ''),
+      daysOfWeek: Array.isArray(t.daysOfWeek) ? t.daysOfWeek.map(Number) : [],
+    }))
     : [];
 
   if (cleaningTasks.length === 0) {
