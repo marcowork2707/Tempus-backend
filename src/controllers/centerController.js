@@ -26,6 +26,13 @@ const { buildPlanningMessage } = require('../services/weeklyPlanningService');
 const hasResolvedUser = (record) => Boolean(record?.user && record.user._id);
 const OVERTIME_AGGREGATION_MODES = ['net', 'positive_only'];
 const DASHBOARD_REVIEW_ALLOWED_STATUSES = ['pending', 'ok', 'fail'];
+const DASHBOARD_REVIEW_MONTH_RESTRICTIONS = {
+  'back-office::mr-septiembre': [9],
+  'back-office::mr-enero': [1],
+  'eventos::recurrencia-objetivo': [12],
+  'promociones::recurrencia-objetivo': [12],
+  'instalaciones::inversion-anual': [12],
+};
 
 const DASHBOARD_REVIEW_TEMPLATE = [
   {
@@ -242,6 +249,68 @@ const getDashboardOnlineObjectives = (objectivesMap, monthIndex) => ({
   storiesPorDia: readObjectiveMonthlyValue(objectivesMap, 'online_stories_min_dia', monthIndex),
   publicacionesPorMes: readObjectiveMonthlyValue(objectivesMap, 'online_publicaciones_min_mes', monthIndex),
 });
+
+const getDashboardReviewApplicableMonths = (sectionKey, itemKey) => {
+  const restrictedMonths = DASHBOARD_REVIEW_MONTH_RESTRICTIONS[`${sectionKey}::${itemKey}`];
+  return Array.isArray(restrictedMonths) ? restrictedMonths : null;
+};
+
+const isDashboardReviewMarkableForMonth = (sectionKey, itemKey, monthNumber) => {
+  const restrictedMonths = getDashboardReviewApplicableMonths(sectionKey, itemKey);
+  if (!restrictedMonths) return true;
+  return restrictedMonths.includes(monthNumber);
+};
+
+const computeDashboardReviewSummary = (sections = [], monthNumber) => {
+  const leafNodes = [];
+
+  const collectLeafNodes = (nodes = [], sectionKey, itemKey) => {
+    for (const node of Array.isArray(nodes) ? nodes : []) {
+      const nested = Array.isArray(node.subItems) ? node.subItems : [];
+      if (nested.length > 0) {
+        collectLeafNodes(nested, sectionKey, itemKey);
+      } else {
+        leafNodes.push({ sectionKey, itemKey, status: node.status });
+      }
+    }
+  };
+
+  for (const section of Array.isArray(sections) ? sections : []) {
+    for (const item of Array.isArray(section.items) ? section.items : []) {
+      const subItems = Array.isArray(item.subItems) ? item.subItems : [];
+      if (subItems.length > 0) {
+        collectLeafNodes(subItems, section.key, item.key);
+      } else {
+        leafNodes.push({ sectionKey: section.key, itemKey: item.key, status: item.status });
+      }
+    }
+  }
+
+  let markableItems = 0;
+  let tickCount = 0;
+  let failCount = 0;
+  let pendingCount = 0;
+
+  for (const leaf of leafNodes) {
+    if (!isDashboardReviewMarkableForMonth(leaf.sectionKey, leaf.itemKey, monthNumber)) continue;
+    markableItems += 1;
+    if (leaf.status === 'ok') tickCount += 1;
+    else if (leaf.status === 'fail') failCount += 1;
+    else pendingCount += 1;
+  }
+
+  const score = markableItems > 0
+    ? Number(((tickCount / markableItems) * 10).toFixed(2))
+    : null;
+
+  return {
+    markableItems,
+    tickCount,
+    failCount,
+    pendingCount,
+    score,
+  };
+};
 
 const evaluateDashboardOnlineItems = (sections = [], onlineObjectives) => {
   const objectiveByItemKey = {
@@ -2163,6 +2232,8 @@ exports.getCenterDashboardReview = catchAsyncErrors(async (req, res, next) => {
     investmentObjective: inversionObjective,
     monthNumber,
   });
+  const dashboardReviewObjective = readObjectiveMonthlyValue(objectivesMap, 'nota_cuadro_mandos', monthIndex);
+  const dashboardSummary = computeDashboardReviewSummary(normalizedSections, monthNumber);
 
   res.status(200).json({
     success: true,
@@ -2175,6 +2246,8 @@ exports.getCenterDashboardReview = catchAsyncErrors(async (req, res, next) => {
     promocionesObjective,
     inversionYTD,
     inversionObjective,
+    dashboardReviewObjective,
+    dashboardSummary,
     review: {
       center: req.params.id,
       month,
@@ -2246,6 +2319,8 @@ exports.upsertCenterDashboardReview = catchAsyncErrors(async (req, res, next) =>
     investmentObjective: inversionObjective,
     monthNumber,
   });
+  const dashboardReviewObjective = readObjectiveMonthlyValue(objectivesMap, 'nota_cuadro_mandos', monthIndex);
+  const dashboardSummary = computeDashboardReviewSummary(sections, monthNumber);
 
   const review = await CenterDashboardReview.findOneAndUpdate(
     { center: req.params.id, month },
@@ -2267,6 +2342,8 @@ exports.upsertCenterDashboardReview = catchAsyncErrors(async (req, res, next) =>
 
   res.status(200).json({
     success: true,
+    dashboardReviewObjective,
+    dashboardSummary,
     review: {
       center: req.params.id,
       month,
@@ -4090,6 +4167,7 @@ const ALLOWED_KPI_KEYS = [
   'retencion_socios',
   'faltas_asistencia',
   'capacidad_clases',
+  'nota_cuadro_mandos',
   'nota_revision_clases',
   'eventos_anio',
   'promociones_anio',
