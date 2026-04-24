@@ -2343,6 +2343,141 @@ async function _syncApprovedVacationOverrides(centerId, request) {
   }
 }
 
+async function _backfillVacationRequestsFromOverrides(centerId, reviewedByUserId = null) {
+  const overrides = await ShiftOverride.find({
+    center: centerId,
+    reasonType: 'vacation',
+  })
+    .sort({ user: 1, date: 1 })
+    .select('_id user date notes vacationRequest');
+
+  if (overrides.length === 0) return;
+
+  const existingRequests = await VacationRequest.find({
+    center: centerId,
+    status: { $in: ['pending', 'approved'] },
+  })
+    .sort({ startDate: 1 })
+    .select('_id user startDate endDate');
+
+  const requestsById = new Map();
+  const requestsByUser = new Map();
+
+  for (const request of existingRequests) {
+    const requestId = String(request._id);
+    const userId = String(request.user);
+    requestsById.set(requestId, request);
+    const userRequests = requestsByUser.get(userId) || [];
+    userRequests.push(request);
+    requestsByUser.set(userId, userRequests);
+  }
+
+  const linkedOverrideOps = [];
+  const pendingByUser = new Map();
+
+  for (const override of overrides) {
+    const userId = String(override.user);
+    const dateValue = startOfDayLocal(override.date);
+    const existingRequestId = override.vacationRequest ? String(override.vacationRequest) : null;
+    if (existingRequestId && requestsById.has(existingRequestId)) {
+      continue;
+    }
+
+    const coveringRequest = (requestsByUser.get(userId) || []).find((request) => (
+      startOfDayLocal(request.startDate) <= dateValue && startOfDayLocal(request.endDate) >= dateValue
+    ));
+
+    if (coveringRequest) {
+      linkedOverrideOps.push({
+        updateOne: {
+          filter: { _id: override._id },
+          update: { $set: { vacationRequest: coveringRequest._id } },
+        },
+      });
+      continue;
+    }
+
+    const userPending = pendingByUser.get(userId) || [];
+    userPending.push(override);
+    pendingByUser.set(userId, userPending);
+  }
+
+  if (linkedOverrideOps.length > 0) {
+    await ShiftOverride.bulkWrite(linkedOverrideOps);
+  }
+
+  const createdLinkOps = [];
+
+  for (const [userId, userOverrides] of pendingByUser.entries()) {
+    if (userOverrides.length === 0) continue;
+
+    userOverrides.sort((a, b) => startOfDayLocal(a.date) - startOfDayLocal(b.date));
+
+    const ranges = [];
+    let currentRange = null;
+
+    for (const override of userOverrides) {
+      const currentDate = startOfDayLocal(override.date);
+      if (!currentRange) {
+        currentRange = {
+          startDate: currentDate,
+          endDate: currentDate,
+          notes: override.notes,
+          overrideIds: [override._id],
+        };
+        continue;
+      }
+
+      const nextExpectedDate = addDaysLocal(currentRange.endDate, 1);
+      if (formatLocalDateKey(currentDate) === formatLocalDateKey(nextExpectedDate)) {
+        currentRange.endDate = currentDate;
+        currentRange.overrideIds.push(override._id);
+      } else {
+        ranges.push(currentRange);
+        currentRange = {
+          startDate: currentDate,
+          endDate: currentDate,
+          notes: override.notes,
+          overrideIds: [override._id],
+        };
+      }
+    }
+
+    if (currentRange) ranges.push(currentRange);
+
+    for (const range of ranges) {
+      const createdRequest = await VacationRequest.create({
+        center: centerId,
+        user: userId,
+        startDate: startOfDayLocal(range.startDate),
+        endDate: startOfDayLocal(range.endDate),
+        reason: (range.notes || '').trim() || 'Vacaciones asignadas desde horario semanal',
+        status: 'approved',
+        reviewedBy: reviewedByUserId || null,
+        reviewedAt: new Date(),
+      });
+
+      const userRequestList = requestsByUser.get(userId) || [];
+      userRequestList.push(createdRequest);
+      requestsByUser.set(userId, userRequestList);
+      requestsById.set(String(createdRequest._id), createdRequest);
+
+      for (const overrideId of range.overrideIds) {
+        createdLinkOps.push({
+          updateOne: {
+            filter: { _id: overrideId },
+            update: { $set: { vacationRequest: createdRequest._id } },
+          },
+        });
+      }
+    }
+  }
+
+  if (createdLinkOps.length > 0) {
+    await ShiftOverride.bulkWrite(createdLinkOps);
+  }
+}
+
 exports.getVacationRequests = catchAsyncErrors(async (req, res, next) => {
   const center = await Center.findById(req.params.id);
   if (!center) return next(new ErrorHandler('Center not found', 404));
@@ -2353,6 +2488,11 @@ exports.getVacationRequests = catchAsyncErrors(async (req, res, next) => {
   if (!roleName && req.user.role !== 'admin') {
     return next(new ErrorHandler('Unauthorized for this center', 403));
   }
+
+  await _backfillVacationRequestsFromOverrides(
+    req.params.id,
+    canManage ? req.user.id : null
+  );
 
   const filter = { center: req.params.id };
   if (canManage) {
