@@ -2239,6 +2239,87 @@ async function _assertVacationConflictRules(centerId, userId, start, end, ignore
   }
 }
 
+async function _buildWorkingDaySetForUser(centerId, userId, from, to, ignoreVacationRequestId = null) {
+  const fromDate = startOfDayLocal(from);
+  const toDate = startOfDayLocal(to);
+
+  const [patterns, rawOverrides] = await Promise.all([
+    ShiftPattern.find({
+      center: centerId,
+      user: userId,
+      active: true,
+    })
+      .populate('user', 'name email')
+      .populate('shift', 'name startTime endTime'),
+    ShiftOverride.find({
+      center: centerId,
+      user: userId,
+      date: { $gte: fromDate, $lte: toDate },
+    }).populate('user', 'name email'),
+  ]);
+
+  const overrides = ignoreVacationRequestId
+    ? rawOverrides.filter((override) => (
+        override.reasonType !== 'vacation'
+        || String(override.vacationRequest || '') !== String(ignoreVacationRequestId)
+      ))
+    : rawOverrides;
+
+  const occurrences = applyOverrides(
+    computeOccurrences(patterns.filter(hasResolvedUser), fromDate, toDate),
+    overrides.filter(hasResolvedUser)
+  );
+
+  const workingDays = new Set();
+  for (const occurrence of occurrences) {
+    if (!occurrence.isOff) {
+      workingDays.add(occurrence.date);
+    }
+  }
+
+  return workingDays;
+}
+
+async function _assertVacationRangeAlignedWithWorkCycle(centerId, userId, start, end, ignoreVacationRequestId = null) {
+  const startDate = startOfDayLocal(start);
+  const endDate = startOfDayLocal(end);
+  const dayBeforeStart = addDaysLocal(startDate, -1);
+  const dayAfterEnd = addDaysLocal(endDate, 1);
+
+  const workingDays = await _buildWorkingDaySetForUser(
+    centerId,
+    userId,
+    dayBeforeStart,
+    dayAfterEnd,
+    ignoreVacationRequestId
+  );
+
+  const startKey = formatLocalDateKey(startDate);
+  const dayBeforeKey = formatLocalDateKey(dayBeforeStart);
+  const dayAfterKey = formatLocalDateKey(dayAfterEnd);
+
+  if (!workingDays.has(startKey)) {
+    throw new ErrorHandler(
+      'Las vacaciones deben empezar el primer día en el que la persona tendría turno de trabajo',
+      400
+    );
+  }
+
+  if (workingDays.has(dayBeforeKey)) {
+    throw new ErrorHandler(
+      'Las vacaciones deben pedirse desde el primer día laborable: el día anterior también tenía turno',
+      400
+    );
+  }
+
+  if (!workingDays.has(dayAfterKey)) {
+    throw new ErrorHandler(
+      'La fecha fin debe ser el último día antes de volver a trabajar (el día siguiente debe tener turno)',
+      400
+    );
+  }
+}
+
 exports.getVacationRequests = catchAsyncErrors(async (req, res, next) => {
   const center = await Center.findById(req.params.id);
   if (!center) return next(new ErrorHandler('Center not found', 404));
@@ -2278,8 +2359,8 @@ exports.createVacationRequest = catchAsyncErrors(async (req, res, next) => {
   if (!center) return next(new ErrorHandler('Center not found', 404));
 
   const roleName = await _getRoleNameInCenter(req.user.id, req.params.id);
-  if (!['coach', 'encargado'].includes(roleName)) {
-    return next(new ErrorHandler('Only coaches and managers can request vacation from Mis turnos', 403));
+  if (!['coach', 'limpieza', 'encargado'].includes(roleName)) {
+    return next(new ErrorHandler('Only workers and managers can request vacation from Mis turnos', 403));
   }
 
   if (!startDate || !endDate || !reason?.trim()) {
@@ -2291,6 +2372,8 @@ exports.createVacationRequest = catchAsyncErrors(async (req, res, next) => {
   if (end < start) {
     return next(new ErrorHandler('endDate cannot be earlier than startDate', 400));
   }
+
+  await _assertVacationRangeAlignedWithWorkCycle(req.params.id, req.user.id, start, end);
 
   await _assertVacationConflictRules(req.params.id, req.user.id, start, end);
 
@@ -2341,6 +2424,14 @@ exports.reviewVacationRequest = catchAsyncErrors(async (req, res, next) => {
   if (nextEndDate < nextStartDate) {
     return next(new ErrorHandler('endDate cannot be earlier than startDate', 400));
   }
+
+  await _assertVacationRangeAlignedWithWorkCycle(
+    req.params.id,
+    request.user,
+    nextStartDate,
+    nextEndDate,
+    request._id
+  );
 
   const overlapping = await VacationRequest.findOne({
     center: req.params.id,
