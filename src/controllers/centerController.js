@@ -2216,6 +2216,122 @@ function _normalizeVacationAttributionYear(rawYear, fallbackDate) {
   return parsed;
 }
 
+const VACATION_POLICY = {
+  MIN_NOTICE_DAYS_OUTSIDE_SEASON: 30,
+  SHORT_PERIOD_MAX_PER_YEAR: 3,
+  SHORT_PERIOD_THRESHOLD_DAYS: 7,
+  SUMMER_START_MONTH: 6,
+  SUMMER_END_MONTH: 8,
+  CHRISTMAS_START_DAY_DEC: 22,
+  CHRISTMAS_END_DAY_JAN: 7,
+};
+
+function _isInsideSummerPeriod(date) {
+  const month = _startOfDay(date).getMonth() + 1;
+  return month >= VACATION_POLICY.SUMMER_START_MONTH && month <= VACATION_POLICY.SUMMER_END_MONTH;
+}
+
+function _isInsideChristmasPeriod(date) {
+  const dayDate = _startOfDay(date);
+  const month = dayDate.getMonth() + 1;
+  const day = dayDate.getDate();
+  return (
+    (month === 12 && day >= VACATION_POLICY.CHRISTMAS_START_DAY_DEC)
+    || (month === 1 && day <= VACATION_POLICY.CHRISTMAS_END_DAY_JAN)
+  );
+}
+
+function _rangeEveryDayPasses(start, end, predicate) {
+  let current = _startOfDay(start);
+  const limit = _startOfDay(end);
+  while (current <= limit) {
+    if (!predicate(current)) return false;
+    current.setDate(current.getDate() + 1);
+  }
+  return true;
+}
+
+function _rangeIncludesSeptember(start, end) {
+  let current = _startOfDay(start);
+  const limit = _startOfDay(end);
+  while (current <= limit) {
+    if ((current.getMonth() + 1) === 9) return true;
+    current.setDate(current.getDate() + 1);
+  }
+  return false;
+}
+
+async function _getShortVacationPeriodCountForYear(centerId, userId, attributedYear, ignoreRequestId = null) {
+  const filters = {
+    center: centerId,
+    user: userId,
+    attributedYear,
+    status: { $in: ['pending', 'approved'] },
+  };
+
+  if (ignoreRequestId) {
+    filters._id = { $ne: ignoreRequestId };
+  }
+
+  const existingRequests = await VacationRequest.find(filters).select('startDate endDate');
+  return existingRequests.reduce((count, request) => {
+    const days = Math.floor((
+      _startOfDay(request.endDate).getTime() - _startOfDay(request.startDate).getTime()
+    ) / (24 * 60 * 60 * 1000)) + 1;
+    return days < VACATION_POLICY.SHORT_PERIOD_THRESHOLD_DAYS ? count + 1 : count;
+  }, 0);
+}
+
+async function _assertVacationPolicyRules(centerId, userId, start, end, attributedYear, ignoreRequestId = null) {
+  const violations = [];
+  const days = Math.floor((_startOfDay(end).getTime() - _startOfDay(start).getTime()) / (24 * 60 * 60 * 1000)) + 1;
+
+  if (_rangeIncludesSeptember(start, end)) {
+    violations.push('No se permiten vacaciones en septiembre.');
+  }
+
+  const entirelyInSummer = _rangeEveryDayPasses(start, end, _isInsideSummerPeriod);
+  const entirelyInChristmas = _rangeEveryDayPasses(start, end, _isInsideChristmasPeriod);
+
+  if (!entirelyInSummer && !entirelyInChristmas) {
+    const today = _startOfDay(new Date());
+    const minAllowedStart = _startOfDay(today);
+    minAllowedStart.setDate(minAllowedStart.getDate() + VACATION_POLICY.MIN_NOTICE_DAYS_OUTSIDE_SEASON);
+    if (_startOfDay(start) < minAllowedStart) {
+      violations.push('Fuera de verano y Navidad, debes solicitar con al menos 1 mes de antelación.');
+    }
+  }
+
+  if (entirelyInChristmas && days > 7) {
+    violations.push('En Navidad, el máximo permitido es 1 semana consecutiva.');
+  }
+
+  if (entirelyInSummer) {
+    if (days < 7) {
+      violations.push('En verano, el mínimo obligatorio es 1 semana consecutiva.');
+    }
+    if (days > 14) {
+      violations.push('En verano, el máximo permitido es 2 semanas consecutivas.');
+    }
+  }
+
+  if (days < VACATION_POLICY.SHORT_PERIOD_THRESHOLD_DAYS) {
+    const shortPeriodsUsed = await _getShortVacationPeriodCountForYear(
+      centerId,
+      userId,
+      attributedYear,
+      ignoreRequestId
+    );
+    if (shortPeriodsUsed >= VACATION_POLICY.SHORT_PERIOD_MAX_PER_YEAR) {
+      violations.push('Máximo permitido de 3 turnos anuales vacacionales inferiores a 7 días.');
+    }
+  }
+
+  if (violations.length > 0) {
+    throw new ErrorHandler(`Esta solicitud incumple las siguientes normas:\n- ${violations.join('\n- ')}`, 400);
+  }
+}
+
 async function _assertVacationConflictRules(centerId, userId, start, end, ignoreRequestId = null) {
   const rules = await VacationConflictRule.find({
     center: centerId,
@@ -2594,6 +2710,14 @@ exports.createVacationRequest = catchAsyncErrors(async (req, res, next) => {
     start
   );
 
+  await _assertVacationPolicyRules(
+    req.params.id,
+    targetUserId,
+    start,
+    end,
+    normalizedAttributedYear
+  );
+
   const request = await VacationRequest.create({
     center: req.params.id,
     user: targetUserId,
@@ -2665,6 +2789,15 @@ exports.reviewVacationRequest = catchAsyncErrors(async (req, res, next) => {
   if (nextStatus === 'approved') {
     await _assertVacationConflictRules(req.params.id, request.user, nextStartDate, nextEndDate, request._id);
   }
+
+  await _assertVacationPolicyRules(
+    req.params.id,
+    request.user,
+    nextStartDate,
+    nextEndDate,
+    nextAttributedYear,
+    request._id
+  );
 
   request.startDate = nextStartDate;
   request.endDate = nextEndDate;
@@ -3137,9 +3270,22 @@ exports.upsertShiftOverride = catchAsyncErrors(async (req, res, next) => {
     )
       ? _normalizeVacationAttributionYear(attributedYear, start)
       : null;
+    const effectiveAttributedYear = normalizedAttributedYear !== null
+      ? normalizedAttributedYear
+      : (vacationRequestId
+        ? (await VacationRequest.findOne({ _id: vacationRequestId, center: req.params.id, user: userId }).select('attributedYear startDate'))?.attributedYear || start.getFullYear()
+        : start.getFullYear());
 
     await _assertVacationRangeAlignedWithWorkCycle(req.params.id, userId, start, end, vacationRequestId || null);
     await _assertVacationConflictRules(req.params.id, userId, start, end, vacationRequestId || null);
+    await _assertVacationPolicyRules(
+      req.params.id,
+      userId,
+      start,
+      end,
+      effectiveAttributedYear,
+      vacationRequestId || null
+    );
 
     const overlapFilter = {
       center: req.params.id,
