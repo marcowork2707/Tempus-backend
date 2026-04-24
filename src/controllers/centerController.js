@@ -84,6 +84,15 @@ const DASHBOARD_REVIEW_TEMPLATE = [
     ],
   },
   {
+    key: 'promociones',
+    title: 'PROMOCIONES',
+    items: [
+      { key: 'recurrencia-objetivo', label: 'Recurrencia objetivo' },
+      { key: 'comunicacion-difusion', label: 'Comunicación y difusión' },
+      { key: 'fotos', label: 'Fotos' },
+    ],
+  },
+  {
     key: 'kpis',
     title: 'KPIS',
     items: [
@@ -362,9 +371,15 @@ const applyDashboardKpiAutoEvaluation = (sections = [], kpiAuto = null) => {
   });
 };
 
-const computeEventosYearToDate = async (centerId, year, currentMonth, sectionsForCurrentMonth) => {
-  const eventosSection = (sectionsForCurrentMonth || []).find((s) => s.key === 'eventos');
-  const recurrenciaItem = (eventosSection?.items || []).find((i) => i.key === 'recurrencia-objetivo');
+const computeSectionRecurrenciaYearToDate = async (
+  centerId,
+  year,
+  currentMonth,
+  sectionsForCurrentMonth,
+  sectionKey
+) => {
+  const section = (sectionsForCurrentMonth || []).find((s) => s.key === sectionKey);
+  const recurrenciaItem = (section?.items || []).find((i) => i.key === 'recurrencia-objetivo');
   const currentValue = Number(recurrenciaItem?.value ?? 0);
 
   const previousReviews = await CenterDashboardReview.find({
@@ -376,19 +391,19 @@ const computeEventosYearToDate = async (centerId, year, currentMonth, sectionsFo
 
   let previousTotal = 0;
   for (const review of previousReviews) {
-    const es = (review.sections || []).find((s) => s.key === 'eventos');
-    const ri = (es?.items || []).find((i) => i.key === 'recurrencia-objetivo');
+    const previousSection = (review.sections || []).find((s) => s.key === sectionKey);
+    const ri = (previousSection?.items || []).find((i) => i.key === 'recurrencia-objetivo');
     previousTotal += Number(ri?.value ?? 0);
   }
 
   return { total: previousTotal + currentValue, previousTotal, currentValue };
 };
 
-const applyEventosRecurrenciaEvaluation = (sections, eventosYTD, objective, monthNumber) => {
+const applySectionRecurrenciaEvaluation = (sections, sectionKey, ytd, objective, monthNumber) => {
   const isDecember = monthNumber === 12;
 
   return sections.map((section) => {
-    if (section.key !== 'eventos') return section;
+    if (section.key !== sectionKey) return section;
 
     return {
       ...section,
@@ -397,7 +412,7 @@ const applyEventosRecurrenciaEvaluation = (sections, eventosYTD, objective, mont
         if (Array.isArray(item.subItems) && item.subItems.length > 0) return item;
 
         if (isDecember && objective !== null) {
-          return { ...item, status: eventosYTD.total >= objective ? 'ok' : 'fail' };
+          return { ...item, status: ytd.total >= objective ? 'ok' : 'fail' };
         }
         return { ...item, status: 'pending' };
       }),
@@ -1867,8 +1882,37 @@ exports.getCenterDashboardReview = catchAsyncErrors(async (req, res, next) => {
 
   const monthNumber = monthIndex + 1;
   const eventosObjective = readObjectiveMonthlyValue(objectivesMap, 'eventos_anio', 0);
-  const eventosYTD = await computeEventosYearToDate(req.params.id, year, month, normalizedSections);
-  normalizedSections = applyEventosRecurrenciaEvaluation(normalizedSections, eventosYTD, eventosObjective, monthNumber);
+  const eventosYTD = await computeSectionRecurrenciaYearToDate(
+    req.params.id,
+    year,
+    month,
+    normalizedSections,
+    'eventos'
+  );
+  normalizedSections = applySectionRecurrenciaEvaluation(
+    normalizedSections,
+    'eventos',
+    eventosYTD,
+    eventosObjective,
+    monthNumber
+  );
+
+  const promocionesObjectiveRaw = readObjectiveMonthlyValue(objectivesMap, 'promociones_anio', 0);
+  const promocionesObjective = promocionesObjectiveRaw ?? 3;
+  const promocionesYTD = await computeSectionRecurrenciaYearToDate(
+    req.params.id,
+    year,
+    month,
+    normalizedSections,
+    'promociones'
+  );
+  normalizedSections = applySectionRecurrenciaEvaluation(
+    normalizedSections,
+    'promociones',
+    promocionesYTD,
+    promocionesObjective,
+    monthNumber
+  );
 
   res.status(200).json({
     success: true,
@@ -1877,6 +1921,8 @@ exports.getCenterDashboardReview = catchAsyncErrors(async (req, res, next) => {
     onlineObjectives,
     eventosYTD,
     eventosObjective,
+    promocionesYTD,
+    promocionesObjective,
     review: {
       center: req.params.id,
       month,
@@ -1907,8 +1953,37 @@ exports.upsertCenterDashboardReview = catchAsyncErrors(async (req, res, next) =>
 
   const monthNumber = monthIndex + 1;
   const eventosObjective = readObjectiveMonthlyValue(objectivesMap, 'eventos_anio', 0);
-  const eventosYTD = await computeEventosYearToDate(req.params.id, year, month, sections);
-  sections = applyEventosRecurrenciaEvaluation(sections, eventosYTD, eventosObjective, monthNumber);
+  const eventosYTD = await computeSectionRecurrenciaYearToDate(
+    req.params.id,
+    year,
+    month,
+    sections,
+    'eventos'
+  );
+  sections = applySectionRecurrenciaEvaluation(
+    sections,
+    'eventos',
+    eventosYTD,
+    eventosObjective,
+    monthNumber
+  );
+
+  const promocionesObjectiveRaw = readObjectiveMonthlyValue(objectivesMap, 'promociones_anio', 0);
+  const promocionesObjective = promocionesObjectiveRaw ?? 3;
+  const promocionesYTD = await computeSectionRecurrenciaYearToDate(
+    req.params.id,
+    year,
+    month,
+    sections,
+    'promociones'
+  );
+  sections = applySectionRecurrenciaEvaluation(
+    sections,
+    'promociones',
+    promocionesYTD,
+    promocionesObjective,
+    monthNumber
+  );
 
   const review = await CenterDashboardReview.findOneAndUpdate(
     { center: req.params.id, month },
@@ -3203,6 +3278,7 @@ const ALLOWED_KPI_KEYS = [
   'resenas_nuevas',
   'nota_revision_clases',
   'eventos_anio',
+  'promociones_anio',
   'online_resenas',
   'online_stories_min_dia',
   'online_publicaciones_min_mes',
