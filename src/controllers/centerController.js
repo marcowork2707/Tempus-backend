@@ -1560,11 +1560,87 @@ function normalizeExpenseType(value) {
   if (lowered === 'fixed' || lowered === 'gastos fijos' || lowered === 'gasto fijo') {
     return 'Gasto fijo';
   }
-  if (lowered === 'sueldo' || lowered === 'sueldos') {
+  if (lowered === 'sueldo' || lowered === 'sueldos' || lowered === 'payroll') {
     return 'Sueldos';
   }
 
   return normalized;
+}
+
+async function buildSalaryExpensesForMonth({ centerId, month }) {
+  const [payrollEntries, incentives] = await Promise.all([
+    PayrollEntry.find({ center: centerId, month })
+      .populate('user', 'name email active')
+      .sort({ createdAt: 1 }),
+    ExtraIncentive.find({ center: centerId, month })
+      .populate('user', 'name email active')
+      .sort({ createdAt: 1 }),
+  ]);
+
+  const payrollByUser = new Map();
+  for (const entry of payrollEntries.filter((record) => Boolean(record.user))) {
+    const userId = String(entry.user._id);
+    payrollByUser.set(userId, {
+      entry,
+      user: entry.user,
+      amount: Number(entry.netSalary ?? entry.variableAmount ?? 0),
+    });
+  }
+
+  const incentivesByUser = new Map();
+  for (const incentive of incentives.filter((record) => Boolean(record.user))) {
+    const userId = String(incentive.user._id);
+    const current = incentivesByUser.get(userId) || {
+      user: incentive.user,
+      amount: 0,
+      concepts: [],
+    };
+    current.amount += Number(incentive.amount || 0);
+    if (incentive.concept) current.concepts.push(String(incentive.concept));
+    incentivesByUser.set(userId, current);
+  }
+
+  const userIds = new Set([
+    ...payrollByUser.keys(),
+    ...incentivesByUser.keys(),
+  ]);
+
+  const rows = [];
+  for (const userId of userIds) {
+    const payroll = payrollByUser.get(userId);
+    const incentive = incentivesByUser.get(userId);
+    const user = payroll?.user || incentive?.user;
+    if (!user) continue;
+
+    const payrollAmount = Number(payroll?.amount || 0);
+    const incentiveAmount = Number(incentive?.amount || 0);
+    const totalAmount = payrollAmount + incentiveAmount;
+
+    if (totalAmount <= 0) continue;
+
+    const conceptParts = [];
+    if (payrollAmount > 0) conceptParts.push('Sueldo');
+    if (incentiveAmount > 0) conceptParts.push('Incentivos');
+
+    rows.push({
+      _id: `salary-${userId}-${month}`,
+      sourceType: 'salary',
+      payrollEntryId: payroll?.entry?._id || null,
+      month,
+      date: `${month}-01`,
+      category: 'Sueldos',
+      concept: `${conceptParts.join(' + ')} ${user.name}`.trim(),
+      amount: Number(totalAmount.toFixed(2)),
+      netSalary: Number(totalAmount.toFixed(2)),
+      payrollAmount: Number(payrollAmount.toFixed(2)),
+      incentiveAmount: Number(incentiveAmount.toFixed(2)),
+      notes: payroll?.entry?.notes || '',
+      user,
+      createdAt: payroll?.entry?.createdAt,
+    });
+  }
+
+  return rows.sort((a, b) => String(a.user?.name || '').localeCompare(String(b.user?.name || ''), 'es'));
 }
 
 async function syncRecurringExpensesForMonth({ centerId, month, userId }) {
@@ -1685,8 +1761,8 @@ function buildExpensesSummary({ manualExpenses, salaryExpenses }) {
     byTypeMap.set(type, current);
   }
   if (salaryTotal > 0) {
-    byTypeMap.set('payroll', {
-      type: 'payroll',
+    byTypeMap.set('Sueldos', {
+      type: 'Sueldos',
       amount: salaryTotal,
       count: salaryExpenses.length,
     });
@@ -1881,32 +1957,14 @@ exports.getCenterExpensesSummary = catchAsyncErrors(async (req, res, next) => {
     userId: req.user.id,
   });
 
-  const [manualExpenses, payrollEntries] = await Promise.all([
+  const [manualExpenses, salaryExpenses] = await Promise.all([
     CenterExpense.find({ center: req.params.id, month })
       .populate('createdBy', 'name email')
       .populate('updatedBy', 'name email')
       .populate('recurringConcept', 'concept category expenseType active')
       .sort({ date: 1, createdAt: 1 }),
-    PayrollEntry.find({ center: req.params.id, month })
-      .populate('user', 'name email active')
-      .sort({ createdAt: 1 }),
+    buildSalaryExpensesForMonth({ centerId: req.params.id, month }),
   ]);
-
-  const safePayrollEntries = payrollEntries.filter((entry) => Boolean(entry.user));
-  const salaryExpenses = safePayrollEntries.map((entry) => ({
-    _id: `salary-${entry._id}`,
-    sourceType: 'salary',
-    payrollEntryId: entry._id,
-    month: entry.month,
-    date: `${entry.month}-01`,
-    category: 'Sueldos',
-    concept: `Sueldo ${entry.user.name}`,
-    amount: Number(entry.netSalary ?? entry.variableAmount ?? 0),
-    netSalary: Number(entry.netSalary ?? entry.variableAmount ?? 0),
-    notes: entry.notes || '',
-    user: entry.user,
-    createdAt: entry.createdAt,
-  }));
 
   const summary = buildExpensesSummary({
     manualExpenses,
@@ -4126,20 +4184,12 @@ exports.getBalanceRange = catchAsyncErrors(async (req, res, next) => {
 
   const monthlyData = await Promise.all(
     months.map(async (month) => {
-      const [manualExpenses, payrollEntries] = await Promise.all([
+      const [manualExpenses, salaryExpenses] = await Promise.all([
         CenterExpense.find({ center: req.params.id, month }).select(
           'concept amount expenseType entryType incomeCategory category date'
         ),
-        PayrollEntry.find({ center: req.params.id, month })
-          .populate('user', 'name')
-          .select('netSalary variableAmount month'),
+        buildSalaryExpensesForMonth({ centerId: req.params.id, month }),
       ]);
-
-      const safePayroll = payrollEntries.filter((e) => Boolean(e.user));
-      const salaryExpenses = safePayroll.map((e) => ({
-        _id: `salary-${e._id}`,
-        amount: Number(e.netSalary ?? e.variableAmount ?? 0),
-      }));
 
       const summary = buildExpensesSummary({ manualExpenses, salaryExpenses });
       return { month, ...summary };
