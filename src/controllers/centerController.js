@@ -348,6 +348,54 @@ const evaluateDashboardOnlineItems = (sections = [], onlineObjectives) => {
   });
 };
 
+const normalizeActiveClientTariffForDashboard = (value = '') => String(value || '')
+  .normalize('NFD')
+  .replace(/[\u0300-\u036f]/g, '')
+  .toLowerCase()
+  .trim();
+
+const DASHBOARD_EXCLUDED_ACTIVE_TARIFF_MARKERS = [
+  'lista de espera',
+  'lista',
+  'espera',
+  'bono',
+  'clase suelta',
+  'credito extra',
+];
+
+const splitDashboardActiveTariffSegments = (tariff = '') => {
+  const normalized = normalizeActiveClientTariffForDashboard(tariff);
+  if (!normalized) return [];
+
+  const nextTariffPattern = '(?=\\s*[a-z0-9+][a-z0-9 +]{0,40}\\s*-)';
+
+  return normalized
+    .replace(new RegExp(`(lista de espera|clase suelta|credito extra)\\s*${nextTariffPattern}`, 'g'), '$1|')
+    .replace(new RegExp(`(bono\\s*\\d*(?:\\s*(?:sesiones?|clases?))?)\\s*${nextTariffPattern}`, 'g'), '$1|')
+    .replace(new RegExp(`(clases?\\s*\\/?\\s*(?:mes|semana)|sesiones?|semanal(?:es)?|mensual(?:es)?|ilimitad[oa]s?)\\s*${nextTariffPattern}`, 'g'), '$1|')
+    .split(/\|+/)
+    .map((segment) => segment.trim())
+    .filter(Boolean);
+};
+
+const isDashboardExcludedActiveTariffSegment = (segment = '') => {
+  const normalized = normalizeActiveClientTariffForDashboard(segment);
+  if (!normalized) return false;
+
+  return DASHBOARD_EXCLUDED_ACTIVE_TARIFF_MARKERS.some((marker) => normalized.includes(marker));
+};
+
+const shouldExcludeDashboardActiveTariff = (tariff = '') => {
+  const segments = splitDashboardActiveTariffSegments(tariff);
+  if (!segments.length) return false;
+
+  const hasExcludedSegment = segments.some(isDashboardExcludedActiveTariffSegment);
+  if (!hasExcludedSegment) return false;
+
+  const hasAllowedSegment = segments.some((segment) => !isDashboardExcludedActiveTariffSegment(segment));
+  return !hasAllowedSegment;
+};
+
 const computeDashboardKpiAutoEvaluation = async ({ centerId, month }) => {
   const monthIndex = Number(month.split('-')[1]) - 1;
   const year = Number(month.split('-')[0]);
@@ -371,15 +419,7 @@ const computeDashboardKpiAutoEvaluation = async ({ centerId, month }) => {
 
   const hasStoredActiveClients = Array.isArray(snapshot?.activeClients);
   const filteredActiveClients = hasStoredActiveClients
-    ? snapshot.activeClients.filter((client) => {
-      const normalizedTariff = stripDiacritics(client?.activeTariff || '').trim();
-      return !normalizedTariff.includes('lista de espera')
-        && !normalizedTariff.includes('lista')
-        && !normalizedTariff.includes('espera')
-        && !normalizedTariff.includes('bono')
-        && !normalizedTariff.includes('clase suelta')
-        && !normalizedTariff.includes('credito extra');
-    })
+    ? snapshot.activeClients.filter((client) => !shouldExcludeDashboardActiveTariff(client?.activeTariff))
     : [];
   const tarifasActivas = hasStoredActiveClients
     ? filteredActiveClients.length

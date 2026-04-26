@@ -2572,16 +2572,46 @@ function normalizeActiveTariffForCompare(value = '') {
     .trim();
 }
 
-function shouldExcludeActiveClientTariff(tariff = '') {
+const EXCLUDED_ACTIVE_TARIFF_MARKERS = [
+  'lista de espera',
+  'lista',
+  'espera',
+  'bono',
+  'clase suelta',
+  'credito extra',
+];
+
+function splitActiveTariffSegments(tariff = '') {
   const normalized = normalizeActiveTariffForCompare(tariff);
+  if (!normalized) return [];
+
+  const nextTariffPattern = '(?=\\s*[a-z0-9+][a-z0-9 +]{0,40}\\s*-)';
+
+  return normalized
+    .replace(new RegExp(`(lista de espera|clase suelta|credito extra)\\s*${nextTariffPattern}`, 'g'), '$1|')
+    .replace(new RegExp(`(bono\\s*\\d*(?:\\s*(?:sesiones?|clases?))?)\\s*${nextTariffPattern}`, 'g'), '$1|')
+    .replace(new RegExp(`(clases?\\s*\\/?\\s*(?:mes|semana)|sesiones?|semanal(?:es)?|mensual(?:es)?|ilimitad[oa]s?)\\s*${nextTariffPattern}`, 'g'), '$1|')
+    .split(/\|+/)
+    .map((segment) => segment.trim())
+    .filter(Boolean);
+}
+
+function isExcludedActiveTariffSegment(segment = '') {
+  const normalized = normalizeActiveTariffForCompare(segment);
   if (!normalized) return false;
 
-  return normalized.includes('lista de espera')
-    || normalized.includes('lista')
-    || normalized.includes('espera')
-    || normalized.includes('bono')
-    || normalized.includes('clase suelta')
-    || normalized.includes('credito extra');
+  return EXCLUDED_ACTIVE_TARIFF_MARKERS.some((marker) => normalized.includes(marker));
+}
+
+function shouldExcludeActiveClientTariff(tariff = '') {
+  const segments = splitActiveTariffSegments(tariff);
+  if (!segments.length) return false;
+
+  const hasExcludedSegment = segments.some(isExcludedActiveTariffSegment);
+  if (!hasExcludedSegment) return false;
+
+  const hasAllowedSegment = segments.some((segment) => !isExcludedActiveTariffSegment(segment));
+  return !hasAllowedSegment;
 }
 
 function filterEligibleActiveClients(clients = []) {
