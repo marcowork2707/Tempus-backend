@@ -356,7 +356,7 @@ const computeDashboardKpiAutoEvaluation = async ({ centerId, month }) => {
 
   const [snapshot, absenceSnapshots, objectivesMap] = await Promise.all([
     AimHarderClientMonthlySnapshot.findOne({ center: centerId, month })
-      .select('activeClientsCount newSignups newSignupsManual monthlyCancellations monthlyCancellationsManual')
+      .select('activeClientsCount activeClients newSignups newSignupsManual monthlyCancellations monthlyCancellationsManual')
       .lean(),
     nextMonth
       ? AttendanceAbsenceSnapshot.find({
@@ -369,7 +369,19 @@ const computeDashboardKpiAutoEvaluation = async ({ centerId, month }) => {
     getCenterKpiObjectivesMap(centerId, year),
   ]);
 
-  const tarifasActivas = Number(snapshot?.activeClientsCount || 0);
+  const hasStoredActiveClients = Array.isArray(snapshot?.activeClients);
+  const filteredActiveClients = hasStoredActiveClients
+    ? snapshot.activeClients.filter((client) => {
+      const normalizedTariff = stripDiacritics(client?.activeTariff || '').trim();
+      return !normalizedTariff.includes('lista de espera')
+        && !normalizedTariff.includes('lista')
+        && !normalizedTariff.includes('espera')
+        && !normalizedTariff.includes('bono');
+    })
+    : [];
+  const tarifasActivas = hasStoredActiveClients
+    ? filteredActiveClients.length
+    : Number(snapshot?.activeClientsCount || 0);
   const altas = Number(
     snapshot?.newSignupsManual ?? snapshot?.newSignups ?? 0
   );

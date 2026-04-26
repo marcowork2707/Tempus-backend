@@ -2564,6 +2564,30 @@ function buildActiveTariffSummary(clients) {
     .sort((a, b) => b.count - a.count);
 }
 
+function normalizeActiveTariffForCompare(value = '') {
+  return String(value || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .trim();
+}
+
+function shouldExcludeActiveClientTariff(tariff = '') {
+  const normalized = normalizeActiveTariffForCompare(tariff);
+  if (!normalized) return false;
+
+  return normalized.includes('lista de espera')
+    || normalized.includes('lista')
+    || normalized.includes('espera')
+    || normalized.includes('bono');
+}
+
+function filterEligibleActiveClients(clients = []) {
+  return (Array.isArray(clients) ? clients : []).filter((client) =>
+    !shouldExcludeActiveClientTariff(client?.activeTariff)
+  );
+}
+
 function normalizeMonthLabelForCompare(value = '') {
   return String(value || '')
     .normalize('NFD')
@@ -3217,13 +3241,14 @@ async function getClientMonthlyReport(centerId, monthStr = null, options = {}) {
 
   const stored = await getStoredClientMonthlySnapshot(centerId, range.month);
   if (stored && !refresh) {
+    const filteredClients = filterEligibleActiveClients(stored.activeClients || []);
     return {
       month: stored.month,
       startDate: stored.startDate,
       endDate: stored.endDate,
-      count: stored.activeClientsCount || 0,
-      clients: stored.activeClients || [],
-      tariffSummary: stored.activeTariffSummary || [],
+      count: filteredClients.length,
+      clients: filteredClients,
+      tariffSummary: buildActiveTariffSummary(filteredClients),
       newSignups: stored.newSignupsManual !== null ? stored.newSignupsManual : (stored.newSignups || 0),
       monthlyCancellations: stored.monthlyCancellationsManual !== null ? stored.monthlyCancellationsManual : (stored.monthlyCancellations || 0),
       newSignupsManual: stored.newSignupsManual,
@@ -3263,12 +3288,14 @@ async function getClientMonthlyReport(centerId, monthStr = null, options = {}) {
     );
   }
 
+  const filteredActiveClients = filterEligibleActiveClients(activeReport.clients);
+
   const saved = await upsertClientMonthlySnapshot(centerId, range.month, {
     startDate: activeReport.startDate,
     endDate: activeReport.endDate,
-    activeClientsCount: activeReport.clients.length,
-    activeClients: activeReport.clients,
-    activeTariffSummary: activeReport.tariffSummary,
+    activeClientsCount: filteredActiveClients.length,
+    activeClients: filteredActiveClients,
+    activeTariffSummary: buildActiveTariffSummary(filteredActiveClients),
     newSignups: dashboardMetrics.newSignups,
     monthlyCancellations: dashboardMetrics.monthlyCancellations,
   });
