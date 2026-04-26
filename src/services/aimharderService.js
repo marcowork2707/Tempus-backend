@@ -3012,73 +3012,52 @@ async function getActiveClientsMonthlyReport(centerId, monthStr = null) {
         }
       }
 
-      // Ajuste requerido: en "Tarifa" seleccionar "Tarifas de tipo mensual o semanal".
-      for (const select of selects) {
-        const contextText = normalize(
-          (select.closest('label') && select.closest('label').textContent) ||
-          (select.parentElement && select.parentElement.textContent) ||
-          ''
-        );
-
-        if (!contextText.includes('tarifa')) continue;
-
+      // Seleccionar "Tarifas de tipo mensual o semanal" en el widget de Tarifa.
+      // Busca cualquier <select> que tenga esa opción (Select2 mantiene el nativo oculto).
+      for (const select of Array.from(document.querySelectorAll('select'))) {
         const option = Array.from(select.options).find((opt) =>
           normalize(opt.textContent).includes('mensual o semanal')
         );
-
         if (option) {
           select.value = option.value;
           select.dispatchEvent(new Event('change', { bubbles: true }));
+          if (window.jQuery) {
+            try { window.jQuery(select).val(option.value).trigger('change'); } catch { /* ignorar */ }
+          }
           break;
-        }
-      }
-
-      // Fallback Select2 / jQuery multiselect programático.
-      if (window.jQuery) {
-        try {
-          window.jQuery('select').each(function () {
-            const labelText = normalize(
-              window.jQuery(this).closest('label, tr, div, li, td').first().text()
-            );
-            if (!labelText.includes('tarifa')) return;
-            const $opt = window.jQuery(this).find('option').filter(function () {
-              return normalize(window.jQuery(this).text()).includes('mensual o semanal');
-            }).first();
-            if ($opt.length) {
-              window.jQuery(this).val($opt.val()).trigger('change');
-            }
-          });
-        } catch {
-          // ignorar errores del fallback
         }
       }
     }, { startInput: range.startInput, endInput: range.endInput });
 
-    // Fallback Playwright para widgets custom (Select2, Choices, etc.) que ignoran
-    // los eventos DOM disparados desde page.evaluate.
+    // Aplicar filtro de Tarifa via Playwright Select2 (más fiable que eventos DOM).
+    // Itera todos los .select2-container, abre cada uno y comprueba si contiene la opción.
     try {
-      const tariffLabel = page.locator('label, td, th, div, span').filter({ hasText: /^tarifa$/i }).first();
-      if (await tariffLabel.count()) {
-        const tariffContainer = tariffLabel.locator('xpath=ancestor::tr[1]').first()
-          .or(tariffLabel.locator('xpath=ancestor::div[@class][1]').first());
-        const dropdownTrigger = tariffContainer.locator(
-          '[class*="select2"], [class*="chosen"], [class*="multiselect"], input[type="text"]'
-        ).first();
-        if (await dropdownTrigger.count()) {
-          await dropdownTrigger.click({ timeout: 4000 }).catch(() => {});
-          await page.waitForTimeout(400).catch(() => {});
-          const menuOption = page.locator('[class*="option"], [class*="result"], [role="option"], li').filter({
-            hasText: /tarifas de tipo mensual o semanal/i,
-          }).first();
-          if (await menuOption.count()) {
-            await menuOption.click({ timeout: 4000 }).catch(() => {});
-            await page.waitForTimeout(300).catch(() => {});
-            console.log('[AimHarder] Filtro de tarifa "mensual o semanal" aplicado via widget custom');
-          }
+      let tariffFilterApplied = false;
+      const select2Containers = page.locator('.select2-container');
+      const containerCount = await select2Containers.count().catch(() => 0);
+      for (let i = 0; i < containerCount && !tariffFilterApplied; i++) {
+        const container = select2Containers.nth(i);
+        await container.click({ timeout: 3000 }).catch(() => {});
+        await page.waitForTimeout(350).catch(() => {});
+        const option = page.locator('.select2-results__option, .select2-result-label').filter({
+          hasText: /tarifas de tipo mensual o semanal/i,
+        }).first();
+        if (await option.count()) {
+          await option.click({ timeout: 3000 }).catch(() => {});
+          await page.waitForTimeout(350).catch(() => {});
+          console.log('[AimHarder] Filtro tarifa "mensual o semanal" aplicado via Select2 Playwright');
+          tariffFilterApplied = true;
+        } else {
+          // No era el select2 correcto, cerrar y probar el siguiente
+          await page.keyboard.press('Escape').catch(() => {});
+          await page.waitForTimeout(200).catch(() => {});
         }
       }
-    } catch {
-      console.warn('[AimHarder] No se pudo aplicar el filtro de tarifa; el informe incluirá todos los tipos');
+      if (!tariffFilterApplied) {
+        console.warn('[AimHarder] No se encontró la opción de tarifa en ningún Select2; el informe puede incluir todos los tipos');
+      }
+    } catch (err) {
+      console.warn('[AimHarder] Error al aplicar filtro de tarifa:', err.message);
     }
 
     const generateButton = page.locator('button, input[type="button"], input[type="submit"], a').filter({ hasText: /generar informe/i }).first();
