@@ -2564,62 +2564,6 @@ function buildActiveTariffSummary(clients) {
     .sort((a, b) => b.count - a.count);
 }
 
-function normalizeActiveTariffForCompare(value = '') {
-  return String(value || '')
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .toLowerCase()
-    .trim();
-}
-
-const EXCLUDED_ACTIVE_TARIFF_MARKERS = [
-  'lista de espera',
-  'lista',
-  'espera',
-  'bono',
-  'clase suelta',
-  'credito extra',
-];
-
-function splitActiveTariffSegments(tariff = '') {
-  const normalized = normalizeActiveTariffForCompare(tariff);
-  if (!normalized) return [];
-
-  const nextTariffPattern = '(?=\\s*[a-z0-9+][a-z0-9 +]{0,40}\\s*-)';
-
-  return normalized
-    .replace(new RegExp(`(lista de espera|clase suelta|credito extra)\\s*${nextTariffPattern}`, 'g'), '$1|')
-    .replace(new RegExp(`(bono\\s*\\d*(?:\\s*(?:sesiones?|clases?))?)\\s*${nextTariffPattern}`, 'g'), '$1|')
-    .replace(new RegExp(`(clases?\\s*\\/?\\s*(?:mes|semana)|sesiones?|semanal(?:es)?|mensual(?:es)?|ilimitad[oa]s?)\\s*${nextTariffPattern}`, 'g'), '$1|')
-    .split(/\|+/)
-    .map((segment) => segment.trim())
-    .filter(Boolean);
-}
-
-function isExcludedActiveTariffSegment(segment = '') {
-  const normalized = normalizeActiveTariffForCompare(segment);
-  if (!normalized) return false;
-
-  return EXCLUDED_ACTIVE_TARIFF_MARKERS.some((marker) => normalized.includes(marker));
-}
-
-function shouldExcludeActiveClientTariff(tariff = '') {
-  const segments = splitActiveTariffSegments(tariff);
-  if (!segments.length) return false;
-
-  const hasExcludedSegment = segments.some(isExcludedActiveTariffSegment);
-  if (!hasExcludedSegment) return false;
-
-  const hasAllowedSegment = segments.some((segment) => !isExcludedActiveTariffSegment(segment));
-  return !hasAllowedSegment;
-}
-
-function filterEligibleActiveClients(clients = []) {
-  return (Array.isArray(clients) ? clients : []).filter((client) =>
-    !shouldExcludeActiveClientTariff(client?.activeTariff)
-  );
-}
-
 function normalizeMonthLabelForCompare(value = '') {
   return String(value || '')
     .normalize('NFD')
@@ -3067,7 +3011,75 @@ async function getActiveClientsMonthlyReport(centerId, monthStr = null) {
           select.dispatchEvent(new Event('change', { bubbles: true }));
         }
       }
+
+      // Ajuste requerido: en "Tarifa" seleccionar "Tarifas de tipo mensual o semanal".
+      for (const select of selects) {
+        const contextText = normalize(
+          (select.closest('label') && select.closest('label').textContent) ||
+          (select.parentElement && select.parentElement.textContent) ||
+          ''
+        );
+
+        if (!contextText.includes('tarifa')) continue;
+
+        const option = Array.from(select.options).find((opt) =>
+          normalize(opt.textContent).includes('mensual o semanal')
+        );
+
+        if (option) {
+          select.value = option.value;
+          select.dispatchEvent(new Event('change', { bubbles: true }));
+          break;
+        }
+      }
+
+      // Fallback Select2 / jQuery multiselect programático.
+      if (window.jQuery) {
+        try {
+          window.jQuery('select').each(function () {
+            const labelText = normalize(
+              window.jQuery(this).closest('label, tr, div, li, td').first().text()
+            );
+            if (!labelText.includes('tarifa')) return;
+            const $opt = window.jQuery(this).find('option').filter(function () {
+              return normalize(window.jQuery(this).text()).includes('mensual o semanal');
+            }).first();
+            if ($opt.length) {
+              window.jQuery(this).val($opt.val()).trigger('change');
+            }
+          });
+        } catch {
+          // ignorar errores del fallback
+        }
+      }
     }, { startInput: range.startInput, endInput: range.endInput });
+
+    // Fallback Playwright para widgets custom (Select2, Choices, etc.) que ignoran
+    // los eventos DOM disparados desde page.evaluate.
+    try {
+      const tariffLabel = page.locator('label, td, th, div, span').filter({ hasText: /^tarifa$/i }).first();
+      if (await tariffLabel.count()) {
+        const tariffContainer = tariffLabel.locator('xpath=ancestor::tr[1]').first()
+          .or(tariffLabel.locator('xpath=ancestor::div[@class][1]').first());
+        const dropdownTrigger = tariffContainer.locator(
+          '[class*="select2"], [class*="chosen"], [class*="multiselect"], input[type="text"]'
+        ).first();
+        if (await dropdownTrigger.count()) {
+          await dropdownTrigger.click({ timeout: 4000 }).catch(() => {});
+          await page.waitForTimeout(400).catch(() => {});
+          const menuOption = page.locator('[class*="option"], [class*="result"], [role="option"], li').filter({
+            hasText: /tarifas de tipo mensual o semanal/i,
+          }).first();
+          if (await menuOption.count()) {
+            await menuOption.click({ timeout: 4000 }).catch(() => {});
+            await page.waitForTimeout(300).catch(() => {});
+            console.log('[AimHarder] Filtro de tarifa "mensual o semanal" aplicado via widget custom');
+          }
+        }
+      }
+    } catch {
+      console.warn('[AimHarder] No se pudo aplicar el filtro de tarifa; el informe incluirá todos los tipos');
+    }
 
     const generateButton = page.locator('button, input[type="button"], input[type="submit"], a').filter({ hasText: /generar informe/i }).first();
     if (await generateButton.count()) {
@@ -3273,14 +3285,13 @@ async function getClientMonthlyReport(centerId, monthStr = null, options = {}) {
 
   const stored = await getStoredClientMonthlySnapshot(centerId, range.month);
   if (stored && !refresh) {
-    const filteredClients = filterEligibleActiveClients(stored.activeClients || []);
     return {
       month: stored.month,
       startDate: stored.startDate,
       endDate: stored.endDate,
-      count: filteredClients.length,
-      clients: filteredClients,
-      tariffSummary: buildActiveTariffSummary(filteredClients),
+      count: stored.activeClientsCount || 0,
+      clients: stored.activeClients || [],
+      tariffSummary: stored.activeTariffSummary || [],
       newSignups: stored.newSignupsManual !== null ? stored.newSignupsManual : (stored.newSignups || 0),
       monthlyCancellations: stored.monthlyCancellationsManual !== null ? stored.monthlyCancellationsManual : (stored.monthlyCancellations || 0),
       newSignupsManual: stored.newSignupsManual,
@@ -3320,14 +3331,12 @@ async function getClientMonthlyReport(centerId, monthStr = null, options = {}) {
     );
   }
 
-  const filteredActiveClients = filterEligibleActiveClients(activeReport.clients);
-
   const saved = await upsertClientMonthlySnapshot(centerId, range.month, {
     startDate: activeReport.startDate,
     endDate: activeReport.endDate,
-    activeClientsCount: filteredActiveClients.length,
-    activeClients: filteredActiveClients,
-    activeTariffSummary: buildActiveTariffSummary(filteredActiveClients),
+    activeClientsCount: activeReport.clients.length,
+    activeClients: activeReport.clients,
+    activeTariffSummary: buildActiveTariffSummary(activeReport.clients),
     newSignups: dashboardMetrics.newSignups,
     monthlyCancellations: dashboardMetrics.monthlyCancellations,
   });

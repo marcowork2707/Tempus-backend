@@ -348,54 +348,6 @@ const evaluateDashboardOnlineItems = (sections = [], onlineObjectives) => {
   });
 };
 
-const normalizeActiveClientTariffForDashboard = (value = '') => String(value || '')
-  .normalize('NFD')
-  .replace(/[\u0300-\u036f]/g, '')
-  .toLowerCase()
-  .trim();
-
-const DASHBOARD_EXCLUDED_ACTIVE_TARIFF_MARKERS = [
-  'lista de espera',
-  'lista',
-  'espera',
-  'bono',
-  'clase suelta',
-  'credito extra',
-];
-
-const splitDashboardActiveTariffSegments = (tariff = '') => {
-  const normalized = normalizeActiveClientTariffForDashboard(tariff);
-  if (!normalized) return [];
-
-  const nextTariffPattern = '(?=\\s*[a-z0-9+][a-z0-9 +]{0,40}\\s*-)';
-
-  return normalized
-    .replace(new RegExp(`(lista de espera|clase suelta|credito extra)\\s*${nextTariffPattern}`, 'g'), '$1|')
-    .replace(new RegExp(`(bono\\s*\\d*(?:\\s*(?:sesiones?|clases?))?)\\s*${nextTariffPattern}`, 'g'), '$1|')
-    .replace(new RegExp(`(clases?\\s*\\/?\\s*(?:mes|semana)|sesiones?|semanal(?:es)?|mensual(?:es)?|ilimitad[oa]s?)\\s*${nextTariffPattern}`, 'g'), '$1|')
-    .split(/\|+/)
-    .map((segment) => segment.trim())
-    .filter(Boolean);
-};
-
-const isDashboardExcludedActiveTariffSegment = (segment = '') => {
-  const normalized = normalizeActiveClientTariffForDashboard(segment);
-  if (!normalized) return false;
-
-  return DASHBOARD_EXCLUDED_ACTIVE_TARIFF_MARKERS.some((marker) => normalized.includes(marker));
-};
-
-const shouldExcludeDashboardActiveTariff = (tariff = '') => {
-  const segments = splitDashboardActiveTariffSegments(tariff);
-  if (!segments.length) return false;
-
-  const hasExcludedSegment = segments.some(isDashboardExcludedActiveTariffSegment);
-  if (!hasExcludedSegment) return false;
-
-  const hasAllowedSegment = segments.some((segment) => !isDashboardExcludedActiveTariffSegment(segment));
-  return !hasAllowedSegment;
-};
-
 const computeDashboardKpiAutoEvaluation = async ({ centerId, month }) => {
   const monthIndex = Number(month.split('-')[1]) - 1;
   const year = Number(month.split('-')[0]);
@@ -404,7 +356,7 @@ const computeDashboardKpiAutoEvaluation = async ({ centerId, month }) => {
 
   const [snapshot, absenceSnapshots, objectivesMap] = await Promise.all([
     AimHarderClientMonthlySnapshot.findOne({ center: centerId, month })
-      .select('activeClientsCount activeClients newSignups newSignupsManual monthlyCancellations monthlyCancellationsManual')
+      .select('activeClientsCount newSignups newSignupsManual monthlyCancellations monthlyCancellationsManual')
       .lean(),
     nextMonth
       ? AttendanceAbsenceSnapshot.find({
@@ -417,13 +369,7 @@ const computeDashboardKpiAutoEvaluation = async ({ centerId, month }) => {
     getCenterKpiObjectivesMap(centerId, year),
   ]);
 
-  const hasStoredActiveClients = Array.isArray(snapshot?.activeClients);
-  const filteredActiveClients = hasStoredActiveClients
-    ? snapshot.activeClients.filter((client) => !shouldExcludeDashboardActiveTariff(client?.activeTariff))
-    : [];
-  const tarifasActivas = hasStoredActiveClients
-    ? filteredActiveClients.length
-    : Number(snapshot?.activeClientsCount || 0);
+  const tarifasActivas = Number(snapshot?.activeClientsCount || 0);
   const altas = Number(
     snapshot?.newSignupsManual ?? snapshot?.newSignups ?? 0
   );
