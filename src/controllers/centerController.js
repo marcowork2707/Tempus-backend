@@ -376,7 +376,9 @@ const computeDashboardKpiAutoEvaluation = async ({ centerId, month }) => {
       return !normalizedTariff.includes('lista de espera')
         && !normalizedTariff.includes('lista')
         && !normalizedTariff.includes('espera')
-        && !normalizedTariff.includes('bono');
+        && !normalizedTariff.includes('bono')
+        && !normalizedTariff.includes('clase suelta')
+        && !normalizedTariff.includes('credito extra');
     })
     : [];
   const tarifasActivas = hasStoredActiveClients

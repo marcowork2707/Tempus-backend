@@ -2579,7 +2579,9 @@ function shouldExcludeActiveClientTariff(tariff = '') {
   return normalized.includes('lista de espera')
     || normalized.includes('lista')
     || normalized.includes('espera')
-    || normalized.includes('bono');
+    || normalized.includes('bono')
+    || normalized.includes('clase suelta')
+    || normalized.includes('credito extra');
 }
 
 function filterEligibleActiveClients(clients = []) {
