@@ -128,6 +128,22 @@ const normalizeDashboardReviewValue = (value) => {
   return Number.isFinite(parsed) ? parsed : null;
 };
 
+const normalizeScheduledChecklistTasks = (tasks = []) => tasks
+  .map((task) => ({
+    key: String(task?.key || '').trim(),
+    label: String(task?.label || '').trim(),
+    daysOfWeek: Array.isArray(task?.daysOfWeek)
+      ? task.daysOfWeek
+        .map((day) => Number(day))
+        .filter((day) => Number.isInteger(day) && day >= 0 && day <= 6)
+      : [],
+  }))
+  .filter((task) => task.key && task.label)
+  .map((task) => ({
+    ...task,
+    daysOfWeek: Array.from(new Set(task.daysOfWeek)).sort((a, b) => a - b),
+  }));
+
 const normalizeDashboardReviewSubItems = (incomingSubItems) => {
   if (!Array.isArray(incomingSubItems)) return [];
 
@@ -1063,7 +1079,7 @@ exports.updateCenter = catchAsyncErrors(async (req, res, next) => {
 
 // Update Checklist Templates (Admin only)
 exports.updateChecklistTemplates = catchAsyncErrors(async (req, res, next) => {
-  const { openingTasks, closingTasks, dailyTaskKeys, cleaningTasks } = req.body;
+  const { openingTasks, closingTasks, dailyTaskKeys, cleaningTasks, generalCleaningTasks } = req.body;
 
   let center = await Center.findById(req.params.id);
 
@@ -1086,23 +1102,11 @@ exports.updateChecklistTemplates = catchAsyncErrors(async (req, res, next) => {
   }
 
   if (Array.isArray(cleaningTasks)) {
-    const normalizedCleaningTasks = cleaningTasks
-      .map((task) => ({
-        key: String(task?.key || '').trim(),
-        label: String(task?.label || '').trim(),
-        daysOfWeek: Array.isArray(task?.daysOfWeek)
-          ? task.daysOfWeek
-            .map((day) => Number(day))
-            .filter((day) => Number.isInteger(day) && day >= 0 && day <= 6)
-          : [],
-      }))
-      .filter((task) => task.key && task.label)
-      .map((task) => ({
-        ...task,
-        daysOfWeek: Array.from(new Set(task.daysOfWeek)).sort((a, b) => a - b),
-      }));
+    center.checklistTemplates.cleaningTasks = normalizeScheduledChecklistTasks(cleaningTasks);
+  }
 
-    center.checklistTemplates.cleaningTasks = normalizedCleaningTasks;
+  if (Array.isArray(generalCleaningTasks)) {
+    center.checklistTemplates.generalCleaningTasks = normalizeScheduledChecklistTasks(generalCleaningTasks);
   }
 
   await center.save();

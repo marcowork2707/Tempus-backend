@@ -97,6 +97,19 @@ const centerSchema = new mongoose.Schema(
           },
         ],
       },
+      generalCleaningTasks: {
+        type: [
+          {
+            key: { type: String, required: true },
+            label: { type: String, required: true },
+            daysOfWeek: {
+              type: [Number],
+              default: [],
+            },
+          },
+        ],
+        default: [],
+      },
     },
     overtimeSettings: {
       monthlyAggregationMode: {
