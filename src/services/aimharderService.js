@@ -2564,6 +2564,28 @@ function buildActiveTariffSummary(clients) {
     .sort((a, b) => b.count - a.count);
 }
 
+function normalizeTariffFilterValue(value = '') {
+  return String(value || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function shouldExcludeActiveTariff(value = '') {
+  const normalized = normalizeTariffFilterValue(value);
+  if (!normalized) return false;
+  return normalized.includes('coach') || normalized.includes('congelacion');
+}
+
+function filterExcludedActiveClients(clients = []) {
+  return (Array.isArray(clients) ? clients : []).filter((client) => {
+    const tariff = String(client?.activeTariff || '');
+    return !shouldExcludeActiveTariff(tariff);
+  });
+}
+
 function normalizeMonthLabelForCompare(value = '') {
   return String(value || '')
     .normalize('NFD')
@@ -3146,14 +3168,21 @@ async function getActiveClientsMonthlyReport(centerId, monthStr = null) {
       }
     }
 
-    const tariffSummary = buildActiveTariffSummary(clients);
-    console.log(`[AimHarder] Clientes activos detectados: ${clients.length}`);
+    const excludedClients = clients.filter((client) => shouldExcludeActiveTariff(client.activeTariff));
+    const filteredClients = filterExcludedActiveClients(clients);
+    const tariffSummary = buildActiveTariffSummary(filteredClients);
+    if (excludedClients.length > 0) {
+      console.log(
+        `[AimHarder] Excluidos ${excludedClients.length} clientes por tarifa con "coach" o "congelacion"`
+      );
+    }
+    console.log(`[AimHarder] Clientes activos detectados (tras exclusiones): ${filteredClients.length}`);
 
     return {
       month: range.month,
       startDate: range.startIso,
       endDate: range.endIso,
-      clients,
+      clients: filteredClients,
       tariffSummary,
     };
   } finally {
@@ -3317,13 +3346,14 @@ async function getClientMonthlyReport(centerId, monthStr = null, options = {}) {
 
   const stored = await getStoredClientMonthlySnapshot(centerId, range.month);
   if (stored && !refresh) {
+    const storedClients = filterExcludedActiveClients(stored.activeClients || []);
     return {
       month: stored.month,
       startDate: stored.startDate,
       endDate: stored.endDate,
-      count: stored.activeClientsCount || 0,
-      clients: stored.activeClients || [],
-      tariffSummary: stored.activeTariffSummary || [],
+      count: storedClients.length,
+      clients: storedClients,
+      tariffSummary: buildActiveTariffSummary(storedClients),
       newSignups: stored.newSignupsManual !== null ? stored.newSignupsManual : (stored.newSignups || 0),
       monthlyCancellations: stored.monthlyCancellationsManual !== null ? stored.monthlyCancellationsManual : (stored.monthlyCancellations || 0),
       newSignupsManual: stored.newSignupsManual,
