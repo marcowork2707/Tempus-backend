@@ -18,6 +18,7 @@ const {
   getActiveClientsReport,
   getTariffCancellationRenewals,
   setClientMonthlyMetricsManual,
+  resetActiveClientsReport,
   getOccupancyReport,
 } = require('../controllers/aimharderController');
 const { isAuthenticatedUser, authorizeRoles } = require('../middleware/auth');
@@ -45,6 +46,7 @@ router.put('/class-reports/handoff', isAuthenticatedUser, setClassReportHandoff)
 router.get('/tpv-redsys-payments', isAuthenticatedUser, getTpvRedsysPayments);
 router.get('/pending-payments-no-tpv', isAuthenticatedUser, getPendingPaymentsNoTpv);
 router.get('/active-clients-report', isAuthenticatedUser, getActiveClientsReport);
+router.delete('/active-clients-report', isAuthenticatedUser, resetActiveClientsReport);
 router.get('/tariff-cancellation-renewals', isAuthenticatedUser, getTariffCancellationRenewals);
 router.put('/monthly-metrics-manual', isAuthenticatedUser, setClientMonthlyMetricsManual);
 router.get('/occupancy-report', isAuthenticatedUser, authorizeRoles('admin'), getOccupancyReport);

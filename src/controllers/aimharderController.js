@@ -18,6 +18,7 @@ const {
   getPendingPaymentsWithoutTPVError,
   getClientMonthlyReport,
   setClientMonthlyMetricsManual,
+  resetClientMonthlySnapshot,
   getTariffCancellationRenewals,
 } = require('../services/aimharderService');
 const UserCenterRole = require('../models/UserCenterRole');
@@ -679,6 +680,41 @@ exports.setClientMonthlyMetricsManual = async (req, res) => {
     res.status(err.message.includes('No se encontró') ? 404 : 500).json({
       success: false,
       message: err.message || 'Error al guardar métricas manuales.',
+      detail: process.env.NODE_ENV === 'development' ? err.message : undefined,
+    });
+  }
+};
+
+/**
+ * DELETE /api/aimharder/active-clients-report?centerId=xxx&month=YYYY-MM
+ * Borra el snapshot mensual de clientes activos para permitir recalcularlo desde cero.
+ */
+exports.resetActiveClientsReport = async (req, res) => {
+  try {
+    const { centerId, month } = req.query;
+
+    if (!centerId) {
+      return res.status(400).json({ success: false, message: 'centerId es obligatorio' });
+    }
+    if (!month || !/^\d{4}-\d{2}$/.test(String(month))) {
+      return res.status(400).json({ success: false, message: 'month es obligatorio (formato: YYYY-MM)' });
+    }
+
+    const result = await resetClientMonthlySnapshot(centerId, String(month));
+
+    return res.json({
+      success: true,
+      month: result.month,
+      deleted: result.deleted,
+      message: result.deleted
+        ? 'Snapshot mensual eliminado. Ya puedes recalcular clientes activos.'
+        : 'No había snapshot mensual para borrar. Ya puedes recalcular clientes activos.',
+    });
+  } catch (err) {
+    console.error('[AimHarder Controller] Error reseteando snapshot mensual de clientes:', err.message);
+    return res.status(500).json({
+      success: false,
+      message: 'Error al resetear el snapshot mensual de clientes activos.',
       detail: process.env.NODE_ENV === 'development' ? err.message : undefined,
     });
   }

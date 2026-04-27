@@ -3258,6 +3258,18 @@ async function setClientMonthlyMetricsManual(centerId, month, newSignupsManual, 
   return result;
 }
 
+async function resetClientMonthlySnapshot(centerId, month) {
+  const deleted = await AimHarderClientMonthlySnapshot.findOneAndDelete({
+    center: centerId,
+    month,
+  }).lean();
+
+  return {
+    deleted: !!deleted,
+    month,
+  };
+}
+
 async function getClientMonthlyReport(centerId, monthStr = null, options = {}) {
   const { refresh = false, cachedOnly = false } = options;
   const range = getMonthlyDateRange(monthStr);
@@ -3693,6 +3705,7 @@ module.exports = {
   getActiveClientsMonthlyReport,
   getClientMonthlyReport,
   setClientMonthlyMetricsManual,
+  resetClientMonthlySnapshot,
   getTariffCancellationRenewals,
   getYesterday,
   toDateString,
