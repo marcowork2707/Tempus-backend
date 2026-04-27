@@ -12,12 +12,16 @@ function buildDayRange(dateInput) {
   return { start, end };
 }
 
+function isSharedChecklistType(type) {
+  return type === 'daily' || type === 'general_cleaning';
+}
+
 // Worker creates a checklist (for daily tasks) or admin generates
 exports.createChecklist = catchAsyncErrors(async (req, res, next) => {
   const { centerId, type, date, items, assignedUserId } = req.body;
   const checklistType = type || 'daily';
 
-  if (!centerId || !date || !items || items.length === 0 || (checklistType !== 'daily' && !assignedUserId)) {
+  if (!centerId || !date || !items || items.length === 0 || (!isSharedChecklistType(checklistType) && !assignedUserId)) {
     return next(new ErrorHandler('centerId, date and at least one item are required', 400));
   }
 
@@ -33,7 +37,7 @@ exports.createChecklist = catchAsyncErrors(async (req, res, next) => {
   const { start, end } = buildDayRange(baseDate);
 
   const uniquenessFilter =
-    checklistType === 'daily'
+    isSharedChecklistType(checklistType)
       ? { center: centerId, type: checklistType, date: { $gte: start, $lt: end } }
       : { center: centerId, type: checklistType, assignedUser: assignedUserId, date: { $gte: start, $lt: end } };
 
@@ -43,7 +47,7 @@ exports.createChecklist = catchAsyncErrors(async (req, res, next) => {
     .populate('items.doneBy', 'name email');
 
   if (existingChecklist) {
-    if (checklistType === 'daily' && processedItems.length > 0) {
+    if (isSharedChecklistType(checklistType) && processedItems.length > 0) {
       const existingLabels = new Set(existingChecklist.items.map((item) => item.label));
       const missingItems = processedItems.filter((item) => !existingLabels.has(item.label));
 
@@ -59,7 +63,7 @@ exports.createChecklist = catchAsyncErrors(async (req, res, next) => {
   const checklist = await Checklist.create({
     center: centerId,
     date: baseDate,
-    assignedUser: checklistType === 'daily' ? undefined : assignedUserId,
+    assignedUser: isSharedChecklistType(checklistType) ? undefined : assignedUserId,
     type: checklistType,
     items: processedItems,
     status: 'pending',
@@ -102,7 +106,7 @@ exports.getChecklists = catchAsyncErrors(async (req, res, next) => {
         return next(new ErrorHandler('Unauthorized', 403));
       }
 
-      filter.$or = [{ assignedUser: user.id }, { type: 'daily' }];
+      filter.$or = [{ assignedUser: user.id }, { type: 'daily' }, { type: 'general_cleaning' }];
     } else {
       filter.assignedUser = user.id;
     }
