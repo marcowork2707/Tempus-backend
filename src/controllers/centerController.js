@@ -1363,10 +1363,20 @@ exports.createWaitlistTariffType = catchAsyncErrors(async (req, res, next) => {
     return next(new ErrorHandler('Tariff type already exists for this center', 400));
   }
 
+  let parsedPrice = null;
+  if (req.body?.price !== undefined && req.body?.price !== null && req.body?.price !== '') {
+    parsedPrice = Number(req.body.price);
+    if (!Number.isFinite(parsedPrice) || parsedPrice < 0) {
+      return next(new ErrorHandler('price must be a valid number >= 0', 400));
+    }
+    parsedPrice = Number(parsedPrice.toFixed(2));
+  }
+
   const tariffType = await WaitlistTariffType.create({
     center: req.params.id,
     name: rawName,
     normalizedName,
+    price: parsedPrice,
     active: true,
   });
 
@@ -1398,7 +1408,7 @@ exports.getCenterWaitlistEntries = catchAsyncErrors(async (req, res, next) => {
   if (!center) return next(new ErrorHandler('Center not found', 404));
 
   const entries = await CenterWaitlistEntry.find({ center: req.params.id })
-    .populate('tariffType', 'name active')
+    .populate('tariffType', 'name price active')
     .sort({ signupDate: -1, createdAt: -1 });
 
   res.status(200).json({ success: true, entries });
@@ -1446,7 +1456,7 @@ exports.createCenterWaitlistEntry = catchAsyncErrors(async (req, res, next) => {
     updatedBy: req.user?.id || null,
   });
 
-  const populated = await CenterWaitlistEntry.findById(entry._id).populate('tariffType', 'name active');
+  const populated = await CenterWaitlistEntry.findById(entry._id).populate('tariffType', 'name price active');
   res.status(201).json({ success: true, entry: populated });
 });
 
@@ -1509,7 +1519,7 @@ exports.updateCenterWaitlistEntry = catchAsyncErrors(async (req, res, next) => {
   entry.updatedBy = req.user?.id || null;
   await entry.save();
 
-  const populated = await CenterWaitlistEntry.findById(entry._id).populate('tariffType', 'name active');
+  const populated = await CenterWaitlistEntry.findById(entry._id).populate('tariffType', 'name price active');
   res.status(200).json({ success: true, entry: populated });
 });
 

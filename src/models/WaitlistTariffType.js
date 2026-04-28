@@ -18,6 +18,11 @@ const waitlistTariffTypeSchema = new mongoose.Schema(
       required: true,
       trim: true,
     },
+    price: {
+      type: Number,
+      default: null,
+      min: 0,
+    },
     active: {
       type: Boolean,
       default: true,
