@@ -25,6 +25,7 @@ const ErrorHandler = require('../utils/errorHandler');
 const catchAsyncErrors = require('../utils/catchAsyncErrors');
 const { buildPlanningMessage } = require('../services/weeklyPlanningService');
 const { getStoredOccupancy } = require('../services/aimharderService');
+const { generateReportsAssistantReply } = require('../services/openaiReportsAssistantService');
 
 const normalizeWaitlistTariffName = (value = '') => String(value)
   .normalize('NFD')
@@ -1452,6 +1453,19 @@ function avg(values = []) {
   return values.reduce((acc, value) => acc + Number(value || 0), 0) / values.length;
 }
 
+function sanitizeReportsAssistantContext(context) {
+  if (!context || typeof context !== 'object' || Array.isArray(context)) {
+    return {};
+  }
+
+  const json = JSON.stringify(context);
+  if (json.length > 25000) {
+    throw new ErrorHandler('reports context is too large', 400);
+  }
+
+  return context;
+}
+
 function buildWaitlistAssistantReply({
   month,
   message,
@@ -1715,6 +1729,48 @@ exports.getCenterWaitlistAssistant = catchAsyncErrors(async (req, res, next) => 
       worstDay,
     },
   });
+});
+
+exports.getCenterReportsAssistant = catchAsyncErrors(async (req, res, next) => {
+  const center = await Center.findById(req.params.id).select('name');
+  if (!center) return next(new ErrorHandler('Center not found', 404));
+
+  const month = typeof req.body?.month === 'string' && req.body.month.trim()
+    ? req.body.month.trim()
+    : getCurrentMonthKey();
+  const message = typeof req.body?.message === 'string' ? req.body.message.trim() : '';
+
+  if (!message) {
+    return next(new ErrorHandler('message is required', 400));
+  }
+
+  if (!isValidMonthKey(month)) {
+    return next(new ErrorHandler('month must be in format YYYY-MM', 400));
+  }
+
+  const reportContext = sanitizeReportsAssistantContext(req.body?.context);
+
+  try {
+    const { reply, model } = await generateReportsAssistantReply({
+      centerName: center.name,
+      month,
+      question: message,
+      reportContext,
+    });
+
+    res.status(200).json({
+      success: true,
+      month,
+      model,
+      reply,
+      groundedAt: new Date().toISOString(),
+    });
+  } catch (error) {
+    if (error?.code === 'OPENAI_API_KEY_MISSING') {
+      return next(new ErrorHandler('OPENAI_API_KEY is not configured on the backend', 503));
+    }
+    return next(error);
+  }
 });
 
 exports.createCenterWaitlistEntry = catchAsyncErrors(async (req, res, next) => {
