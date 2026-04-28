@@ -13,6 +13,13 @@ const {
   addUserToCenter,
   updateUserCenterRole,
   removeUserFromCenter,
+  getWaitlistTariffTypes,
+  createWaitlistTariffType,
+  deleteWaitlistTariffType,
+  getCenterWaitlistEntries,
+  createCenterWaitlistEntry,
+  updateCenterWaitlistEntry,
+  deleteCenterWaitlistEntry,
   getCenterExtraIncentives,
   createCenterExtraIncentive,
   deleteCenterExtraIncentive,
@@ -105,6 +112,13 @@ router.get('/:id/users', authorizeRoles('admin'), getCenterUsers);
 router.post('/:id/users', authorizeRoles('admin'), addUserToCenter);
 router.put('/:id/users/:userId', authorizeRoles('admin'), updateUserCenterRole);
 router.delete('/:id/users/:userId', authorizeRoles('admin'), removeUserFromCenter);
+router.get('/:id/waitlist/tariff-types', authorizeRoles('admin', 'encargado'), getWaitlistTariffTypes);
+router.post('/:id/waitlist/tariff-types', authorizeRoles('admin', 'encargado'), createWaitlistTariffType);
+router.delete('/:id/waitlist/tariff-types/:typeId', authorizeRoles('admin', 'encargado'), deleteWaitlistTariffType);
+router.get('/:id/waitlist/entries', authorizeRoles('admin', 'encargado'), getCenterWaitlistEntries);
+router.post('/:id/waitlist/entries', authorizeRoles('admin', 'encargado'), createCenterWaitlistEntry);
+router.put('/:id/waitlist/entries/:entryId', authorizeRoles('admin', 'encargado'), updateCenterWaitlistEntry);
+router.delete('/:id/waitlist/entries/:entryId', authorizeRoles('admin', 'encargado'), deleteCenterWaitlistEntry);
 router.get('/:id/extra-incentives', authorizeRoles('admin'), getCenterExtraIncentives);
 router.post('/:id/extra-incentives', authorizeRoles('admin'), createCenterExtraIncentive);
 router.delete('/:id/extra-incentives/:incentiveId', authorizeRoles('admin'), deleteCenterExtraIncentive);

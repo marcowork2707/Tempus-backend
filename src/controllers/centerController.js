@@ -17,11 +17,19 @@ const WeeklyPlanning = require('../models/WeeklyPlanning');
 const CenterDashboardReview = require('../models/CenterDashboardReview');
 const AimHarderClientMonthlySnapshot = require('../models/AimHarderClientMonthlySnapshot');
 const AttendanceAbsenceSnapshot = require('../models/AttendanceAbsenceSnapshot');
+const CenterWaitlistEntry = require('../models/CenterWaitlistEntry');
+const WaitlistTariffType = require('../models/WaitlistTariffType');
 const TimeEntry = require('../models/TimeEntry');
 const Checklist = require('../models/Checklist');
 const ErrorHandler = require('../utils/errorHandler');
 const catchAsyncErrors = require('../utils/catchAsyncErrors');
 const { buildPlanningMessage } = require('../services/weeklyPlanningService');
+
+const normalizeWaitlistTariffName = (value = '') => String(value)
+  .normalize('NFD')
+  .replace(/[\u0300-\u036f]/g, '')
+  .trim()
+  .toLowerCase();
 
 const hasResolvedUser = (record) => Boolean(record?.user && record.user._id);
 const OVERTIME_AGGREGATION_MODES = ['net', 'positive_only'];
@@ -1325,6 +1333,193 @@ exports.removeUserFromCenter = catchAsyncErrors(async (req, res, next) => {
   if (!deleted) return next(new ErrorHandler('Assignment not found', 404));
 
   res.status(200).json({ success: true, message: 'User removed from center' });
+});
+
+// ─── Waiting list (Clientes) ────────────────────────────────────────────────
+
+exports.getWaitlistTariffTypes = catchAsyncErrors(async (req, res, next) => {
+  const center = await Center.findById(req.params.id).select('_id');
+  if (!center) return next(new ErrorHandler('Center not found', 404));
+
+  const tariffTypes = await WaitlistTariffType.find({ center: req.params.id })
+    .sort({ name: 1 })
+    .lean();
+
+  res.status(200).json({ success: true, tariffTypes });
+});
+
+exports.createWaitlistTariffType = catchAsyncErrors(async (req, res, next) => {
+  const center = await Center.findById(req.params.id).select('_id');
+  if (!center) return next(new ErrorHandler('Center not found', 404));
+
+  const rawName = typeof req.body?.name === 'string' ? req.body.name.trim() : '';
+  if (!rawName) {
+    return next(new ErrorHandler('name is required', 400));
+  }
+
+  const normalizedName = normalizeWaitlistTariffName(rawName);
+  const existing = await WaitlistTariffType.findOne({ center: req.params.id, normalizedName });
+  if (existing) {
+    return next(new ErrorHandler('Tariff type already exists for this center', 400));
+  }
+
+  const tariffType = await WaitlistTariffType.create({
+    center: req.params.id,
+    name: rawName,
+    normalizedName,
+    active: true,
+  });
+
+  res.status(201).json({ success: true, tariffType });
+});
+
+exports.deleteWaitlistTariffType = catchAsyncErrors(async (req, res, next) => {
+  const tariffType = await WaitlistTariffType.findOne({ _id: req.params.typeId, center: req.params.id });
+  if (!tariffType) {
+    return next(new ErrorHandler('Tariff type not found', 404));
+  }
+
+  await WaitlistTariffType.findByIdAndDelete(tariffType._id);
+  await CenterWaitlistEntry.updateMany(
+    { center: req.params.id, tariffType: tariffType._id },
+    {
+      $set: {
+        tariffType: null,
+        tariffTypeLabel: '',
+      },
+    }
+  );
+
+  res.status(200).json({ success: true, message: 'Tariff type deleted' });
+});
+
+exports.getCenterWaitlistEntries = catchAsyncErrors(async (req, res, next) => {
+  const center = await Center.findById(req.params.id).select('_id');
+  if (!center) return next(new ErrorHandler('Center not found', 404));
+
+  const entries = await CenterWaitlistEntry.find({ center: req.params.id })
+    .populate('tariffType', 'name active')
+    .sort({ signupDate: -1, createdAt: -1 });
+
+  res.status(200).json({ success: true, entries });
+});
+
+exports.createCenterWaitlistEntry = catchAsyncErrors(async (req, res, next) => {
+  const center = await Center.findById(req.params.id).select('_id');
+  if (!center) return next(new ErrorHandler('Center not found', 404));
+
+  const firstName = typeof req.body?.firstName === 'string' ? req.body.firstName.trim() : '';
+  const lastName = typeof req.body?.lastName === 'string' ? req.body.lastName.trim() : '';
+  const signupDate = typeof req.body?.signupDate === 'string' ? req.body.signupDate.trim() : '';
+
+  if (!firstName || !lastName || !signupDate) {
+    return next(new ErrorHandler('firstName, lastName and signupDate are required', 400));
+  }
+
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(signupDate)) {
+    return next(new ErrorHandler('signupDate must be in format YYYY-MM-DD', 400));
+  }
+
+  let tariffTypeId = null;
+  let tariffTypeLabel = '';
+  if (req.body?.tariffTypeId) {
+    const tariffType = await WaitlistTariffType.findOne({ _id: req.body.tariffTypeId, center: req.params.id });
+    if (!tariffType) {
+      return next(new ErrorHandler('tariffTypeId does not exist for this center', 400));
+    }
+    tariffTypeId = tariffType._id;
+    tariffTypeLabel = tariffType.name;
+  }
+
+  const entry = await CenterWaitlistEntry.create({
+    center: req.params.id,
+    firstName,
+    lastName,
+    phone: typeof req.body?.phone === 'string' ? req.body.phone.trim() : '',
+    email: typeof req.body?.email === 'string' ? req.body.email.trim().toLowerCase() : '',
+    tariffType: tariffTypeId,
+    tariffTypeLabel,
+    paidWaitlist: Boolean(req.body?.paidWaitlist),
+    signupDate,
+    notes: typeof req.body?.notes === 'string' ? req.body.notes.trim() : '',
+    createdBy: req.user?.id || null,
+    updatedBy: req.user?.id || null,
+  });
+
+  const populated = await CenterWaitlistEntry.findById(entry._id).populate('tariffType', 'name active');
+  res.status(201).json({ success: true, entry: populated });
+});
+
+exports.updateCenterWaitlistEntry = catchAsyncErrors(async (req, res, next) => {
+  const entry = await CenterWaitlistEntry.findOne({ _id: req.params.entryId, center: req.params.id });
+  if (!entry) {
+    return next(new ErrorHandler('Waitlist entry not found', 404));
+  }
+
+  if (req.body?.firstName !== undefined) {
+    const value = String(req.body.firstName || '').trim();
+    if (!value) return next(new ErrorHandler('firstName cannot be empty', 400));
+    entry.firstName = value;
+  }
+
+  if (req.body?.lastName !== undefined) {
+    const value = String(req.body.lastName || '').trim();
+    if (!value) return next(new ErrorHandler('lastName cannot be empty', 400));
+    entry.lastName = value;
+  }
+
+  if (req.body?.phone !== undefined) {
+    entry.phone = String(req.body.phone || '').trim();
+  }
+
+  if (req.body?.email !== undefined) {
+    entry.email = String(req.body.email || '').trim().toLowerCase();
+  }
+
+  if (req.body?.signupDate !== undefined) {
+    const value = String(req.body.signupDate || '').trim();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+      return next(new ErrorHandler('signupDate must be in format YYYY-MM-DD', 400));
+    }
+    entry.signupDate = value;
+  }
+
+  if (req.body?.notes !== undefined) {
+    entry.notes = String(req.body.notes || '').trim();
+  }
+
+  if (req.body?.paidWaitlist !== undefined) {
+    entry.paidWaitlist = Boolean(req.body.paidWaitlist);
+  }
+
+  if (req.body?.tariffTypeId !== undefined) {
+    if (!req.body.tariffTypeId) {
+      entry.tariffType = null;
+      entry.tariffTypeLabel = '';
+    } else {
+      const tariffType = await WaitlistTariffType.findOne({ _id: req.body.tariffTypeId, center: req.params.id });
+      if (!tariffType) {
+        return next(new ErrorHandler('tariffTypeId does not exist for this center', 400));
+      }
+      entry.tariffType = tariffType._id;
+      entry.tariffTypeLabel = tariffType.name;
+    }
+  }
+
+  entry.updatedBy = req.user?.id || null;
+  await entry.save();
+
+  const populated = await CenterWaitlistEntry.findById(entry._id).populate('tariffType', 'name active');
+  res.status(200).json({ success: true, entry: populated });
+});
+
+exports.deleteCenterWaitlistEntry = catchAsyncErrors(async (req, res, next) => {
+  const deleted = await CenterWaitlistEntry.findOneAndDelete({ _id: req.params.entryId, center: req.params.id });
+  if (!deleted) {
+    return next(new ErrorHandler('Waitlist entry not found', 404));
+  }
+
+  res.status(200).json({ success: true, message: 'Waitlist entry deleted' });
 });
 
 exports.getCenterExtraIncentives = catchAsyncErrors(async (req, res, next) => {
