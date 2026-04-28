@@ -3,7 +3,7 @@ const OpenAI = require('openai');
 let cachedClient = null;
 
 function getOpenAIClient() {
-  const apiKey = String(process.env.OPENAI_API_KEY || '').trim();
+  const apiKey = String(process.env.OPENAI_API_KEY || process.env.OPENAI_KEY || '').trim();
   if (!apiKey) {
     const error = new Error('OPENAI_API_KEY is not configured');
     error.code = 'OPENAI_API_KEY_MISSING';

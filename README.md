@@ -83,7 +83,14 @@ JWT_SECRET=your_super_secret_jwt_key_change_in_production
 JWT_EXPIRY=7d
 API_BASE_URL=http://localhost:5000
 FRONTEND_URL=http://localhost:3000
+OPENAI_API_KEY=sk-...
+OPENAI_MODEL=gpt-4.1-mini
+# Opcional: si quieres separar este asistente de otros usos futuros
+OPENAI_ASSISTANT_MODEL=gpt-4.1-mini
 ```
+
+Para el asistente global de informes, el backend necesita al menos `OPENAI_API_KEY`.
+También acepta `OPENAI_KEY` como alias si ya tienes ese nombre en tu entorno.
 
 ## Models
 
