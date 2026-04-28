@@ -24,6 +24,7 @@ const Checklist = require('../models/Checklist');
 const ErrorHandler = require('../utils/errorHandler');
 const catchAsyncErrors = require('../utils/catchAsyncErrors');
 const { buildPlanningMessage } = require('../services/weeklyPlanningService');
+const { getStoredOccupancy } = require('../services/aimharderService');
 
 const normalizeWaitlistTariffName = (value = '') => String(value)
   .normalize('NFD')
@@ -1420,6 +1421,111 @@ function monthFromDateKey(dateValue) {
   return String(dateValue || '').slice(0, 7);
 }
 
+function getMonthDateRange(monthKey) {
+  const [yearRaw, monthRaw] = String(monthKey || '').split('-');
+  const year = Number(yearRaw);
+  const month = Number(monthRaw);
+
+  if (!year || !month) {
+    return null;
+  }
+
+  const monthIndex = month - 1;
+  const start = new Date(year, monthIndex, 1);
+  const end = new Date(year, monthIndex + 1, 0);
+
+  const toDateKey = (dateValue) => {
+    const y = dateValue.getFullYear();
+    const m = String(dateValue.getMonth() + 1).padStart(2, '0');
+    const d = String(dateValue.getDate()).padStart(2, '0');
+    return `${y}-${m}-${d}`;
+  };
+
+  return {
+    startDate: toDateKey(start),
+    endDate: toDateKey(end),
+  };
+}
+
+function avg(values = []) {
+  if (!Array.isArray(values) || values.length === 0) return 0;
+  return values.reduce((acc, value) => acc + Number(value || 0), 0) / values.length;
+}
+
+function buildWaitlistAssistantReply({
+  month,
+  message,
+  waitingCount,
+  startedCount,
+  avgOccupancy,
+  classesWithWaitlist,
+  totalWaitlistInClasses,
+  lowOccupancySlots,
+  activeClients,
+  peakDay,
+  worstDay,
+}) {
+  const cleanMessage = String(message || '').trim();
+  const asksForWaitlist = /(lista|espera|plaza|hueco|llamar|contactar|whatsapp|mensaje)/i.test(cleanMessage);
+  const shouldPushWaitlist = waitingCount > 0 && (avgOccupancy < 85 || lowOccupancySlots.length > 0);
+
+  let occupancySummary = 'ocupacion media';
+  if (avgOccupancy >= 88) occupancySummary = 'ocupacion muy alta';
+  else if (avgOccupancy >= 78) occupancySummary = 'ocupacion sana';
+  else if (avgOccupancy < 65) occupancySummary = 'ocupacion baja';
+
+  const intro = asksForWaitlist
+    ? `Para ${month}, con los datos actuales te recomiendo ${shouldPushWaitlist ? 'activar contactos de lista de espera' : 'hacer contactos selectivos'}.`
+    : `Analisis del centro para ${month}: ${occupancySummary}.`;
+
+  const lowSlotsText = lowOccupancySlots.length
+    ? lowOccupancySlots
+      .map((slot) => `${slot.className || 'Clase'} ${slot.classTime || ''}`.trim())
+      .slice(0, 3)
+      .join(', ')
+    : '';
+
+  const details = [
+    `Ocupacion media: ${Math.round(avgOccupancy)}%.`,
+    `Personas esperando este mes: ${waitingCount}.`,
+    `Entradas que ya empezaron este mes: ${startedCount}.`,
+    `Clientes activos del mes: ${activeClients}.`,
+    `Clases con lista de espera en ocupacion: ${classesWithWaitlist} (total lista en clases: ${totalWaitlistInClasses}).`,
+  ];
+
+  if (peakDay) {
+    details.push(`Mejor dia: ${peakDay.date} (${peakDay.avgOccupancy}%).`);
+  }
+  if (worstDay) {
+    details.push(`Dia mas flojo: ${worstDay.date} (${worstDay.avgOccupancy}%).`);
+  }
+
+  const recommendations = [];
+
+  if (shouldPushWaitlist) {
+    recommendations.push('Contacta primero a las personas con mas antiguedad y fecha de inicio vacia.');
+  } else {
+    recommendations.push('Mantener contacto suave: confirma interes y fecha estimada sin forzar altas.');
+  }
+
+  if (lowSlotsText) {
+    recommendations.push(`Prioriza ofrecer plaza en franjas con hueco: ${lowSlotsText}.`);
+  }
+
+  if (avgOccupancy >= 90 && waitingCount > 0) {
+    recommendations.push('Revisa ampliacion puntual de capacidad o clase extra en horarios pico.');
+  }
+
+  if (!recommendations.length) {
+    recommendations.push('Sigue monitorizando ocupacion semanal y ajusta el orden de contacto de la lista.');
+  }
+
+  return {
+    reply: `${intro}\n\n${details.join('\n')}`,
+    recommendations,
+  };
+}
+
 async function rollOverWaitingEntriesToCurrentMonth(centerId) {
   const currentMonth = getCurrentMonthKey();
   const result = await CenterWaitlistEntry.updateMany(
@@ -1493,6 +1599,122 @@ exports.getCenterWaitlistHistory = catchAsyncErrors(async (req, res, next) => {
     .sort({ startedMonth: -1, startDate: -1, createdAt: -1 });
 
   res.status(200).json({ success: true, month: requestedMonth || null, entries });
+});
+
+exports.getCenterWaitlistAssistant = catchAsyncErrors(async (req, res, next) => {
+  const center = await Center.findById(req.params.id).select('_id');
+  if (!center) return next(new ErrorHandler('Center not found', 404));
+
+  const month = typeof req.body?.month === 'string' && req.body.month.trim()
+    ? req.body.month.trim()
+    : getCurrentMonthKey();
+  const message = typeof req.body?.message === 'string' ? req.body.message.trim() : '';
+
+  if (!isValidMonthKey(month)) {
+    return next(new ErrorHandler('month must be in format YYYY-MM', 400));
+  }
+
+  const dateRange = getMonthDateRange(month);
+  if (!dateRange) {
+    return next(new ErrorHandler('Invalid month', 400));
+  }
+
+  const [waitingCount, startedCount, monthlySnapshot, snapshots] = await Promise.all([
+    CenterWaitlistEntry.countDocuments({ center: req.params.id, status: 'waiting', queueMonth: month }),
+    CenterWaitlistEntry.countDocuments({ center: req.params.id, status: 'started', startedMonth: month }),
+    AimHarderClientMonthlySnapshot.findOne({ center: req.params.id, month })
+      .select('activeClientsCount')
+      .lean(),
+    getStoredOccupancy(dateRange.startDate, dateRange.endDate, req.params.id),
+  ]);
+
+  const normalizedSnapshots = Array.isArray(snapshots) ? snapshots : [];
+
+  const allClasses = normalizedSnapshots.flatMap((snapshot) => (
+    Array.isArray(snapshot?.classes)
+      ? snapshot.classes.filter((entry) => Number(entry?.capacity || 0) > 0)
+      : []
+  ));
+
+  const avgOccupancy = Math.round(avg(allClasses.map((entry) => Number(entry?.occupancyRate || 0))));
+  const classesWithWaitlist = allClasses.filter((entry) => Number(entry?.waitlistCount || 0) > 0).length;
+  const totalWaitlistInClasses = allClasses.reduce((acc, entry) => acc + Number(entry?.waitlistCount || 0), 0);
+
+  const lowSlotsMap = new Map();
+  for (const entry of allClasses) {
+    const className = String(entry?.className || '').trim();
+    const classTime = String(entry?.classTime || '').trim();
+    const key = `${className}::${classTime}`;
+    if (!lowSlotsMap.has(key)) {
+      lowSlotsMap.set(key, {
+        className,
+        classTime,
+        occupancySamples: [],
+      });
+    }
+    lowSlotsMap.get(key).occupancySamples.push(Number(entry?.occupancyRate || 0));
+  }
+
+  const lowOccupancySlots = [...lowSlotsMap.values()]
+    .map((slot) => ({
+      className: slot.className,
+      classTime: slot.classTime,
+      avgOccupancy: Math.round(avg(slot.occupancySamples)),
+    }))
+    .filter((slot) => slot.avgOccupancy <= 75)
+    .sort((a, b) => a.avgOccupancy - b.avgOccupancy)
+    .slice(0, 3);
+
+  const dailyStats = normalizedSnapshots
+    .map((snapshot) => {
+      const classes = Array.isArray(snapshot?.classes)
+        ? snapshot.classes.filter((entry) => Number(entry?.capacity || 0) > 0)
+        : [];
+      return {
+        date: snapshot?.date,
+        avgOccupancy: Math.round(avg(classes.map((entry) => Number(entry?.occupancyRate || 0)))),
+      };
+    })
+    .filter((entry) => Boolean(entry.date));
+
+  const peakDay = dailyStats.length
+    ? dailyStats.reduce((best, current) => (best.avgOccupancy >= current.avgOccupancy ? best : current))
+    : null;
+  const worstDay = dailyStats.length
+    ? dailyStats.reduce((best, current) => (best.avgOccupancy <= current.avgOccupancy ? best : current))
+    : null;
+
+  const { reply, recommendations } = buildWaitlistAssistantReply({
+    month,
+    message,
+    waitingCount,
+    startedCount,
+    avgOccupancy,
+    classesWithWaitlist,
+    totalWaitlistInClasses,
+    lowOccupancySlots,
+    activeClients: Number(monthlySnapshot?.activeClientsCount || 0),
+    peakDay,
+    worstDay,
+  });
+
+  res.status(200).json({
+    success: true,
+    month,
+    reply,
+    recommendations,
+    metrics: {
+      waitingCount,
+      startedCount,
+      activeClients: Number(monthlySnapshot?.activeClientsCount || 0),
+      avgOccupancy,
+      classesWithWaitlist,
+      totalWaitlistInClasses,
+      lowOccupancySlots,
+      peakDay,
+      worstDay,
+    },
+  });
 });
 
 exports.createCenterWaitlistEntry = catchAsyncErrors(async (req, res, next) => {
