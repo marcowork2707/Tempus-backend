@@ -17,6 +17,7 @@ const {
   createWaitlistTariffType,
   deleteWaitlistTariffType,
   getCenterWaitlistEntries,
+  getCenterWaitlistHistory,
   createCenterWaitlistEntry,
   updateCenterWaitlistEntry,
   deleteCenterWaitlistEntry,
@@ -116,6 +117,7 @@ router.get('/:id/waitlist/tariff-types', authorizeRoles('admin', 'encargado'), g
 router.post('/:id/waitlist/tariff-types', authorizeRoles('admin', 'encargado'), createWaitlistTariffType);
 router.delete('/:id/waitlist/tariff-types/:typeId', authorizeRoles('admin', 'encargado'), deleteWaitlistTariffType);
 router.get('/:id/waitlist/entries', authorizeRoles('admin', 'encargado'), getCenterWaitlistEntries);
+router.get('/:id/waitlist/history', authorizeRoles('admin', 'encargado'), getCenterWaitlistHistory);
 router.post('/:id/waitlist/entries', authorizeRoles('admin', 'encargado'), createCenterWaitlistEntry);
 router.put('/:id/waitlist/entries/:entryId', authorizeRoles('admin', 'encargado'), updateCenterWaitlistEntry);
 router.delete('/:id/waitlist/entries/:entryId', authorizeRoles('admin', 'encargado'), deleteCenterWaitlistEntry);

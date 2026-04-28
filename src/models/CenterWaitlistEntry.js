@@ -49,6 +49,29 @@ const centerWaitlistEntrySchema = new mongoose.Schema(
       trim: true,
       index: true,
     },
+    queueMonth: {
+      type: String,
+      required: true,
+      trim: true,
+      index: true,
+    },
+    startDate: {
+      type: String,
+      default: '',
+      trim: true,
+    },
+    startedMonth: {
+      type: String,
+      default: '',
+      trim: true,
+      index: true,
+    },
+    status: {
+      type: String,
+      enum: ['waiting', 'started'],
+      default: 'waiting',
+      index: true,
+    },
     notes: {
       type: String,
       default: '',
@@ -69,5 +92,7 @@ const centerWaitlistEntrySchema = new mongoose.Schema(
 );
 
 centerWaitlistEntrySchema.index({ center: 1, signupDate: -1, createdAt: -1 });
+centerWaitlistEntrySchema.index({ center: 1, status: 1, queueMonth: 1, signupDate: -1 });
+centerWaitlistEntrySchema.index({ center: 1, status: 1, startedMonth: -1, startDate: -1, createdAt: -1 });
 
 module.exports = mongoose.model('CenterWaitlistEntry', centerWaitlistEntrySchema);

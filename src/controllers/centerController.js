@@ -1403,15 +1403,96 @@ exports.deleteWaitlistTariffType = catchAsyncErrors(async (req, res, next) => {
   res.status(200).json({ success: true, message: 'Tariff type deleted' });
 });
 
+function getCurrentMonthKey() {
+  const now = new Date();
+  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+}
+
+function isValidMonthKey(value) {
+  return /^\d{4}-(0[1-9]|1[0-2])$/.test(String(value || ''));
+}
+
+function isValidDateKey(value) {
+  return /^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/.test(String(value || ''));
+}
+
+function monthFromDateKey(dateValue) {
+  return String(dateValue || '').slice(0, 7);
+}
+
+async function rollOverWaitingEntriesToCurrentMonth(centerId) {
+  const currentMonth = getCurrentMonthKey();
+  const result = await CenterWaitlistEntry.updateMany(
+    {
+      center: centerId,
+      $and: [
+        { $or: [{ status: 'waiting' }, { status: { $exists: false } }] },
+        { $or: [{ startDate: '' }, { startDate: null }, { startDate: { $exists: false } }] },
+        { $or: [{ queueMonth: { $lt: currentMonth } }, { queueMonth: { $exists: false } }, { queueMonth: '' }, { queueMonth: null }] },
+      ],
+    },
+    {
+      $set: {
+        status: 'waiting',
+        queueMonth: currentMonth,
+      },
+    }
+  );
+
+  return Number(result.modifiedCount || 0);
+}
+
 exports.getCenterWaitlistEntries = catchAsyncErrors(async (req, res, next) => {
   const center = await Center.findById(req.params.id).select('_id');
   if (!center) return next(new ErrorHandler('Center not found', 404));
 
-  const entries = await CenterWaitlistEntry.find({ center: req.params.id })
+  const requestedMonth = typeof req.query?.month === 'string' && req.query.month.trim()
+    ? req.query.month.trim()
+    : getCurrentMonthKey();
+
+  if (!isValidMonthKey(requestedMonth)) {
+    return next(new ErrorHandler('month must be in format YYYY-MM', 400));
+  }
+
+  const rolledOverCount = await rollOverWaitingEntriesToCurrentMonth(req.params.id);
+
+  const entries = await CenterWaitlistEntry.find({
+    center: req.params.id,
+    status: 'waiting',
+    queueMonth: requestedMonth,
+  })
     .populate('tariffType', 'name price active')
     .sort({ signupDate: -1, createdAt: -1 });
 
-  res.status(200).json({ success: true, entries });
+  res.status(200).json({ success: true, month: requestedMonth, rolledOverCount, entries });
+});
+
+exports.getCenterWaitlistHistory = catchAsyncErrors(async (req, res, next) => {
+  const center = await Center.findById(req.params.id).select('_id');
+  if (!center) return next(new ErrorHandler('Center not found', 404));
+
+  const requestedMonth = typeof req.query?.month === 'string' && req.query.month.trim()
+    ? req.query.month.trim()
+    : '';
+
+  if (requestedMonth && !isValidMonthKey(requestedMonth)) {
+    return next(new ErrorHandler('month must be in format YYYY-MM', 400));
+  }
+
+  const filter = {
+    center: req.params.id,
+    status: 'started',
+  };
+
+  if (requestedMonth) {
+    filter.startedMonth = requestedMonth;
+  }
+
+  const entries = await CenterWaitlistEntry.find(filter)
+    .populate('tariffType', 'name price active')
+    .sort({ startedMonth: -1, startDate: -1, createdAt: -1 });
+
+  res.status(200).json({ success: true, month: requestedMonth || null, entries });
 });
 
 exports.createCenterWaitlistEntry = catchAsyncErrors(async (req, res, next) => {
@@ -1429,6 +1510,20 @@ exports.createCenterWaitlistEntry = catchAsyncErrors(async (req, res, next) => {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(signupDate)) {
     return next(new ErrorHandler('signupDate must be in format YYYY-MM-DD', 400));
   }
+
+  const queueMonth = typeof req.body?.queueMonth === 'string' && req.body.queueMonth.trim()
+    ? req.body.queueMonth.trim()
+    : getCurrentMonthKey();
+  if (!isValidMonthKey(queueMonth)) {
+    return next(new ErrorHandler('queueMonth must be in format YYYY-MM', 400));
+  }
+
+  const startDate = typeof req.body?.startDate === 'string' ? req.body.startDate.trim() : '';
+  if (startDate && !isValidDateKey(startDate)) {
+    return next(new ErrorHandler('startDate must be in format YYYY-MM-DD', 400));
+  }
+
+  const isStarted = Boolean(startDate);
 
   let tariffTypeId = null;
   let tariffTypeLabel = '';
@@ -1451,6 +1546,10 @@ exports.createCenterWaitlistEntry = catchAsyncErrors(async (req, res, next) => {
     tariffTypeLabel,
     paidWaitlist: Boolean(req.body?.paidWaitlist),
     signupDate,
+    queueMonth,
+    startDate,
+    startedMonth: isStarted ? monthFromDateKey(startDate) : '',
+    status: isStarted ? 'started' : 'waiting',
     notes: typeof req.body?.notes === 'string' ? req.body.notes.trim() : '',
     createdBy: req.user?.id || null,
     updatedBy: req.user?.id || null,
@@ -1488,10 +1587,37 @@ exports.updateCenterWaitlistEntry = catchAsyncErrors(async (req, res, next) => {
 
   if (req.body?.signupDate !== undefined) {
     const value = String(req.body.signupDate || '').trim();
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    if (!isValidDateKey(value)) {
       return next(new ErrorHandler('signupDate must be in format YYYY-MM-DD', 400));
     }
     entry.signupDate = value;
+  }
+
+  if (req.body?.queueMonth !== undefined) {
+    const value = String(req.body.queueMonth || '').trim();
+    if (!isValidMonthKey(value)) {
+      return next(new ErrorHandler('queueMonth must be in format YYYY-MM', 400));
+    }
+    entry.queueMonth = value;
+  }
+
+  if (req.body?.startDate !== undefined) {
+    const value = String(req.body.startDate || '').trim();
+    if (!value) {
+      entry.startDate = '';
+      entry.startedMonth = '';
+      entry.status = 'waiting';
+      if (!entry.queueMonth) {
+        entry.queueMonth = getCurrentMonthKey();
+      }
+    } else {
+      if (!isValidDateKey(value)) {
+        return next(new ErrorHandler('startDate must be in format YYYY-MM-DD', 400));
+      }
+      entry.startDate = value;
+      entry.startedMonth = monthFromDateKey(value);
+      entry.status = 'started';
+    }
   }
 
   if (req.body?.notes !== undefined) {
