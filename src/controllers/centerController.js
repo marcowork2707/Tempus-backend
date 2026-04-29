@@ -5228,3 +5228,24 @@ exports.deleteCenterTariffItem = catchAsyncErrors(async (req, res, next) => {
   await group.save();
   res.status(200).json({ success: true, group });
 });
+
+exports.deleteAllCenterIncomesByMonth = catchAsyncErrors(async (req, res, next) => {
+  const center = await Center.findById(req.params.id).select('_id');
+  if (!center) return next(new ErrorHandler('Center not found', 404));
+
+  const { month } = req.query;
+  if (!month || !/^\d{4}-\d{2}$/.test(month)) {
+    return next(new ErrorHandler('month query param required (format: YYYY-MM)', 400));
+  }
+
+  const result = await CenterExpense.deleteMany({
+    center: req.params.id,
+    month,
+    entryType: 'income'
+  });
+
+  res.status(200).json({
+    success: true,
+    deletedCount: result.deletedCount
+  });
+});

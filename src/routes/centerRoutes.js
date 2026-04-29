@@ -90,6 +90,7 @@ const {
   addCenterTariffItem,
   updateCenterTariffItem,
   deleteCenterTariffItem,
+  deleteAllCenterIncomesByMonth,
 } = require('../controllers/centerController');
 
 const { isAuthenticatedUser, authorizeRoles } = require('../middleware/auth');
@@ -153,6 +154,7 @@ router.put('/:id/recurring-expenses/:conceptId', authorizeRoles('admin'), update
 router.delete('/:id/recurring-expenses/:conceptId', authorizeRoles('admin'), deleteCenterRecurringExpenseConcept);
 router.post('/:id/expenses', authorizeRoles('admin'), createCenterExpense);
 router.post('/:id/expenses/import-income-csv', authorizeRoles('admin'), importCenterIncomeCsv);
+router.delete('/:id/expenses/income/delete-by-month', authorizeRoles('admin'), deleteAllCenterIncomesByMonth);
 router.put('/:id/expenses/:expenseId', authorizeRoles('admin'), updateCenterExpense);
 router.patch('/:id/expenses/:expenseId/toggle-checked', authorizeRoles('admin'), toggleExpenseChecked);
 router.delete('/:id/expenses/:expenseId', authorizeRoles('admin'), deleteCenterExpense);
