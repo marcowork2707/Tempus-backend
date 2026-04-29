@@ -37,6 +37,7 @@ const {
   deleteCenterPayrollEntry,
   getCenterExpensesSummary,
   createCenterExpense,
+  importCenterIncomeCsv,
   updateCenterExpense,
   deleteCenterExpense,
   getCenterRecurringExpenseConcepts,
@@ -144,6 +145,7 @@ router.post('/:id/recurring-expenses', authorizeRoles('admin'), createCenterRecu
 router.put('/:id/recurring-expenses/:conceptId', authorizeRoles('admin'), updateCenterRecurringExpenseConcept);
 router.delete('/:id/recurring-expenses/:conceptId', authorizeRoles('admin'), deleteCenterRecurringExpenseConcept);
 router.post('/:id/expenses', authorizeRoles('admin'), createCenterExpense);
+router.post('/:id/expenses/import-income-csv', authorizeRoles('admin'), importCenterIncomeCsv);
 router.put('/:id/expenses/:expenseId', authorizeRoles('admin'), updateCenterExpense);
 router.patch('/:id/expenses/:expenseId/toggle-checked', authorizeRoles('admin'), toggleExpenseChecked);
 router.delete('/:id/expenses/:expenseId', authorizeRoles('admin'), deleteCenterExpense);

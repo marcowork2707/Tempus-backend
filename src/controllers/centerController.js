@@ -2419,6 +2419,71 @@ function buildExpensesSummary({ manualExpenses, salaryExpenses }) {
   };
 }
 
+function normalizeIncomeAmount(value) {
+  if (typeof value === 'number') {
+    return Number.isFinite(value) ? value : NaN;
+  }
+
+  const raw = String(value || '').trim();
+  if (!raw) return NaN;
+  const normalized = raw
+    .replace(/"/g, '')
+    .replace(/€/g, '')
+    .replace(/\s+/g, '')
+    .replace(/\./g, '')
+    .replace(',', '.');
+  return Number(normalized);
+}
+
+function parseSpanishDateToIso(value) {
+  const text = String(value || '').trim();
+  if (!text) return null;
+
+  const directMatch = text.match(/(\d{2})\/(\d{2})\/(\d{4})/);
+  if (directMatch) {
+    const [, dd, mm, yyyy] = directMatch;
+    return `${yyyy}-${mm}-${dd}`;
+  }
+
+  if (/^\d{4}-\d{2}-\d{2}$/.test(text)) {
+    return text;
+  }
+
+  return null;
+}
+
+function inferIncomePaymentMethod(statusValue) {
+  const text = String(statusValue || '').toLowerCase();
+  return text.includes('efectivo') ? 'Efectivo' : 'Banco';
+}
+
+function inferIncomeCategory(conceptValue) {
+  const concept = String(conceptValue || '').trim();
+  const normalized = concept
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase();
+
+  const tariffMatch = normalized.match(/\b(starter|iron|silver|gold|premium|unlimited|basic)\b/i);
+  if (tariffMatch) {
+    return `Tarifa - ${String(tariffMatch[1] || '').toUpperCase()}`;
+  }
+
+  if (normalized.includes('clases/mes') || normalized.includes('tarifa')) {
+    return 'Tarifa - Otras';
+  }
+
+  if (normalized.includes('camiseta') || normalized.includes('sudadera') || normalized.includes('merch')) {
+    return 'Merchandising';
+  }
+
+  if (normalized.includes('credito extra') || normalized.includes('credito')) {
+    return 'Credito extra';
+  }
+
+  return 'Otros ingresos';
+}
+
 exports.applyRecurringIncentivesForMonth = catchAsyncErrors(async (req, res, next) => {
   const center = await Center.findById(req.params.id);
   if (!center) return next(new ErrorHandler('Center not found', 404));
@@ -2712,6 +2777,99 @@ exports.updateCenterExpense = catchAsyncErrors(async (req, res, next) => {
     .populate('recurringConcept', 'concept category expenseType active');
 
   res.status(200).json({ success: true, expense: populated });
+});
+
+exports.importCenterIncomeCsv = catchAsyncErrors(async (req, res, next) => {
+  const center = await Center.findById(req.params.id).select('_id name');
+  if (!center) return next(new ErrorHandler('Center not found', 404));
+
+  const rows = Array.isArray(req.body?.rows) ? req.body.rows : [];
+  if (!rows.length) {
+    return next(new ErrorHandler('rows array is required', 400));
+  }
+  if (rows.length > 5000) {
+    return next(new ErrorHandler('Too many rows. Maximum 5000 per import', 400));
+  }
+
+  let createdCount = 0;
+  let skippedCount = 0;
+  let invalidCount = 0;
+  const created = [];
+
+  for (const row of rows) {
+    const concept = String(row?.concept || '').trim();
+    const parsedAmount = normalizeIncomeAmount(row?.amount);
+    const isoDate = parseSpanishDateToIso(row?.date || row?.status || row?.statusRaw) || new Date().toISOString().slice(0, 10);
+
+    if (!concept || !Number.isFinite(parsedAmount) || parsedAmount < 0 || !isValidDateKey(isoDate)) {
+      invalidCount += 1;
+      continue;
+    }
+
+    const amount = Number(parsedAmount.toFixed(2));
+    const paymentMethod = inferIncomePaymentMethod(row?.status || row?.statusRaw || row?.paymentMethod);
+    const incomeCategory = inferIncomeCategory(concept);
+
+    const duplicate = await CenterExpense.findOne({
+      center: req.params.id,
+      date: isoDate,
+      concept,
+      amount,
+      entryType: 'income',
+      paymentMethod,
+    }).select('_id');
+
+    if (duplicate) {
+      skippedCount += 1;
+      continue;
+    }
+
+    const expense = await CenterExpense.create({
+      center: req.params.id,
+      date: isoDate,
+      month: monthFromDate(isoDate),
+      concept,
+      category: 'Ingreso',
+      expenseType: 'Ingreso',
+      entryType: 'income',
+      incomeCategory,
+      amount,
+      paymentMethod,
+      supplier: row?.owner ? String(row.owner).trim() : '',
+      comment: row?.memberName ? String(row.memberName).trim() : '',
+      notes: row?.sourceLine ? String(row.sourceLine).trim().slice(0, 400) : '',
+      createdBy: req.user.id,
+      updatedBy: req.user.id,
+    });
+
+    created.push(expense);
+    createdCount += 1;
+  }
+
+  const byIncomeCategoryMap = new Map();
+  for (const row of created) {
+    const category = row.incomeCategory || 'Otros ingresos';
+    const current = byIncomeCategoryMap.get(category) || { category, amount: 0, count: 0 };
+    current.amount += Number(row.amount || 0);
+    current.count += 1;
+    byIncomeCategoryMap.set(category, current);
+  }
+
+  const byIncomeCategory = Array.from(byIncomeCategoryMap.values())
+    .map((row) => ({
+      ...row,
+      amount: Number(row.amount.toFixed(2)),
+    }))
+    .sort((a, b) => b.amount - a.amount);
+
+  res.status(200).json({
+    success: true,
+    createdCount,
+    skippedCount,
+    invalidCount,
+    totalProcessed: rows.length,
+    byIncomeCategory,
+  });
 });
 
 exports.deleteCenterExpense = catchAsyncErrors(async (req, res, next) => {
