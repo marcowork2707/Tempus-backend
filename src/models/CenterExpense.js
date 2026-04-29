@@ -86,6 +86,12 @@ const centerExpenseSchema = new mongoose.Schema(
       maxlength: 80,
       default: '',
     },
+    incomeItem: {
+      type: String,
+      trim: true,
+      maxlength: 100,
+      default: '',
+    },
     checked: {
       type: Boolean,
       default: false,

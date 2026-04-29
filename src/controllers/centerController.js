@@ -13,6 +13,7 @@ const RecurringIncentiveRule = require('../models/RecurringIncentiveRule');
 const PayrollEntry = require('../models/PayrollEntry');
 const CenterExpense = require('../models/CenterExpense');
 const RecurringExpenseConcept = require('../models/RecurringExpenseConcept');
+const CenterTariffGroup = require('../models/CenterTariffGroup');
 const WeeklyPlanning = require('../models/WeeklyPlanning');
 const CenterDashboardReview = require('../models/CenterDashboardReview');
 const AimHarderClientMonthlySnapshot = require('../models/AimHarderClientMonthlySnapshot');
@@ -2391,15 +2392,29 @@ function buildExpensesSummary({ manualExpenses, salaryExpenses }) {
   const byIncomeCategoryMap = new Map();
   for (const item of incomeEntries) {
     const cat = item.incomeCategory || item.category || 'Ingreso';
-    const current = byIncomeCategoryMap.get(cat) || { category: cat, amount: 0, count: 0 };
-    current.amount += Number(item.amount || 0);
-    current.count += 1;
-    byIncomeCategoryMap.set(cat, current);
+    const existing = byIncomeCategoryMap.get(cat) || { category: cat, amount: 0, count: 0, items: new Map() };
+    existing.amount += Number(item.amount || 0);
+    existing.count += 1;
+    const itemName = item.incomeItem || null;
+    if (itemName) {
+      const itemEntry = existing.items.get(itemName) || { item: itemName, amount: 0, count: 0 };
+      itemEntry.amount += Number(item.amount || 0);
+      itemEntry.count += 1;
+      existing.items.set(itemName, itemEntry);
+    }
+    byIncomeCategoryMap.set(cat, existing);
   }
   const byIncomeCategory = Array.from(byIncomeCategoryMap.values())
     .map((row) => ({
-      ...row,
+      category: row.category,
+      amount: Number(row.amount.toFixed(2)),
+      count: row.count,
       percentage: incomeTotal > 0 ? Number(((row.amount / incomeTotal) * 100).toFixed(2)) : 0,
+      items: Array.from(row.items.values()).map((it) => ({
+        ...it,
+        amount: Number(it.amount.toFixed(2)),
+        percentage: row.amount > 0 ? Number(((it.amount / row.amount) * 100).toFixed(2)) : 0,
+      })).sort((a, b) => b.amount - a.amount),
     }))
     .sort((a, b) => b.amount - a.amount);
 
@@ -2791,6 +2806,54 @@ exports.importCenterIncomeCsv = catchAsyncErrors(async (req, res, next) => {
     return next(new ErrorHandler('Too many rows. Maximum 5000 per import', 400));
   }
 
+  // Load configured tariff groups for this center once
+  const tariffGroups = await CenterTariffGroup.find({ center: req.params.id, active: true }).lean();
+
+  // Build a flat lookup list: [{groupName, itemName, tokens}]
+  const catalogEntries = [];
+  for (const group of tariffGroups) {
+    for (const item of (group.items || [])) {
+      if (!item.active) continue;
+      const terms = [item.name, ...(item.aliases || [])].filter(Boolean);
+      const tokens = terms.map((t) =>
+        t.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]/g, ' ').trim()
+      );
+      catalogEntries.push({ groupName: group.name, itemName: item.name, tokens });
+    }
+  }
+
+  function matchConcept(conceptRaw) {
+    if (!catalogEntries.length) return { groupName: 'Otros ingresos', itemName: null };
+
+    const normalized = conceptRaw
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .toLowerCase()
+      .replace(/[^a-z0-9]/g, ' ')
+      .trim();
+
+    let bestMatch = null;
+    let bestLen = 0;
+
+    for (const entry of catalogEntries) {
+      for (const token of entry.tokens) {
+        if (!token) continue;
+        // Check if token appears as a word/substring in the concept
+        if (normalized === token || normalized.includes(token)) {
+          if (token.length > bestLen) {
+            bestLen = token.length;
+            bestMatch = entry;
+          }
+        }
+      }
+    }
+
+    if (bestMatch) return { groupName: bestMatch.groupName, itemName: bestMatch.itemName };
+
+    // Fallback to hardcoded rules when catalog is empty or nothing matched
+    return { groupName: inferIncomeCategory(conceptRaw), itemName: null };
+  }
+
   let createdCount = 0;
   let skippedCount = 0;
   let invalidCount = 0;
@@ -2808,7 +2871,7 @@ exports.importCenterIncomeCsv = catchAsyncErrors(async (req, res, next) => {
 
     const amount = Number(parsedAmount.toFixed(2));
     const paymentMethod = inferIncomePaymentMethod(row?.status || row?.statusRaw || row?.paymentMethod);
-    const incomeCategory = inferIncomeCategory(concept);
+    const { groupName: incomeCategory, itemName: incomeItem } = matchConcept(concept);
 
     const duplicate = await CenterExpense.findOne({
       center: req.params.id,
@@ -2833,6 +2896,7 @@ exports.importCenterIncomeCsv = catchAsyncErrors(async (req, res, next) => {
       expenseType: 'Ingreso',
       entryType: 'income',
       incomeCategory,
+      incomeItem: incomeItem || '',
       amount,
       paymentMethod,
       supplier: row?.owner ? String(row.owner).trim() : '',
@@ -4957,7 +5021,7 @@ exports.getBalanceRange = catchAsyncErrors(async (req, res, next) => {
     months.map(async (month) => {
       const [manualExpenses, salaryExpenses] = await Promise.all([
         CenterExpense.find({ center: req.params.id, month }).select(
-          'concept amount expenseType entryType incomeCategory category date'
+          'concept amount expenseType entryType incomeCategory incomeItem category date'
         ),
         buildSalaryExpensesForMonth({ centerId: req.params.id, month }),
       ]);
@@ -5052,4 +5116,113 @@ exports.upsertCenterKpiObjectives = catchAsyncErrors(async (req, res, next) => {
   );
 
   res.status(200).json({ success: true, year, objectives: doc.objectives });
+});
+
+// ─── Tariff Groups ────────────────────────────────────────────────────────────
+
+exports.getCenterTariffGroups = catchAsyncErrors(async (req, res, next) => {
+  const center = await Center.findById(req.params.id).select('_id');
+  if (!center) return next(new ErrorHandler('Center not found', 404));
+
+  const groups = await CenterTariffGroup.find({ center: req.params.id }).sort({ order: 1, name: 1 });
+  res.status(200).json({ success: true, groups });
+});
+
+exports.createCenterTariffGroup = catchAsyncErrors(async (req, res, next) => {
+  const center = await Center.findById(req.params.id).select('_id');
+  if (!center) return next(new ErrorHandler('Center not found', 404));
+
+  const name = String(req.body?.name || '').trim();
+  if (!name) return next(new ErrorHandler('name is required', 400));
+
+  const count = await CenterTariffGroup.countDocuments({ center: req.params.id });
+
+  const group = await CenterTariffGroup.create({
+    center: req.params.id,
+    name,
+    order: count,
+    active: true,
+    items: [],
+  });
+
+  res.status(201).json({ success: true, group });
+});
+
+exports.updateCenterTariffGroup = catchAsyncErrors(async (req, res, next) => {
+  const group = await CenterTariffGroup.findOne({ _id: req.params.groupId, center: req.params.id });
+  if (!group) return next(new ErrorHandler('Tariff group not found', 404));
+
+  if (req.body?.name !== undefined) {
+    const name = String(req.body.name).trim();
+    if (!name) return next(new ErrorHandler('name cannot be empty', 400));
+    group.name = name;
+  }
+  if (req.body?.order !== undefined) group.order = Number(req.body.order);
+  if (req.body?.active !== undefined) group.active = Boolean(req.body.active);
+
+  await group.save();
+  res.status(200).json({ success: true, group });
+});
+
+exports.deleteCenterTariffGroup = catchAsyncErrors(async (req, res, next) => {
+  const deleted = await CenterTariffGroup.findOneAndDelete({ _id: req.params.groupId, center: req.params.id });
+  if (!deleted) return next(new ErrorHandler('Tariff group not found', 404));
+  res.status(200).json({ success: true, message: 'Group deleted' });
+});
+
+exports.addCenterTariffItem = catchAsyncErrors(async (req, res, next) => {
+  const group = await CenterTariffGroup.findOne({ _id: req.params.groupId, center: req.params.id });
+  if (!group) return next(new ErrorHandler('Tariff group not found', 404));
+
+  const name = String(req.body?.name || '').trim();
+  if (!name) return next(new ErrorHandler('item name is required', 400));
+
+  const price = req.body?.price !== undefined ? Number(req.body.price) : null;
+  const rawAliases = Array.isArray(req.body?.aliases) ? req.body.aliases : [];
+  const aliases = rawAliases
+    .map((a) => String(a).trim())
+    .filter(Boolean);
+
+  group.items.push({ name, price: price !== null && Number.isFinite(price) ? price : null, aliases, active: true });
+  await group.save();
+  res.status(200).json({ success: true, group });
+});
+
+exports.updateCenterTariffItem = catchAsyncErrors(async (req, res, next) => {
+  const group = await CenterTariffGroup.findOne({ _id: req.params.groupId, center: req.params.id });
+  if (!group) return next(new ErrorHandler('Tariff group not found', 404));
+
+  const item = group.items.id(req.params.itemId);
+  if (!item) return next(new ErrorHandler('Tariff item not found', 404));
+
+  if (req.body?.name !== undefined) {
+    const name = String(req.body.name).trim();
+    if (!name) return next(new ErrorHandler('name cannot be empty', 400));
+    item.name = name;
+  }
+  if (req.body?.price !== undefined) {
+    const p = Number(req.body.price);
+    item.price = Number.isFinite(p) ? p : null;
+  }
+  if (req.body?.aliases !== undefined) {
+    item.aliases = Array.isArray(req.body.aliases)
+      ? req.body.aliases.map((a) => String(a).trim()).filter(Boolean)
+      : [];
+  }
+  if (req.body?.active !== undefined) item.active = Boolean(req.body.active);
+
+  await group.save();
+  res.status(200).json({ success: true, group });
+});
+
+exports.deleteCenterTariffItem = catchAsyncErrors(async (req, res, next) => {
+  const group = await CenterTariffGroup.findOne({ _id: req.params.groupId, center: req.params.id });
+  if (!group) return next(new ErrorHandler('Tariff group not found', 404));
+
+  const item = group.items.id(req.params.itemId);
+  if (!item) return next(new ErrorHandler('Tariff item not found', 404));
+
+  item.deleteOne();
+  await group.save();
+  res.status(200).json({ success: true, group });
 });

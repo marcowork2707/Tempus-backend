@@ -83,6 +83,13 @@ const {
   getBalanceRange,
   getCenterKpiObjectives,
   upsertCenterKpiObjectives,
+  getCenterTariffGroups,
+  createCenterTariffGroup,
+  updateCenterTariffGroup,
+  deleteCenterTariffGroup,
+  addCenterTariffItem,
+  updateCenterTariffItem,
+  deleteCenterTariffItem,
 } = require('../controllers/centerController');
 
 const { isAuthenticatedUser, authorizeRoles } = require('../middleware/auth');
@@ -197,6 +204,15 @@ router.delete('/:id/vacation-conflicts/:ruleId', deleteVacationConflictRule);
 // ─── KPI Objectives ──────────────────────────────────────────────────────────
 router.get('/:id/kpi-objectives', authorizeRoles('admin'), getCenterKpiObjectives);
 router.put('/:id/kpi-objectives', authorizeRoles('admin'), upsertCenterKpiObjectives);
+
+// ─── Tariff Groups & Items ────────────────────────────────────────────────────
+router.get('/:id/tariff-groups', authorizeRoles('admin'), getCenterTariffGroups);
+router.post('/:id/tariff-groups', authorizeRoles('admin'), createCenterTariffGroup);
+router.put('/:id/tariff-groups/:groupId', authorizeRoles('admin'), updateCenterTariffGroup);
+router.delete('/:id/tariff-groups/:groupId', authorizeRoles('admin'), deleteCenterTariffGroup);
+router.post('/:id/tariff-groups/:groupId/items', authorizeRoles('admin'), addCenterTariffItem);
+router.put('/:id/tariff-groups/:groupId/items/:itemId', authorizeRoles('admin'), updateCenterTariffItem);
+router.delete('/:id/tariff-groups/:groupId/items/:itemId', authorizeRoles('admin'), deleteCenterTariffItem);
 
 // ─── Class Reviews ───────────────────────────────────────────────────────────
 router.use('/:id/class-reviews', require('./classReviewRoutes'));
