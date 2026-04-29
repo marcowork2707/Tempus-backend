@@ -2873,6 +2873,7 @@ exports.importCenterIncomeCsv = catchAsyncErrors(async (req, res, next) => {
     const paymentMethod = inferIncomePaymentMethod(row?.status || row?.statusRaw || row?.paymentMethod);
     const { groupName: incomeCategory, itemName: incomeItem } = matchConcept(concept);
 
+    const memberNameForDupe = row?.memberName ? String(row.memberName).trim() : '';
     const duplicate = await CenterExpense.findOne({
       center: req.params.id,
       date: isoDate,
@@ -2880,6 +2881,7 @@ exports.importCenterIncomeCsv = catchAsyncErrors(async (req, res, next) => {
       amount,
       entryType: 'income',
       paymentMethod,
+      comment: memberNameForDupe,
     }).select('_id');
 
     if (duplicate) {
