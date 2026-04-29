@@ -62,8 +62,22 @@ app.use((req, res) => {
 // Error handling middleware (must be last)
 app.use(errorMiddleware);
 
-let lastAimharderSyncDay = null;
-let lastOccupancySyncDay = null;
+async function getSyncDay(key) {
+  try {
+    const AppSetting = require('./src/models/AppSetting');
+    const doc = await AppSetting.findOne({ key }).lean();
+    return doc ? doc.value : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+async function setSyncDay(key, value) {
+  try {
+    const AppSetting = require('./src/models/AppSetting');
+    await AppSetting.findOneAndUpdate({ key }, { value }, { upsert: true, new: true });
+  } catch (_) {}
+}
 
 function getMadridClockParts(date = new Date()) {
   const formatter = new Intl.DateTimeFormat('en-GB', {
@@ -90,9 +104,9 @@ async function maybeRunDailyAimharderSync() {
   const { hour, todayKey } = getMadridClockParts();
 
   // Run once per day after 08:00 (Europe/Madrid), including catch-up after restarts.
-  if (hour < 8 || lastAimharderSyncDay === todayKey) {
-    return;
-  }
+  if (hour < 8) return;
+  const lastSyncDayAh = await getSyncDay('aimharder_sync_day');
+  if (lastSyncDayAh === todayKey) return;
 
   try {
     console.log('[AimHarder Scheduler] Lanzando sincronización diaria de clientes activos...');
@@ -104,7 +118,7 @@ async function maybeRunDailyAimharderSync() {
         console.warn(`[AimHarder Scheduler] Se omite ${center.name}: ${error.message}`);
       }
     }
-    lastAimharderSyncDay = todayKey;
+    await setSyncDay('aimharder_sync_day', todayKey);
     console.log('[AimHarder Scheduler] Sincronización diaria completada');
   } catch (error) {
     console.error('[AimHarder Scheduler] Error en sincronización diaria:', error.message);
@@ -116,9 +130,9 @@ async function maybeRunDailyOccupancySync() {
 
   // Run once per day from 08:05 onward (Europe/Madrid), including catch-up after restarts.
   const afterScheduledTime = hour > 8 || (hour === 8 && minute >= 5);
-  if (!afterScheduledTime || lastOccupancySyncDay === todayKey) {
-    return;
-  }
+  if (!afterScheduledTime) return;
+  const lastSyncDayOcc = await getSyncDay('aimharder_occupancy_day');
+  if (lastSyncDayOcc === todayKey) return;
 
   try {
     const targetDate = toDateString(getYesterday());
@@ -132,6 +146,7 @@ async function maybeRunDailyOccupancySync() {
       }
     }
     lastOccupancySyncDay = todayKey;
+    await setSyncDay('aimharder_occupancy_day', todayKey);
     console.log('[AimHarder Scheduler] Ocupación automática completada');
   } catch (error) {
     console.error('[AimHarder Scheduler] Error en ocupación automática:', error.message);
