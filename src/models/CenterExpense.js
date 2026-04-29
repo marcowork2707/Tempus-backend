@@ -24,7 +24,7 @@ const centerExpenseSchema = new mongoose.Schema(
       type: String,
       required: true,
       trim: true,
-      maxlength: 120,
+      maxlength: 400,
     },
     category: {
       type: String,
