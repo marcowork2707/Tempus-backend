@@ -288,7 +288,8 @@ const isDashboardReviewMarkableForMonth = (sectionKey, itemKey, monthNumber) => 
   return restrictedMonths.includes(monthNumber);
 };
 
-const computeDashboardReviewSummary = (sections = [], monthNumber) => {
+const computeDashboardReviewSummary = (sections = [], monthNumber, options = {}) => {
+  const classReviewObjective = normalizeDashboardReviewValue(options.classReviewObjective);
   const leafNodes = [];
 
   const collectLeafNodes = (nodes = [], sectionKey, itemKey) => {
@@ -297,7 +298,12 @@ const computeDashboardReviewSummary = (sections = [], monthNumber) => {
       if (nested.length > 0) {
         collectLeafNodes(nested, sectionKey, itemKey);
       } else {
-        leafNodes.push({ sectionKey, itemKey, status: node.status });
+        leafNodes.push({
+          sectionKey,
+          itemKey,
+          status: node.status,
+          value: normalizeDashboardReviewValue(node.value),
+        });
       }
     }
   };
@@ -308,7 +314,12 @@ const computeDashboardReviewSummary = (sections = [], monthNumber) => {
       if (subItems.length > 0) {
         collectLeafNodes(subItems, section.key, item.key);
       } else {
-        leafNodes.push({ sectionKey: section.key, itemKey: item.key, status: item.status });
+        leafNodes.push({
+          sectionKey: section.key,
+          itemKey: item.key,
+          status: item.status,
+          value: normalizeDashboardReviewValue(item.value),
+        });
       }
     }
   }
@@ -317,17 +328,37 @@ const computeDashboardReviewSummary = (sections = [], monthNumber) => {
   let tickCount = 0;
   let failCount = 0;
   let pendingCount = 0;
+  let scoredItems = 0;
+  let earnedPoints = 0;
 
   for (const leaf of leafNodes) {
     if (!isDashboardReviewMarkableForMonth(leaf.sectionKey, leaf.itemKey, monthNumber)) continue;
     markableItems += 1;
+
     if (leaf.status === 'ok') tickCount += 1;
     else if (leaf.status === 'fail') failCount += 1;
-    else pendingCount += 1;
+    else {
+      pendingCount += 1;
+      continue;
+    }
+
+    let points = leaf.status === 'ok' ? 1 : 0;
+    if (
+      leaf.sectionKey === 'revision-clases'
+      && leaf.itemKey === 'nota_revision_clases'
+      && classReviewObjective !== null
+      && classReviewObjective > 0
+      && leaf.value !== null
+    ) {
+      points = Math.max(0, Math.min(1, leaf.value / classReviewObjective));
+    }
+
+    scoredItems += 1;
+    earnedPoints += points;
   }
 
-  const score = markableItems > 0
-    ? Number(((tickCount / markableItems) * 10).toFixed(2))
+  const score = scoredItems > 0
+    ? Number(((earnedPoints / scoredItems) * 10).toFixed(2))
     : null;
 
   return {
@@ -383,7 +414,7 @@ const computeDashboardKpiAutoEvaluation = async ({ centerId, month }) => {
 
   const [snapshot, absenceSnapshots, objectivesMap] = await Promise.all([
     AimHarderClientMonthlySnapshot.findOne({ center: centerId, month })
-      .select('activeClientsCount newSignups newSignupsManual monthlyCancellations monthlyCancellationsManual')
+      .select('activeClientsCount activeClients activeTariffSummary newSignups newSignupsManual monthlyCancellations monthlyCancellationsManual')
       .lean(),
     nextMonth
       ? AttendanceAbsenceSnapshot.find({
@@ -396,7 +427,19 @@ const computeDashboardKpiAutoEvaluation = async ({ centerId, month }) => {
     getCenterKpiObjectivesMap(centerId, year),
   ]);
 
-  const tarifasActivas = Number(snapshot?.activeClientsCount || 0);
+  const snapshotActiveClientsCount = Number(snapshot?.activeClientsCount);
+  const activeClientsLength = Array.isArray(snapshot?.activeClients) ? snapshot.activeClients.length : null;
+  const activeTariffSummaryCount = Array.isArray(snapshot?.activeTariffSummary)
+    ? snapshot.activeTariffSummary.reduce((total, row) => total + Number(row?.count || 0), 0)
+    : null;
+
+  const tarifasActivas = Number.isFinite(snapshotActiveClientsCount)
+    ? snapshotActiveClientsCount
+    : Number.isFinite(Number(activeClientsLength))
+      ? Number(activeClientsLength)
+      : Number.isFinite(Number(activeTariffSummaryCount))
+        ? Number(activeTariffSummaryCount)
+        : 0;
   const altas = Number(
     snapshot?.newSignupsManual ?? snapshot?.newSignups ?? 0
   );
@@ -679,7 +722,7 @@ const computeInstalacionesInvestmentYearToDate = async (centerId, month) => {
 };
 
 const applyInstalacionesAutoEvaluation = (sections = [], payload = {}) => {
-  const { cleaningAuto, investmentYTD, investmentObjective, monthNumber } = payload;
+  const { investmentYTD, investmentObjective, monthNumber } = payload;
   const isDecember = monthNumber === 12;
 
   return sections.map((section) => {
@@ -688,16 +731,6 @@ const applyInstalacionesAutoEvaluation = (sections = [], payload = {}) => {
     return {
       ...section,
       items: (section.items || []).map((item) => {
-        if (item.key === 'limpieza-orden') {
-          return {
-            ...item,
-            status: cleaningAuto?.status || 'pending',
-            comment: cleaningAuto?.comment || '',
-            value: null,
-            subItems: Array.isArray(cleaningAuto?.subItems) ? cleaningAuto.subItems : [],
-          };
-        }
-
         if (item.key === 'inversion-anual') {
           const total = Number(investmentYTD?.total || 0);
           const objective = investmentObjective;
@@ -750,7 +783,10 @@ const normalizeDashboardReviewSections = (incomingSections) => {
       title: sectionTemplate.title,
       items: sectionTemplate.items.map((itemTemplate) => {
         const incomingItem = incomingByItemKey.get(itemTemplate.key);
-        const normalizedSubItems = normalizeDashboardReviewSubItems(incomingItem?.subItems);
+        const isManualCleaningItem = sectionTemplate.key === 'instalaciones' && itemTemplate.key === 'limpieza-orden';
+        const normalizedSubItems = isManualCleaningItem
+          ? []
+          : normalizeDashboardReviewSubItems(incomingItem?.subItems);
         const candidateStatus = String(incomingItem?.status || 'pending').trim().toLowerCase();
         const status = DASHBOARD_REVIEW_ALLOWED_STATUSES.includes(candidateStatus)
           ? candidateStatus
@@ -3118,17 +3154,18 @@ exports.getCenterDashboardReview = catchAsyncErrors(async (req, res, next) => {
     monthNumber
   );
 
-  const cleaningAuto = await computeInstalacionesCleaningAuto(req.params.id, month);
   const inversionObjective = readObjectiveMonthlyValue(objectivesMap, 'inversion_anual', 0);
   const inversionYTD = await computeInstalacionesInvestmentYearToDate(req.params.id, month);
   normalizedSections = applyInstalacionesAutoEvaluation(normalizedSections, {
-    cleaningAuto,
     investmentYTD: inversionYTD,
     investmentObjective: inversionObjective,
     monthNumber,
   });
+  const classReviewObjective = readObjectiveMonthlyValue(objectivesMap, 'nota_revision_clases', monthIndex);
   const dashboardReviewObjective = readObjectiveMonthlyValue(objectivesMap, 'nota_cuadro_mandos', monthIndex);
-  const dashboardSummary = computeDashboardReviewSummary(normalizedSections, monthNumber);
+  const dashboardSummary = computeDashboardReviewSummary(normalizedSections, monthNumber, {
+    classReviewObjective,
+  });
 
   res.status(200).json({
     success: true,
@@ -3205,17 +3242,18 @@ exports.upsertCenterDashboardReview = catchAsyncErrors(async (req, res, next) =>
     monthNumber
   );
 
-  const cleaningAuto = await computeInstalacionesCleaningAuto(req.params.id, month);
   const inversionObjective = readObjectiveMonthlyValue(objectivesMap, 'inversion_anual', 0);
   const inversionYTD = await computeInstalacionesInvestmentYearToDate(req.params.id, month);
   sections = applyInstalacionesAutoEvaluation(sections, {
-    cleaningAuto,
     investmentYTD: inversionYTD,
     investmentObjective: inversionObjective,
     monthNumber,
   });
+  const classReviewObjective = readObjectiveMonthlyValue(objectivesMap, 'nota_revision_clases', monthIndex);
   const dashboardReviewObjective = readObjectiveMonthlyValue(objectivesMap, 'nota_cuadro_mandos', monthIndex);
-  const dashboardSummary = computeDashboardReviewSummary(sections, monthNumber);
+  const dashboardSummary = computeDashboardReviewSummary(sections, monthNumber, {
+    classReviewObjective,
+  });
 
   const review = await CenterDashboardReview.findOneAndUpdate(
     { center: req.params.id, month },
