@@ -2354,14 +2354,13 @@ async function getPendingPaymentsWithoutTPVError(centerId) {
     );
   }
 
-  console.log('[AimHarder] ===== Scraping pagos pendientes sin fallo TPV =====');
+  console.log('[AimHarder] ===== Scraping todos los pagos pendientes =====');
   try {
     const pending = await getPendingPaymentsRaw(config);
 
-    const pendingWithoutTpvError = pending.filter((p) => p.tpverrcode == null || String(p.tpverrcode).trim() === '');
-    console.log(`[AimHarder] ${pendingWithoutTpvError.length} pagos pendientes sin fallo TPV encontrados`);
+    console.log(`[AimHarder] ${pending.length} pagos pendientes encontrados (sin excluir fallos TPV)`);
 
-    return pendingWithoutTpvError.map((p) => ({
+    return pending.map((p) => ({
       memberName: (p.name || '').replace(/\s+/g, ' ').trim(),
       concept: p.concept || '',
       tarifa: extractTarifa(p.concept || ''),
@@ -2370,7 +2369,7 @@ async function getPendingPaymentsWithoutTPVError(centerId) {
       phone: p.movil || '',
     }));
   } finally {
-    console.log('[AimHarder] ===== Fin scraping pagos pendientes sin TPV =====');
+    console.log('[AimHarder] ===== Fin scraping todos los pagos pendientes =====');
   }
 }
 
