@@ -36,6 +36,7 @@ const {
   upsertCenterPayrollEntry,
   deleteCenterPayrollEntry,
   getCenterExpensesSummary,
+  previewCenterExpenseProration,
   createCenterExpense,
   importCenterIncomeCsv,
   updateCenterExpense,
@@ -147,6 +148,7 @@ router.get('/:id/overtime-summary', authorizeRoles('admin'), getCenterMonthlyOve
 router.post('/:id/payroll', authorizeRoles('admin'), upsertCenterPayrollEntry);
 router.delete('/:id/payroll/:entryId', authorizeRoles('admin'), deleteCenterPayrollEntry);
 router.get('/:id/expenses', authorizeRoles('admin'), getCenterExpensesSummary);
+router.post('/:id/expenses/proration-preview', authorizeRoles('admin'), previewCenterExpenseProration);
 router.get('/:id/balance-range', authorizeRoles('admin'), getBalanceRange);
 router.get('/:id/recurring-expenses', authorizeRoles('admin'), getCenterRecurringExpenseConcepts);
 router.post('/:id/recurring-expenses', authorizeRoles('admin'), createCenterRecurringExpenseConcept);

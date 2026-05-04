@@ -2272,37 +2272,36 @@ function buildWeightedDistribution(totalAmount, weightedTargets) {
   }));
 }
 
-function isVatExpenseEntry({ concept, expenseType, entryType }) {
+function isProratableExpenseEntry({ concept, expenseType, entryType }) {
   if (entryType === 'income') return false;
   const haystack = `${String(concept || '')} ${String(expenseType || '')}`
     .normalize('NFD')
     .replace(/[\u0300-\u036f]/g, '')
     .toLowerCase();
-  return /\biva\b/.test(haystack);
+
+  return /\biva\b/.test(haystack)
+    || /\btgss\b/.test(haystack)
+    || /(\bcot\b|\bcot\.)/.test(haystack);
 }
 
-async function createVatProratedExpenses({
-  sourceCenterId,
-  userId,
-  date,
-  concept,
-  category,
-  expenseType,
-  amount,
-  comment,
-  paymentMethod,
-  supplier,
-  notes,
-}) {
-  const sourceMonth = monthFromDate(date);
-  const distributionMonths = [1, 2, 3].map((offset) => addMonthsToMonthKey(sourceMonth, offset));
+function getPreviousMonths(month, count = 3) {
+  const safeCount = Math.max(1, Number(count || 1));
+  const months = [];
+  for (let idx = 1; idx <= safeCount; idx += 1) {
+    months.push(addMonthsToMonthKey(month, -idx));
+  }
+  return months;
+}
+
+async function getCenterBillingWeights({ sourceCenterId, sourceMonth, monthsBack = 3 }) {
+  const previousMonths = getPreviousMonths(sourceMonth, monthsBack);
 
   const [centers, incomeByCenter] = await Promise.all([
-    Center.find({ active: { $ne: false } }).select('_id').lean(),
+    Center.find({ active: { $ne: false } }).select('_id name').lean(),
     CenterExpense.aggregate([
       {
         $match: {
-          month: sourceMonth,
+          month: { $in: previousMonths },
           entryType: 'income',
         },
       },
@@ -2315,34 +2314,117 @@ async function createVatProratedExpenses({
     ]),
   ]);
 
-  const centerIds = (centers || []).map((center) => String(center._id));
-  if (!centerIds.includes(String(sourceCenterId))) {
-    centerIds.push(String(sourceCenterId));
+  const centerMap = new Map((centers || []).map((center) => [String(center._id), center]));
+  if (!centerMap.has(String(sourceCenterId))) {
+    const sourceCenter = await Center.findById(sourceCenterId).select('_id name').lean();
+    if (sourceCenter?._id) {
+      centerMap.set(String(sourceCenter._id), sourceCenter);
+    }
   }
 
   const incomeMap = new Map(
     (incomeByCenter || []).map((row) => [String(row._id), Number(row.totalIncome || 0)])
   );
 
-  const weightedTargets = centerIds.map((centerId) => ({
+  return Array.from(centerMap.entries()).map(([centerId, center]) => ({
     centerId,
+    centerName: center?.name || 'Centro',
     weight: incomeMap.get(centerId) || 0,
   }));
+}
+
+async function buildExpenseProrationPlan({
+  sourceCenterId,
+  date,
+  amount,
+  monthsAhead = 3,
+  redistributeAcrossCenters = true,
+}) {
+  const sourceMonth = monthFromDate(date);
+  const safeMonthsAhead = Math.max(1, Math.min(24, Number(monthsAhead || 1)));
+  const distributionMonths = Array.from({ length: safeMonthsAhead }, (_, idx) => addMonthsToMonthKey(sourceMonth, idx + 1));
+
+  let weightedTargets = [{
+    centerId: String(sourceCenterId),
+    centerName: 'Centro actual',
+    weight: 1,
+  }];
+
+  if (redistributeAcrossCenters) {
+    weightedTargets = await getCenterBillingWeights({ sourceCenterId, sourceMonth, monthsBack: 3 });
+  }
 
   const centerSplit = buildWeightedDistribution(amount, weightedTargets);
-  const docsToInsert = [];
+  const centerSplitMap = new Map(centerSplit.map((item) => [String(item.centerId), Number(item.amount || 0)]));
 
-  for (const centerPortion of centerSplit) {
-    const monthSplit = splitAmountInCents(centerPortion.amount, distributionMonths.length);
-    for (let idx = 0; idx < distributionMonths.length; idx += 1) {
-      const targetMonth = distributionMonths[idx];
-      const monthAmount = monthSplit[idx] || 0;
+  const totalAmount = Number(Number(amount || 0).toFixed(2));
+  const centerAllocations = weightedTargets
+    .map((target) => {
+      const centerAmount = centerSplitMap.get(String(target.centerId)) || 0;
+      if (centerAmount <= 0) return null;
+
+      const monthSplit = splitAmountInCents(centerAmount, distributionMonths.length);
+      const months = distributionMonths.map((monthKey, idx) => ({
+        month: monthKey,
+        amount: Number(monthSplit[idx] || 0),
+      }));
+
+      return {
+        centerId: String(target.centerId),
+        centerName: target.centerName || 'Centro',
+        billingWeight: Number(Number(target.weight || 0).toFixed(2)),
+        weightPercentage: totalAmount > 0
+          ? Number(((centerAmount / totalAmount) * 100).toFixed(2))
+          : 0,
+        totalAmount: Number(centerAmount.toFixed(2)),
+        months,
+      };
+    })
+    .filter(Boolean);
+
+  return {
+    sourceMonth,
+    distributionMonths,
+    monthsAhead: safeMonthsAhead,
+    redistributeAcrossCenters: Boolean(redistributeAcrossCenters),
+    centerAllocations,
+    totalAmount,
+  };
+}
+
+async function createProratedExpenses({
+  sourceCenterId,
+  userId,
+  date,
+  concept,
+  category,
+  expenseType,
+  amount,
+  comment,
+  paymentMethod,
+  supplier,
+  notes,
+  monthsAhead,
+  redistributeAcrossCenters,
+}) {
+  const plan = await buildExpenseProrationPlan({
+    sourceCenterId,
+    date,
+    amount,
+    monthsAhead,
+    redistributeAcrossCenters,
+  });
+
+  const docsToInsert = [];
+  for (const centerAllocation of plan.centerAllocations) {
+    for (const monthAllocation of centerAllocation.months) {
+      const monthAmount = Number(monthAllocation.amount || 0);
       if (monthAmount <= 0) continue;
 
       docsToInsert.push({
-        center: centerPortion.centerId,
-        date: `${targetMonth}-01`,
-        month: targetMonth,
+        center: centerAllocation.centerId,
+        date: `${monthAllocation.month}-01`,
+        month: monthAllocation.month,
         concept,
         category,
         expenseType,
@@ -2360,8 +2442,12 @@ async function createVatProratedExpenses({
     }
   }
 
-  if (!docsToInsert.length) return [];
-  return CenterExpense.insertMany(docsToInsert);
+  if (!docsToInsert.length) {
+    return { expenses: [], plan };
+  }
+
+  const expenses = await CenterExpense.insertMany(docsToInsert);
+  return { expenses, plan };
 }
 
 function normalizeExpenseType(value) {
@@ -2871,6 +2957,65 @@ exports.getCenterExpensesSummary = catchAsyncErrors(async (req, res, next) => {
   });
 });
 
+exports.previewCenterExpenseProration = catchAsyncErrors(async (req, res, next) => {
+  const center = await Center.findById(req.params.id).select('_id');
+  if (!center) return next(new ErrorHandler('Center not found', 404));
+
+  const {
+    date,
+    concept,
+    expenseType,
+    amount,
+    entryType,
+    prorationOptions,
+  } = req.body || {};
+
+  assertDateFormat(date);
+
+  const parsedAmount = Number(amount);
+  if (!Number.isFinite(parsedAmount) || parsedAmount <= 0) {
+    return next(new ErrorHandler('amount must be a number greater than 0', 400));
+  }
+
+  const normalizedConcept = String(concept || '').trim();
+  const normalizedExpenseType = normalizeExpenseType(expenseType);
+  const normalizedEntryType = entryType === 'income' ? 'income' : 'expense';
+
+  const eligible = isProratableExpenseEntry({
+    concept: normalizedConcept,
+    expenseType: normalizedExpenseType,
+    entryType: normalizedEntryType,
+  });
+
+  if (!eligible) {
+    return res.status(200).json({
+      success: true,
+      eligible: false,
+      reason: 'Este concepto no admite prorrateo (solo IVA o TGSS COT).',
+    });
+  }
+
+  const requestedMonthsAhead = Number(prorationOptions?.monthsAhead);
+  const monthsAhead = Number.isFinite(requestedMonthsAhead)
+    ? Math.max(1, Math.min(24, Math.trunc(requestedMonthsAhead)))
+    : 3;
+  const redistributeAcrossCenters = prorationOptions?.redistributeAcrossCenters !== false;
+
+  const plan = await buildExpenseProrationPlan({
+    sourceCenterId: req.params.id,
+    date,
+    amount: Number(parsedAmount.toFixed(2)),
+    monthsAhead,
+    redistributeAcrossCenters,
+  });
+
+  res.status(200).json({
+    success: true,
+    eligible: true,
+    plan,
+  });
+});
+
 exports.createCenterExpense = catchAsyncErrors(async (req, res, next) => {
   const center = await Center.findById(req.params.id);
   if (!center) return next(new ErrorHandler('Center not found', 404));
@@ -2888,6 +3033,7 @@ exports.createCenterExpense = catchAsyncErrors(async (req, res, next) => {
     recurringConceptId,
     entryType,
     incomeCategory,
+    prorationOptions,
   } = req.body;
 
   assertDateFormat(date);
@@ -2909,16 +3055,25 @@ exports.createCenterExpense = catchAsyncErrors(async (req, res, next) => {
   const normalizedSupplier = supplier ? String(supplier).trim() : '';
   const normalizedNotes = notes ? String(notes).trim() : '';
 
-  if (
-    isVatExpenseEntry({
-      concept: normalizedConcept,
-      expenseType: normalizedExpenseType,
-      entryType: normalizedEntryType,
-    })
+  const proratable = isProratableExpenseEntry({
+    concept: normalizedConcept,
+    expenseType: normalizedExpenseType,
+    entryType: normalizedEntryType,
+  });
+
+  const shouldProrate = proratable
     && parsedAmount > 0
     && !recurringConceptId
-  ) {
-    const createdExpenses = await createVatProratedExpenses({
+    && (prorationOptions?.enabled !== false);
+
+  if (shouldProrate) {
+    const requestedMonthsAhead = Number(prorationOptions?.monthsAhead);
+    const monthsAhead = Number.isFinite(requestedMonthsAhead)
+      ? Math.max(1, Math.min(24, Math.trunc(requestedMonthsAhead)))
+      : 3;
+    const redistributeAcrossCenters = prorationOptions?.redistributeAcrossCenters !== false;
+
+    const { expenses: createdExpenses, plan } = await createProratedExpenses({
       sourceCenterId: req.params.id,
       userId: req.user.id,
       date,
@@ -2930,6 +3085,8 @@ exports.createCenterExpense = catchAsyncErrors(async (req, res, next) => {
       paymentMethod: normalizedPaymentMethod,
       supplier: normalizedSupplier,
       notes: normalizedNotes,
+      monthsAhead,
+      redistributeAcrossCenters,
     });
 
     const createdIds = createdExpenses.map((expense) => expense._id);
@@ -2948,6 +3105,8 @@ exports.createCenterExpense = catchAsyncErrors(async (req, res, next) => {
       expense: primaryExpense,
       expenses: populatedExpenses,
       vatProrated: true,
+      prorated: true,
+      prorationPlan: plan,
       createdCount: populatedExpenses.length,
     });
   }
