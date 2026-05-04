@@ -2367,6 +2367,8 @@ async function getPendingPaymentsWithoutTPVError(centerId) {
       amount: p.amount || '',
       date: p.since || '',
       phone: p.movil || '',
+      hasTpvError: p.tpverrcode != null && String(p.tpverrcode).trim() !== '',
+      tpvErrorCode: p.tpverrcode != null ? String(p.tpverrcode).trim() : '',
     }));
   } finally {
     console.log('[AimHarder] ===== Fin scraping todos los pagos pendientes =====');
