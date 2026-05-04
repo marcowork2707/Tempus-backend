@@ -2272,16 +2272,25 @@ function buildWeightedDistribution(totalAmount, weightedTargets) {
   }));
 }
 
-function isProratableExpenseEntry({ concept, expenseType, entryType }) {
-  if (entryType === 'income') return false;
+function getExpenseProrationKind({ concept, expenseType, entryType }) {
+  if (entryType === 'income') return null;
   const haystack = `${String(concept || '')} ${String(expenseType || '')}`
     .normalize('NFD')
     .replace(/[\u0300-\u036f]/g, '')
     .toLowerCase();
 
-  return /\biva\b/.test(haystack)
-    || /\btgss\b/.test(haystack)
-    || /(\bcot\b|\bcot\.)/.test(haystack);
+  if (/\btgss\b/.test(haystack) || /(\bcot\b|\bcot\.)/.test(haystack)) {
+    return 'tgss';
+  }
+  if (/\biva\b/.test(haystack)) {
+    return 'iva';
+  }
+
+  return null;
+}
+
+function isProratableExpenseEntry({ concept, expenseType, entryType }) {
+  return Boolean(getExpenseProrationKind({ concept, expenseType, entryType }));
 }
 
 function getPreviousMonths(month, count = 3) {
@@ -2333,16 +2342,71 @@ async function getCenterBillingWeights({ sourceCenterId, sourceMonth, monthsBack
   }));
 }
 
+async function getCenterSalaryWeights({ sourceCenterId, sourceMonth }) {
+  const [centers, payrollRows, incentiveRows] = await Promise.all([
+    Center.find({ active: { $ne: false } }).select('_id name').lean(),
+    PayrollEntry.aggregate([
+      {
+        $match: {
+          month: sourceMonth,
+        },
+      },
+      {
+        $group: {
+          _id: '$center',
+          totalSalary: { $sum: '$netSalary' },
+        },
+      },
+    ]),
+    ExtraIncentive.aggregate([
+      {
+        $match: {
+          month: sourceMonth,
+        },
+      },
+      {
+        $group: {
+          _id: '$center',
+          totalIncentive: { $sum: '$amount' },
+        },
+      },
+    ]),
+  ]);
+
+  const centerMap = new Map((centers || []).map((center) => [String(center._id), center]));
+  if (!centerMap.has(String(sourceCenterId))) {
+    const sourceCenter = await Center.findById(sourceCenterId).select('_id name').lean();
+    if (sourceCenter?._id) {
+      centerMap.set(String(sourceCenter._id), sourceCenter);
+    }
+  }
+
+  const payrollMap = new Map((payrollRows || []).map((row) => [String(row._id), Number(row.totalSalary || 0)]));
+  const incentiveMap = new Map((incentiveRows || []).map((row) => [String(row._id), Number(row.totalIncentive || 0)]));
+
+  return Array.from(centerMap.entries()).map(([centerId, center]) => ({
+    centerId,
+    centerName: center?.name || 'Centro',
+    weight: Number(((payrollMap.get(centerId) || 0) + (incentiveMap.get(centerId) || 0)).toFixed(2)),
+  }));
+}
+
 async function buildExpenseProrationPlan({
   sourceCenterId,
   date,
   amount,
   monthsAhead = 3,
   redistributeAcrossCenters = true,
+  prorationKind = 'iva',
 }) {
   const sourceMonth = monthFromDate(date);
-  const safeMonthsAhead = Math.max(1, Math.min(24, Number(monthsAhead || 1)));
-  const distributionMonths = Array.from({ length: safeMonthsAhead }, (_, idx) => addMonthsToMonthKey(sourceMonth, idx + 1));
+  const isTgss = prorationKind === 'tgss';
+  const safeMonthsAhead = isTgss
+    ? 1
+    : Math.max(1, Math.min(24, Number(monthsAhead || 1)));
+  const distributionMonths = isTgss
+    ? [sourceMonth]
+    : Array.from({ length: safeMonthsAhead }, (_, idx) => addMonthsToMonthKey(sourceMonth, idx));
 
   let weightedTargets = [{
     centerId: String(sourceCenterId),
@@ -2351,7 +2415,9 @@ async function buildExpenseProrationPlan({
   }];
 
   if (redistributeAcrossCenters) {
-    weightedTargets = await getCenterBillingWeights({ sourceCenterId, sourceMonth, monthsBack: 3 });
+    weightedTargets = isTgss
+      ? await getCenterSalaryWeights({ sourceCenterId, sourceMonth })
+      : await getCenterBillingWeights({ sourceCenterId, sourceMonth, monthsBack: 3 });
   }
 
   const centerSplit = buildWeightedDistribution(amount, weightedTargets);
@@ -2383,6 +2449,7 @@ async function buildExpenseProrationPlan({
     .filter(Boolean);
 
   return {
+    prorationKind,
     sourceMonth,
     distributionMonths,
     monthsAhead: safeMonthsAhead,
@@ -2406,6 +2473,7 @@ async function createProratedExpenses({
   notes,
   monthsAhead,
   redistributeAcrossCenters,
+  prorationKind,
 }) {
   const plan = await buildExpenseProrationPlan({
     sourceCenterId,
@@ -2413,7 +2481,11 @@ async function createProratedExpenses({
     amount,
     monthsAhead,
     redistributeAcrossCenters,
+    prorationKind,
   });
+
+  const prorationMode = prorationKind === 'tgss' ? 'tgss_weight' : 'iva';
+  const prorationGroupKey = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 
   const docsToInsert = [];
   for (const centerAllocation of plan.centerAllocations) {
@@ -2435,6 +2507,8 @@ async function createProratedExpenses({
         paymentMethod,
         supplier,
         notes,
+        prorationMode,
+        prorationGroupKey,
         recurringConcept: null,
         createdBy: userId,
         updatedBy: userId,
@@ -2981,11 +3055,12 @@ exports.previewCenterExpenseProration = catchAsyncErrors(async (req, res, next) 
   const normalizedExpenseType = normalizeExpenseType(expenseType);
   const normalizedEntryType = entryType === 'income' ? 'income' : 'expense';
 
-  const eligible = isProratableExpenseEntry({
+  const prorationKind = getExpenseProrationKind({
     concept: normalizedConcept,
     expenseType: normalizedExpenseType,
     entryType: normalizedEntryType,
   });
+  const eligible = Boolean(prorationKind);
 
   if (!eligible) {
     return res.status(200).json({
@@ -2996,10 +3071,14 @@ exports.previewCenterExpenseProration = catchAsyncErrors(async (req, res, next) 
   }
 
   const requestedMonthsAhead = Number(prorationOptions?.monthsAhead);
-  const monthsAhead = Number.isFinite(requestedMonthsAhead)
-    ? Math.max(1, Math.min(24, Math.trunc(requestedMonthsAhead)))
-    : 3;
-  const redistributeAcrossCenters = prorationOptions?.redistributeAcrossCenters !== false;
+  const monthsAhead = prorationKind === 'tgss'
+    ? 1
+    : (Number.isFinite(requestedMonthsAhead)
+      ? Math.max(1, Math.min(24, Math.trunc(requestedMonthsAhead)))
+      : 3);
+  const redistributeAcrossCenters = prorationKind === 'tgss'
+    ? true
+    : (prorationOptions?.redistributeAcrossCenters !== false);
 
   const plan = await buildExpenseProrationPlan({
     sourceCenterId: req.params.id,
@@ -3007,6 +3086,7 @@ exports.previewCenterExpenseProration = catchAsyncErrors(async (req, res, next) 
     amount: Number(parsedAmount.toFixed(2)),
     monthsAhead,
     redistributeAcrossCenters,
+    prorationKind,
   });
 
   res.status(200).json({
@@ -3055,11 +3135,12 @@ exports.createCenterExpense = catchAsyncErrors(async (req, res, next) => {
   const normalizedSupplier = supplier ? String(supplier).trim() : '';
   const normalizedNotes = notes ? String(notes).trim() : '';
 
-  const proratable = isProratableExpenseEntry({
+  const prorationKind = getExpenseProrationKind({
     concept: normalizedConcept,
     expenseType: normalizedExpenseType,
     entryType: normalizedEntryType,
   });
+  const proratable = Boolean(prorationKind);
 
   const shouldProrate = proratable
     && parsedAmount > 0
@@ -3068,10 +3149,14 @@ exports.createCenterExpense = catchAsyncErrors(async (req, res, next) => {
 
   if (shouldProrate) {
     const requestedMonthsAhead = Number(prorationOptions?.monthsAhead);
-    const monthsAhead = Number.isFinite(requestedMonthsAhead)
-      ? Math.max(1, Math.min(24, Math.trunc(requestedMonthsAhead)))
-      : 3;
-    const redistributeAcrossCenters = prorationOptions?.redistributeAcrossCenters !== false;
+    const monthsAhead = prorationKind === 'tgss'
+      ? 1
+      : (Number.isFinite(requestedMonthsAhead)
+        ? Math.max(1, Math.min(24, Math.trunc(requestedMonthsAhead)))
+        : 3);
+    const redistributeAcrossCenters = prorationKind === 'tgss'
+      ? true
+      : (prorationOptions?.redistributeAcrossCenters !== false);
 
     const { expenses: createdExpenses, plan } = await createProratedExpenses({
       sourceCenterId: req.params.id,
@@ -3087,6 +3172,7 @@ exports.createCenterExpense = catchAsyncErrors(async (req, res, next) => {
       notes: normalizedNotes,
       monthsAhead,
       redistributeAcrossCenters,
+      prorationKind,
     });
 
     const createdIds = createdExpenses.map((expense) => expense._id);
@@ -3136,6 +3222,8 @@ exports.createCenterExpense = catchAsyncErrors(async (req, res, next) => {
     paymentMethod: normalizedPaymentMethod,
     supplier: normalizedSupplier,
     notes: normalizedNotes,
+    prorationMode: 'none',
+    prorationGroupKey: '',
     recurringConcept: recurringConcept ? recurringConcept._id : null,
     createdBy: req.user.id,
     updatedBy: req.user.id,

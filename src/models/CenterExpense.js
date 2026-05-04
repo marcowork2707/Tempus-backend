@@ -92,6 +92,19 @@ const centerExpenseSchema = new mongoose.Schema(
       maxlength: 100,
       default: '',
     },
+    prorationMode: {
+      type: String,
+      enum: ['none', 'iva', 'tgss_weight'],
+      default: 'none',
+      index: true,
+    },
+    prorationGroupKey: {
+      type: String,
+      trim: true,
+      maxlength: 80,
+      default: '',
+      index: true,
+    },
     checked: {
       type: Boolean,
       default: false,
