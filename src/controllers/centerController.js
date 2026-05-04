@@ -2202,6 +2202,168 @@ function monthFromDate(date) {
   return String(date).slice(0, 7);
 }
 
+function addMonthsToMonthKey(month, delta) {
+  const [year, monthIndex] = String(month).split('-').map(Number);
+  if (!year || !monthIndex) return month;
+  const date = new Date(year, monthIndex - 1 + Number(delta || 0), 1);
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
+}
+
+function splitAmountInCents(amount, parts) {
+  const safeParts = Math.max(1, Number(parts || 1));
+  const totalCents = Math.round(Number(amount || 0) * 100);
+  const base = Math.floor(totalCents / safeParts);
+  let remainder = totalCents - (base * safeParts);
+
+  const cents = Array.from({ length: safeParts }, () => base);
+  let idx = 0;
+  while (remainder > 0) {
+    cents[idx] += 1;
+    remainder -= 1;
+    idx = (idx + 1) % safeParts;
+  }
+
+  return cents.map((value) => Number((value / 100).toFixed(2)));
+}
+
+function buildWeightedDistribution(totalAmount, weightedTargets) {
+  const total = Number(totalAmount || 0);
+  if (!Number.isFinite(total) || total <= 0) return [];
+
+  const candidates = (Array.isArray(weightedTargets) ? weightedTargets : [])
+    .map((target) => ({
+      centerId: String(target.centerId || ''),
+      weight: Number(target.weight || 0),
+    }))
+    .filter((target) => Boolean(target.centerId));
+
+  if (!candidates.length) return [];
+
+  const totalWeight = candidates.reduce((acc, target) => acc + (target.weight > 0 ? target.weight : 0), 0);
+  const normalized = totalWeight > 0
+    ? candidates.map((target) => ({ ...target, ratio: target.weight / totalWeight }))
+    : candidates.map((target) => ({ ...target, ratio: 1 / candidates.length }));
+
+  const totalCents = Math.round(total * 100);
+  const provisional = normalized.map((target) => {
+    const exactCents = target.ratio * totalCents;
+    const roundedCents = Math.floor(exactCents);
+    return {
+      centerId: target.centerId,
+      roundedCents,
+      remainder: exactCents - roundedCents,
+    };
+  });
+
+  let assigned = provisional.reduce((acc, target) => acc + target.roundedCents, 0);
+  let remaining = totalCents - assigned;
+
+  provisional.sort((a, b) => b.remainder - a.remainder);
+  let cursor = 0;
+  while (remaining > 0 && provisional.length > 0) {
+    provisional[cursor].roundedCents += 1;
+    remaining -= 1;
+    cursor = (cursor + 1) % provisional.length;
+  }
+
+  return provisional.map((target) => ({
+    centerId: target.centerId,
+    amount: Number((target.roundedCents / 100).toFixed(2)),
+  }));
+}
+
+function isVatExpenseEntry({ concept, expenseType, entryType }) {
+  if (entryType === 'income') return false;
+  const haystack = `${String(concept || '')} ${String(expenseType || '')}`
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase();
+  return /\biva\b/.test(haystack);
+}
+
+async function createVatProratedExpenses({
+  sourceCenterId,
+  userId,
+  date,
+  concept,
+  category,
+  expenseType,
+  amount,
+  comment,
+  paymentMethod,
+  supplier,
+  notes,
+}) {
+  const sourceMonth = monthFromDate(date);
+  const distributionMonths = [1, 2, 3].map((offset) => addMonthsToMonthKey(sourceMonth, offset));
+
+  const [centers, incomeByCenter] = await Promise.all([
+    Center.find({ active: { $ne: false } }).select('_id').lean(),
+    CenterExpense.aggregate([
+      {
+        $match: {
+          month: sourceMonth,
+          entryType: 'income',
+        },
+      },
+      {
+        $group: {
+          _id: '$center',
+          totalIncome: { $sum: '$amount' },
+        },
+      },
+    ]),
+  ]);
+
+  const centerIds = (centers || []).map((center) => String(center._id));
+  if (!centerIds.includes(String(sourceCenterId))) {
+    centerIds.push(String(sourceCenterId));
+  }
+
+  const incomeMap = new Map(
+    (incomeByCenter || []).map((row) => [String(row._id), Number(row.totalIncome || 0)])
+  );
+
+  const weightedTargets = centerIds.map((centerId) => ({
+    centerId,
+    weight: incomeMap.get(centerId) || 0,
+  }));
+
+  const centerSplit = buildWeightedDistribution(amount, weightedTargets);
+  const docsToInsert = [];
+
+  for (const centerPortion of centerSplit) {
+    const monthSplit = splitAmountInCents(centerPortion.amount, distributionMonths.length);
+    for (let idx = 0; idx < distributionMonths.length; idx += 1) {
+      const targetMonth = distributionMonths[idx];
+      const monthAmount = monthSplit[idx] || 0;
+      if (monthAmount <= 0) continue;
+
+      docsToInsert.push({
+        center: centerPortion.centerId,
+        date: `${targetMonth}-01`,
+        month: targetMonth,
+        concept,
+        category,
+        expenseType,
+        entryType: 'expense',
+        incomeCategory: '',
+        amount: monthAmount,
+        comment,
+        paymentMethod,
+        supplier,
+        notes,
+        recurringConcept: null,
+        createdBy: userId,
+        updatedBy: userId,
+      });
+    }
+  }
+
+  if (!docsToInsert.length) return [];
+  return CenterExpense.insertMany(docsToInsert);
+}
+
 function normalizeExpenseType(value) {
   const normalized = String(value || '').trim();
   if (!normalized) return 'Otros';
@@ -2738,6 +2900,58 @@ exports.createCenterExpense = catchAsyncErrors(async (req, res, next) => {
     return next(new ErrorHandler('amount must be a number greater than or equal to 0', 400));
   }
 
+  const normalizedConcept = String(concept).trim();
+  const normalizedCategory = String(category || 'General').trim() || 'General';
+  const normalizedExpenseType = normalizeExpenseType(expenseType);
+  const normalizedEntryType = entryType === 'income' ? 'income' : 'expense';
+  const normalizedComment = comment ? String(comment).trim() : '';
+  const normalizedPaymentMethod = paymentMethod ? String(paymentMethod).trim() : '';
+  const normalizedSupplier = supplier ? String(supplier).trim() : '';
+  const normalizedNotes = notes ? String(notes).trim() : '';
+
+  if (
+    isVatExpenseEntry({
+      concept: normalizedConcept,
+      expenseType: normalizedExpenseType,
+      entryType: normalizedEntryType,
+    })
+    && parsedAmount > 0
+    && !recurringConceptId
+  ) {
+    const createdExpenses = await createVatProratedExpenses({
+      sourceCenterId: req.params.id,
+      userId: req.user.id,
+      date,
+      concept: normalizedConcept,
+      category: normalizedCategory,
+      expenseType: normalizedExpenseType,
+      amount: Number(parsedAmount.toFixed(2)),
+      comment: normalizedComment,
+      paymentMethod: normalizedPaymentMethod,
+      supplier: normalizedSupplier,
+      notes: normalizedNotes,
+    });
+
+    const createdIds = createdExpenses.map((expense) => expense._id);
+    const populatedExpenses = await CenterExpense.find({ _id: { $in: createdIds } })
+      .populate('createdBy', 'name email')
+      .populate('updatedBy', 'name email')
+      .populate('recurringConcept', 'concept category expenseType active')
+      .sort({ center: 1, month: 1, date: 1, createdAt: 1 });
+
+    const primaryExpense = populatedExpenses.find((expense) => String(expense.center) === String(req.params.id))
+      || populatedExpenses[0]
+      || null;
+
+    return res.status(201).json({
+      success: true,
+      expense: primaryExpense,
+      expenses: populatedExpenses,
+      vatProrated: true,
+      createdCount: populatedExpenses.length,
+    });
+  }
+
   let recurringConcept = null;
   if (recurringConceptId) {
     recurringConcept = await RecurringExpenseConcept.findOne({
@@ -2753,16 +2967,16 @@ exports.createCenterExpense = catchAsyncErrors(async (req, res, next) => {
     center: req.params.id,
     date,
     month: monthFromDate(date),
-    concept: String(concept).trim(),
-    category: String(category || 'General').trim(),
-    expenseType: normalizeExpenseType(expenseType),
-    entryType: entryType === 'income' ? 'income' : 'expense',
+    concept: normalizedConcept,
+    category: normalizedCategory,
+    expenseType: normalizedExpenseType,
+    entryType: normalizedEntryType,
     incomeCategory: incomeCategory ? String(incomeCategory).trim() : '',
     amount: Number(parsedAmount.toFixed(2)),
-    comment: comment ? String(comment).trim() : '',
-    paymentMethod: paymentMethod ? String(paymentMethod).trim() : '',
-    supplier: supplier ? String(supplier).trim() : '',
-    notes: notes ? String(notes).trim() : '',
+    comment: normalizedComment,
+    paymentMethod: normalizedPaymentMethod,
+    supplier: normalizedSupplier,
+    notes: normalizedNotes,
     recurringConcept: recurringConcept ? recurringConcept._id : null,
     createdBy: req.user.id,
     updatedBy: req.user.id,
