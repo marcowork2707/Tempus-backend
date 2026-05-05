@@ -3992,18 +3992,32 @@ async function _getShortVacationPeriodCountForYear(centerId, userId, attributedY
   }, 0);
 }
 
-async function _assertVacationPolicyRules(centerId, userId, start, end, attributedYear, ignoreRequestId = null) {
+async function _assertVacationPolicyRules(
+  centerId,
+  userId,
+  start,
+  end,
+  attributedYear,
+  ignoreRequestId = null,
+  options = {}
+) {
+  const {
+    skipSeptemberRule = false,
+    skipNoticeOutsideSeasonRule = false,
+    skipSummerLengthRules = false,
+    skipShortPeriodLimitRule = false,
+  } = options;
   const violations = [];
   const days = Math.floor((_startOfDay(end).getTime() - _startOfDay(start).getTime()) / (24 * 60 * 60 * 1000)) + 1;
 
-  if (_rangeIncludesSeptember(start, end)) {
+  if (!skipSeptemberRule && _rangeIncludesSeptember(start, end)) {
     violations.push('No se permiten vacaciones en septiembre.');
   }
 
   const entirelyInSummer = _rangeEveryDayPasses(start, end, _isInsideSummerPeriod);
   const entirelyInChristmas = _rangeEveryDayPasses(start, end, _isInsideChristmasPeriod);
 
-  if (!entirelyInSummer && !entirelyInChristmas) {
+  if (!skipNoticeOutsideSeasonRule && !entirelyInSummer && !entirelyInChristmas) {
     const today = _startOfDay(new Date());
     const minAllowedStart = _startOfDay(today);
     minAllowedStart.setDate(minAllowedStart.getDate() + VACATION_POLICY.MIN_NOTICE_DAYS_OUTSIDE_SEASON);
@@ -4016,7 +4030,7 @@ async function _assertVacationPolicyRules(centerId, userId, start, end, attribut
     violations.push('En Navidad, el máximo permitido es 1 semana consecutiva.');
   }
 
-  if (entirelyInSummer) {
+  if (!skipSummerLengthRules && entirelyInSummer) {
     if (days < 7) {
       violations.push('En verano, el mínimo obligatorio es 1 semana consecutiva.');
     }
@@ -4025,7 +4039,7 @@ async function _assertVacationPolicyRules(centerId, userId, start, end, attribut
     }
   }
 
-  if (days < VACATION_POLICY.SHORT_PERIOD_THRESHOLD_DAYS) {
+  if (!skipShortPeriodLimitRule && days < VACATION_POLICY.SHORT_PERIOD_THRESHOLD_DAYS) {
     const shortPeriodsUsed = await _getShortVacationPeriodCountForYear(
       centerId,
       userId,
@@ -4042,7 +4056,10 @@ async function _assertVacationPolicyRules(centerId, userId, start, end, attribut
   }
 }
 
-async function _assertVacationConflictRules(centerId, userId, start, end, ignoreRequestId = null) {
+async function _assertVacationConflictRules(centerId, userId, start, end, ignoreRequestId = null, options = {}) {
+  const { skipBlockedUserOverlapRule = false } = options;
+  if (skipBlockedUserOverlapRule) return;
+
   const rules = await VacationConflictRule.find({
     center: centerId,
     blockedUser: userId,
@@ -4379,6 +4396,7 @@ exports.createVacationRequest = catchAsyncErrors(async (req, res, next) => {
   }
 
   const targetUserId = canManage && userId ? userId : req.user.id;
+  const isAdminRequester = req.user.role === 'admin' || roleName === 'admin';
 
   if (!startDate || !endDate || !reason?.trim()) {
     return next(new ErrorHandler('startDate, endDate and reason are required', 400));
@@ -4392,7 +4410,12 @@ exports.createVacationRequest = catchAsyncErrors(async (req, res, next) => {
 
   await _assertVacationRangeAlignedWithWorkCycle(req.params.id, targetUserId, start, end);
 
-  await _assertVacationConflictRules(req.params.id, targetUserId, start, end);
+  const createAsApproved = canManage && Boolean(userId);
+  const shouldBypassAdminWorkerCreationRules = isAdminRequester && Boolean(userId);
+
+  await _assertVacationConflictRules(req.params.id, targetUserId, start, end, null, {
+    skipBlockedUserOverlapRule: shouldBypassAdminWorkerCreationRules,
+  });
 
   const overlapping = await VacationRequest.findOne({
     center: req.params.id,
@@ -4406,7 +4429,6 @@ exports.createVacationRequest = catchAsyncErrors(async (req, res, next) => {
     return next(new ErrorHandler('You already have a vacation request overlapping those dates', 400));
   }
 
-  const createAsApproved = canManage && Boolean(userId);
   const normalizedAttributedYear = _normalizeVacationAttributionYear(
     canManage ? attributedYear : undefined,
     start
@@ -4417,7 +4439,14 @@ exports.createVacationRequest = catchAsyncErrors(async (req, res, next) => {
     targetUserId,
     start,
     end,
-    normalizedAttributedYear
+    normalizedAttributedYear,
+    null,
+    {
+      skipSeptemberRule: shouldBypassAdminWorkerCreationRules,
+      skipNoticeOutsideSeasonRule: shouldBypassAdminWorkerCreationRules,
+      skipSummerLengthRules: shouldBypassAdminWorkerCreationRules,
+      skipShortPeriodLimitRule: shouldBypassAdminWorkerCreationRules,
+    }
   );
 
   const request = await VacationRequest.create({
