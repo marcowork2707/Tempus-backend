@@ -3014,7 +3014,8 @@ async function getActiveClientsMonthlyReport(centerId, monthStr = null) {
         setDateInput(toInput, endInput);
       }
 
-      // Ajuste requerido: en "Estado cuenta" forzar "Cuenta no bloqueada".
+      // Ajuste requerido: en "Estado cuenta" forzar "Cuenta no bloqueada"
+      // y en "Excluir clientes con el pago de su mensualidad cancelado" forzar "Sí".
       const selects = Array.from(document.querySelectorAll('select'));
       for (const select of selects) {
         const contextText = normalize(
@@ -3023,15 +3024,25 @@ async function getActiveClientsMonthlyReport(centerId, monthStr = null) {
           ''
         );
 
-        if (!contextText.includes('estado cuenta')) continue;
+        if (contextText.includes('estado cuenta')) {
+          const option = Array.from(select.options).find((opt) =>
+            normalize(opt.textContent).includes('cuenta no bloqueada')
+          );
+          if (option) {
+            select.value = option.value;
+            select.dispatchEvent(new Event('change', { bubbles: true }));
+          }
+          continue;
+        }
 
-        const option = Array.from(select.options).find((opt) =>
-          normalize(opt.textContent).includes('cuenta no bloqueada')
-        );
-
-        if (option) {
-          select.value = option.value;
-          select.dispatchEvent(new Event('change', { bubbles: true }));
+        if (contextText.includes('excluir clientes con el pago de su mensualidad cancelado')) {
+          const option = Array.from(select.options).find((opt) =>
+            normalize(opt.textContent) === 'sí' || normalize(opt.textContent) === 'si'
+          );
+          if (option) {
+            select.value = option.value;
+            select.dispatchEvent(new Event('change', { bubbles: true }));
+          }
         }
       }
 
