@@ -4126,19 +4126,11 @@ async function _assertVacationRangeAlignedWithWorkCycle(centerId, userId, start,
   );
 
   const startKey = formatLocalDateKey(startDate);
-  const dayBeforeKey = formatLocalDateKey(dayBeforeStart);
   const dayAfterKey = formatLocalDateKey(dayAfterEnd);
 
   if (!workingDays.has(startKey)) {
     throw new ErrorHandler(
       'Las vacaciones deben empezar el primer día en el que la persona tendría turno de trabajo',
-      400
-    );
-  }
-
-  if (workingDays.has(dayBeforeKey)) {
-    throw new ErrorHandler(
-      'Las vacaciones deben pedirse desde el primer día laborable: el día anterior también tenía turno',
       400
     );
   }
