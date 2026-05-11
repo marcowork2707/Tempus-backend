@@ -3444,17 +3444,31 @@ exports.deleteCenterExpense = catchAsyncErrors(async (req, res, next) => {
   if (!expense) return next(new ErrorHandler('Expense not found', 404));
 
   const shouldDeleteRecurring = String(req.query.deleteRecurringConcept || '').toLowerCase() === 'true';
+  let deletedFutureMonthsCount = 0;
   if (shouldDeleteRecurring && expense.recurringConcept) {
     await RecurringExpenseConcept.findOneAndUpdate(
       { _id: expense.recurringConcept, center: req.params.id },
       { active: false, updatedBy: req.user.id },
       { new: true }
     );
+
+    const deleteFutureResult = await CenterExpense.deleteMany({
+      center: req.params.id,
+      recurringConcept: expense.recurringConcept,
+      month: { $gt: expense.month },
+    });
+    deletedFutureMonthsCount = Number(deleteFutureResult?.deletedCount || 0);
   }
 
   await CenterExpense.findByIdAndDelete(expense._id);
 
-  res.status(200).json({ success: true, message: 'Expense deleted' });
+  res.status(200).json({
+    success: true,
+    message:
+      shouldDeleteRecurring && expense.recurringConcept
+        ? `Expense deleted. Removed ${deletedFutureMonthsCount} linked entries from future months.`
+        : 'Expense deleted',
+  });
 });
 
 exports.getCenterWeeklyPlanning = catchAsyncErrors(async (req, res, next) => {
