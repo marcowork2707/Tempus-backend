@@ -913,6 +913,42 @@ const parseMonthRange = (month) => {
   return { monthStart, monthEnd };
 };
 
+const toYearMonth = (date = new Date()) => {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  return `${year}-${month}`;
+};
+
+const normalizeEffectiveMonth = (value) => {
+  if (!value) return null;
+  if (typeof value !== 'string') return null;
+  const normalized = value.trim();
+  if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(normalized)) return null;
+  return normalized;
+};
+
+const getEffectiveWeeklyContractHours = (assignment, month) => {
+  const targetMonth = normalizeEffectiveMonth(month);
+  if (!targetMonth) {
+    return assignment.weeklyContractHours === undefined ? null : assignment.weeklyContractHours;
+  }
+
+  const history = Array.isArray(assignment.weeklyContractHoursHistory)
+    ? assignment.weeklyContractHoursHistory
+    : [];
+
+  const applicableEntries = history
+    .filter((entry) => normalizeEffectiveMonth(entry.effectiveMonth) && entry.effectiveMonth <= targetMonth)
+    .sort((left, right) => left.effectiveMonth.localeCompare(right.effectiveMonth));
+
+  if (applicableEntries.length > 0) {
+    const latest = applicableEntries[applicableEntries.length - 1];
+    return latest.weeklyContractHours === undefined ? null : latest.weeklyContractHours;
+  }
+
+  return assignment.weeklyContractHours === undefined ? null : assignment.weeklyContractHours;
+};
+
 const buildWeeklyOvertimeSummaries = ({ month, assignments, entries, aggregationMode, vacationCreditByUserDate = new Map() }) => {
   const { monthStart, monthEnd } = parseMonthRange(month);
   const rangeStart = getStartOfIsoWeek(monthStart);
@@ -928,9 +964,10 @@ const buildWeeklyOvertimeSummaries = ({ month, assignments, entries, aggregation
 
   const summaries = assignments.map((assignment) => {
     const userId = assignment.user._id.toString();
-    const weeklyContractHours = Number(assignment.weeklyContractHours);
-    const weeklyContractMinutes = Number.isFinite(weeklyContractHours) && weeklyContractHours > 0
-      ? Math.round(weeklyContractHours * 60)
+    const effectiveWeeklyContractHoursRaw = getEffectiveWeeklyContractHours(assignment, month);
+    const effectiveWeeklyContractHours = Number(effectiveWeeklyContractHoursRaw);
+    const weeklyContractMinutes = Number.isFinite(effectiveWeeklyContractHours) && effectiveWeeklyContractHours > 0
+      ? Math.round(effectiveWeeklyContractHours * 60)
       : 0;
     const userEntries = entriesByUser.get(userId) || [];
     const vacationCreditMinutesInMonth = Array.from(vacationCreditByUserDate.entries()).reduce((total, [key, minutes]) => {
@@ -998,7 +1035,9 @@ const buildWeeklyOvertimeSummaries = ({ month, assignments, entries, aggregation
         name: assignment.user.name,
         email: assignment.user.email,
       },
-      weeklyContractHours: weeklyContractHours || null,
+      weeklyContractHours: Number.isFinite(effectiveWeeklyContractHours) && effectiveWeeklyContractHours > 0
+        ? Number(effectiveWeeklyContractHours.toFixed(2))
+        : null,
       weeklyContractMinutes,
       configurationMissing: weeklyContractMinutes <= 0,
       totalWorkedMinutes: workedMinutesInMonth,
@@ -1183,6 +1222,61 @@ exports.deleteCenter = catchAsyncErrors(async (req, res, next) => {
 
 // ─── STAFF MANAGEMENT ───────────────────────────────────────────────────────
 
+const upsertWeeklyContractHoursHistoryEntry = ({ assignment, effectiveMonth, weeklyContractHours, updatedBy }) => {
+  const normalizedMonth = normalizeEffectiveMonth(effectiveMonth);
+  if (!normalizedMonth) {
+    throw new ErrorHandler('weeklyContractHoursEffectiveMonth must be YYYY-MM', 400);
+  }
+
+  if (!Array.isArray(assignment.weeklyContractHoursHistory)) {
+    assignment.weeklyContractHoursHistory = [];
+  }
+
+  const existingIndex = assignment.weeklyContractHoursHistory.findIndex(
+    (entry) => entry.effectiveMonth === normalizedMonth
+  );
+
+  const nextEntry = {
+    effectiveMonth: normalizedMonth,
+    weeklyContractHours,
+    updatedBy: updatedBy || null,
+    updatedAt: new Date(),
+  };
+
+  if (existingIndex >= 0) {
+    assignment.weeklyContractHoursHistory[existingIndex] = nextEntry;
+  } else {
+    assignment.weeklyContractHoursHistory.push(nextEntry);
+  }
+
+  assignment.weeklyContractHoursHistory = assignment.weeklyContractHoursHistory
+    .slice()
+    .sort((left, right) => left.effectiveMonth.localeCompare(right.effectiveMonth));
+};
+
+const seedLegacyWeeklyContractHistory = (assignment) => {
+  if (!assignment) return;
+  if (Array.isArray(assignment.weeklyContractHoursHistory) && assignment.weeklyContractHoursHistory.length > 0) {
+    return;
+  }
+
+  if (assignment.weeklyContractHours === null || assignment.weeklyContractHours === undefined) {
+    return;
+  }
+
+  const createdAt = assignment.createdAt ? new Date(assignment.createdAt) : new Date();
+  const seedMonth = toYearMonth(createdAt);
+
+  assignment.weeklyContractHoursHistory = [
+    {
+      effectiveMonth: seedMonth,
+      weeklyContractHours: Number(assignment.weeklyContractHours),
+      updatedBy: null,
+      updatedAt: createdAt,
+    },
+  ];
+};
+
 // Get all users assigned to a center
 exports.getCenterUsers = catchAsyncErrors(async (req, res, next) => {
   const center = await Center.findById(req.params.id);
@@ -1197,7 +1291,7 @@ exports.getCenterUsers = catchAsyncErrors(async (req, res, next) => {
 
 // Assign a user to a center with a role
 exports.addUserToCenter = catchAsyncErrors(async (req, res, next) => {
-  const { userId, roleName, weeklyContractHours } = req.body;
+  const { userId, roleName, weeklyContractHours, weeklyContractHoursEffectiveMonth } = req.body;
 
   if (!userId || !roleName) {
     return next(new ErrorHandler('userId and roleName are required', 400));
@@ -1219,13 +1313,39 @@ exports.addUserToCenter = catchAsyncErrors(async (req, res, next) => {
   const existing = await UserCenterRole.findOne({ user: userId, center: req.params.id });
   if (existing) return next(new ErrorHandler('User is already assigned to this center', 400));
 
+  const parsedWeeklyContractHours = weeklyContractHours === undefined || weeklyContractHours === null || weeklyContractHours === ''
+    ? null
+    : Number(weeklyContractHours);
+
+  if (parsedWeeklyContractHours !== null && (!Number.isFinite(parsedWeeklyContractHours) || parsedWeeklyContractHours < 0)) {
+    return next(new ErrorHandler('weeklyContractHours must be a valid number >= 0', 400));
+  }
+
+  const normalizedEffectiveMonth = weeklyContractHoursEffectiveMonth === undefined
+    || weeklyContractHoursEffectiveMonth === null
+    || weeklyContractHoursEffectiveMonth === ''
+    ? null
+    : normalizeEffectiveMonth(weeklyContractHoursEffectiveMonth);
+
+  if (weeklyContractHoursEffectiveMonth !== undefined && weeklyContractHoursEffectiveMonth !== null && weeklyContractHoursEffectiveMonth !== '' && !normalizedEffectiveMonth) {
+    return next(new ErrorHandler('weeklyContractHoursEffectiveMonth must be YYYY-MM', 400));
+  }
+
   const assignment = await UserCenterRole.create({
     user: userId,
     center: req.params.id,
     role: role._id,
-    weeklyContractHours: weeklyContractHours === undefined || weeklyContractHours === null || weeklyContractHours === ''
-      ? null
-      : Number(weeklyContractHours),
+    weeklyContractHours: parsedWeeklyContractHours === null ? null : Number(parsedWeeklyContractHours.toFixed(2)),
+    weeklyContractHoursHistory: parsedWeeklyContractHours === null
+      ? []
+      : [
+        {
+          effectiveMonth: normalizedEffectiveMonth || toYearMonth(new Date()),
+          weeklyContractHours: Number(parsedWeeklyContractHours.toFixed(2)),
+          updatedBy: req.user?._id || req.user?.id || null,
+          updatedAt: new Date(),
+        },
+      ],
   });
 
   const populated = await assignment.populate([
@@ -1238,7 +1358,7 @@ exports.addUserToCenter = catchAsyncErrors(async (req, res, next) => {
 
 // Update user's role in a center
 exports.updateUserCenterRole = catchAsyncErrors(async (req, res, next) => {
-  const { roleName, weeklyContractHours } = req.body;
+  const { roleName, weeklyContractHours, weeklyContractHoursEffectiveMonth } = req.body;
   if (roleName === undefined && weeklyContractHours === undefined) {
     return next(new ErrorHandler('Provide roleName or weeklyContractHours', 400));
   }
@@ -1260,15 +1380,44 @@ exports.updateUserCenterRole = catchAsyncErrors(async (req, res, next) => {
   }
 
   if (weeklyContractHours !== undefined) {
+    seedLegacyWeeklyContractHistory(assignment);
+
+    const normalizedEffectiveMonth = weeklyContractHoursEffectiveMonth === undefined
+      || weeklyContractHoursEffectiveMonth === null
+      || weeklyContractHoursEffectiveMonth === ''
+      ? null
+      : normalizeEffectiveMonth(weeklyContractHoursEffectiveMonth);
+
+    if (weeklyContractHoursEffectiveMonth !== undefined && weeklyContractHoursEffectiveMonth !== null && weeklyContractHoursEffectiveMonth !== '' && !normalizedEffectiveMonth) {
+      return next(new ErrorHandler('weeklyContractHoursEffectiveMonth must be YYYY-MM', 400));
+    }
+
+    const effectiveMonth = normalizedEffectiveMonth || toYearMonth(new Date());
+
     if (weeklyContractHours === null || weeklyContractHours === '') {
-      assignment.weeklyContractHours = null;
+      upsertWeeklyContractHoursHistoryEntry({
+        assignment,
+        effectiveMonth,
+        weeklyContractHours: null,
+        updatedBy: req.user?._id || req.user?.id || null,
+      });
     } else {
       const parsedWeeklyContractHours = Number(weeklyContractHours);
       if (!Number.isFinite(parsedWeeklyContractHours) || parsedWeeklyContractHours < 0) {
         return next(new ErrorHandler('weeklyContractHours must be a valid number >= 0', 400));
       }
-      assignment.weeklyContractHours = Number(parsedWeeklyContractHours.toFixed(2));
+
+      upsertWeeklyContractHoursHistoryEntry({
+        assignment,
+        effectiveMonth,
+        weeklyContractHours: Number(parsedWeeklyContractHours.toFixed(2)),
+        updatedBy: req.user?._id || req.user?.id || null,
+      });
     }
+
+    const currentMonth = toYearMonth(new Date());
+    const effectiveCurrentHours = getEffectiveWeeklyContractHours(assignment, currentMonth);
+    assignment.weeklyContractHours = effectiveCurrentHours === undefined ? null : effectiveCurrentHours;
   }
 
   await assignment.save();

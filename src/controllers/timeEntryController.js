@@ -35,6 +35,40 @@ const formatLocalDate = (date) => {
   return `${y}-${m}-${day}`;
 };
 
+const toYearMonth = (date = new Date()) => {
+  const d = startOfDay(date);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+};
+
+const normalizeEffectiveMonth = (value) => {
+  if (!value || typeof value !== 'string') return null;
+  const normalized = value.trim();
+  if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(normalized)) return null;
+  return normalized;
+};
+
+const getEffectiveWeeklyContractHours = (assignment, month) => {
+  const targetMonth = normalizeEffectiveMonth(month);
+  if (!targetMonth) {
+    return assignment.weeklyContractHours === undefined ? null : assignment.weeklyContractHours;
+  }
+
+  const history = Array.isArray(assignment.weeklyContractHoursHistory)
+    ? assignment.weeklyContractHoursHistory
+    : [];
+
+  const applicableEntries = history
+    .filter((entry) => normalizeEffectiveMonth(entry.effectiveMonth) && entry.effectiveMonth <= targetMonth)
+    .sort((left, right) => left.effectiveMonth.localeCompare(right.effectiveMonth));
+
+  if (applicableEntries.length > 0) {
+    const latest = applicableEntries[applicableEntries.length - 1];
+    return latest.weeklyContractHours === undefined ? null : latest.weeklyContractHours;
+  }
+
+  return assignment.weeklyContractHours === undefined ? null : assignment.weeklyContractHours;
+};
+
 const getTimeZoneOffsetMinutes = (date, timeZone) => {
   const timeZoneName = new Intl.DateTimeFormat('en-US', {
     timeZone,
@@ -491,8 +525,16 @@ exports.getTimeEntries = catchAsyncErrors(async (req, res, next) => {
       active: true,
     }).lean();
 
-    if (assignment && assignment.weeklyContractHours !== null && assignment.weeklyContractHours !== undefined) {
-      summary.weeklyContractMinutes = Math.max(0, Math.round(Number(assignment.weeklyContractHours) * 60));
+    const effectiveMonth = normalizeEffectiveMonth(req.query.month)
+      || normalizeEffectiveMonth(String(req.query.startDate || '').slice(0, 7))
+      || toYearMonth(new Date());
+
+    const effectiveWeeklyHours = assignment
+      ? getEffectiveWeeklyContractHours(assignment, effectiveMonth)
+      : null;
+
+    if (effectiveWeeklyHours !== null && effectiveWeeklyHours !== undefined) {
+      summary.weeklyContractMinutes = Math.max(0, Math.round(Number(effectiveWeeklyHours) * 60));
     }
   }
 

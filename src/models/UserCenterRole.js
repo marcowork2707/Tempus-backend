@@ -1,5 +1,30 @@
 const mongoose = require('mongoose');
 
+const weeklyContractHoursHistorySchema = new mongoose.Schema(
+  {
+    effectiveMonth: {
+      type: String,
+      required: true,
+      match: [/^\d{4}-(0[1-9]|1[0-2])$/, 'effectiveMonth must be YYYY-MM'],
+    },
+    weeklyContractHours: {
+      type: Number,
+      min: [0, 'weeklyContractHours cannot be negative'],
+      default: null,
+    },
+    updatedBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'User',
+      default: null,
+    },
+    updatedAt: {
+      type: Date,
+      default: Date.now,
+    },
+  },
+  { _id: false }
+);
+
 const userCenterRoleSchema = new mongoose.Schema(
   {
     user: {
@@ -25,6 +50,10 @@ const userCenterRoleSchema = new mongoose.Schema(
       type: Number,
       min: [0, 'weeklyContractHours cannot be negative'],
       default: null,
+    },
+    weeklyContractHoursHistory: {
+      type: [weeklyContractHoursHistorySchema],
+      default: [],
     },
   },
   { timestamps: true }
