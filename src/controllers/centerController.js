@@ -4305,6 +4305,12 @@ async function _assertVacationRangeAlignedWithWorkCycle(centerId, userId, start,
     ignoreVacationRequestId
   );
 
+  // If the worker has no planned shifts in this validation window,
+  // do not block manual/admin vacation creation on cycle-alignment rules.
+  if (workingDays.size === 0) {
+    return;
+  }
+
   const startKey = formatLocalDateKey(startDate);
   const dayAfterKey = formatLocalDateKey(dayAfterEnd);
 
