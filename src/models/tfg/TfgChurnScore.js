@@ -16,6 +16,7 @@ const tfgChurnScoreSchema = new mongoose.Schema(
     daysSinceLastAttendance: { type: Number, default: null },
     lastAttendance: { type: Date, default: null },
     tarifa: { type: String, default: '' },
+    cohortType: { type: String, enum: ['regular', 'onramp'], default: 'regular' },
   },
   { timestamps: true, collection: 'tfgchurnscores' }
 );
