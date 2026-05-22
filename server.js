@@ -50,6 +50,7 @@ app.use('/api/time-entries', require('./src/routes/timeEntryRoutes'));
 app.use('/api/aimharder', require('./src/routes/aimharderRoutes'));
 app.use('/api/settings', require('./src/routes/settingsRoutes'));
 app.use('/api/stock', require('./src/routes/stockRoutes'));
+app.use('/api/tfg', require('./src/routes/tfgRoutes'));
 
 // 404 handler
 app.use((req, res) => {
