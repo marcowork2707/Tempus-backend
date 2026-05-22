@@ -41,14 +41,30 @@ exports.listChurnScores = async (req, res) => {
 
     if (riskBand) filter.riskBand = riskBand;
 
-    const [scores, total] = await Promise.all([
+    // bandCounts globales: independientes del filtro de riskBand y paginacion
+    const bandCountsFilter = {
+      center: new mongoose.Types.ObjectId(centerId),
+    };
+    if (resolvedCutoffDate) bandCountsFilter.cutoffDate = resolvedCutoffDate;
+
+    const [scores, total, bandAgg] = await Promise.all([
       TfgChurnScore.find(filter)
         .sort({ score: -1 })
         .skip(skip)
         .limit(limit)
         .lean(),
       TfgChurnScore.countDocuments(filter),
+      TfgChurnScore.aggregate([
+        { $match: bandCountsFilter },
+        { $group: { _id: '$riskBand', count: { $sum: 1 } } },
+      ]),
     ]);
+
+    const bandCounts = { high: 0, medium: 0, low: 0, total: 0 };
+    bandAgg.forEach(({ _id, count }) => {
+      if (_id in bandCounts) bandCounts[_id] = count;
+      bandCounts.total += count;
+    });
 
     // Adjuntar nombre legible del centro
     let centerName = null;
@@ -66,6 +82,7 @@ exports.listChurnScores = async (req, res) => {
         skip,
         cutoffDate: resolvedCutoffDate ? resolvedCutoffDate.toISOString().slice(0, 10) : null,
         centerName,
+        bandCounts,
       },
     });
   } catch (err) {

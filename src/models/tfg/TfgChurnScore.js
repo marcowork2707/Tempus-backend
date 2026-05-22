@@ -10,6 +10,12 @@ const tfgChurnScoreSchema = new mongoose.Schema(
     riskBand: { type: String, enum: ['low', 'medium', 'high'], required: true },
     modelVersion: { type: String, required: true },
     topFeatures: [{ name: String, contribution: Number }],
+    clientName: { type: String, default: '' },
+    phone: { type: String, default: '' },
+    aimharderId: { type: String, default: '' },
+    daysSinceLastAttendance: { type: Number, default: null },
+    lastAttendance: { type: Date, default: null },
+    tarifa: { type: String, default: '' },
   },
   { timestamps: true, collection: 'tfgchurnscores' }
 );
