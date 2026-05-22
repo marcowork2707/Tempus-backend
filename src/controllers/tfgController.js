@@ -1,6 +1,7 @@
 const mongoose = require('mongoose');
 const TfgChurnScore = require('../models/tfg/TfgChurnScore');
 const TfgAttendanceEvent = require('../models/tfg/TfgAttendanceEvent');
+const TfgActivityMetric = require('../models/tfg/TfgActivityMetric');
 const Center = require('../models/Center');
 
 // ---------------------------------------------------------------------------
@@ -126,7 +127,7 @@ exports.getClientChurnHistory = async (req, res) => {
 // ---------------------------------------------------------------------------
 exports.getActivityMetrics = async (req, res) => {
   try {
-    const { centerId, from, to } = req.query;
+    const { centerId, from, to, rangeKey } = req.query;
 
     if (!centerId) {
       return res.status(400).json({ success: false, message: 'centerId requerido' });
@@ -138,6 +139,7 @@ exports.getActivityMetrics = async (req, res) => {
     const centerOid = new mongoose.Types.ObjectId(centerId);
     const toDate = to ? new Date(to) : new Date();
     const fromDate = from ? new Date(from) : new Date(toDate.getTime() - 30 * 24 * 60 * 60 * 1000);
+    const resolvedRangeKey = rangeKey || '1m';
 
     // Comprobar si hay eventos de asistencia en Mongo
     const eventCount = await TfgAttendanceEvent.countDocuments({ center: centerOid });
@@ -168,6 +170,27 @@ exports.getActivityMetrics = async (req, res) => {
         : null;
 
     if (!hasEventData) {
+      // Fallback: leer metricas precomputadas por el batch en tfgactivitymetrics
+      const precomputed = await TfgActivityMetric.findOne({
+        center: centerOid,
+        rangeKey: resolvedRangeKey,
+      })
+        .sort({ cutoffDate: -1 })
+        .lean();
+
+      if (precomputed) {
+        return res.json({
+          success: true,
+          dataSource: 'precomputed_batch',
+          weeklyAttendance: precomputed.weeklyAttendance || [],
+          noShowRate: precomputed.noShowRate,
+          topClasses: precomputed.topClasses || [],
+          totalAttendances: precomputed.totalAttendances || 0,
+          riskDistribution,
+          highRiskPct,
+        });
+      }
+
       return res.json({
         success: true,
         dataSource: 'churn_scores_only',
