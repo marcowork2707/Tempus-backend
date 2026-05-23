@@ -2,6 +2,8 @@ const mongoose = require('mongoose');
 const TfgChurnScore = require('../models/tfg/TfgChurnScore');
 const TfgAttendanceEvent = require('../models/tfg/TfgAttendanceEvent');
 const TfgActivityMetric = require('../models/tfg/TfgActivityMetric');
+const TfgClientActivity = require('../models/tfg/TfgClientActivity');
+const TfgClientAction = require('../models/tfg/TfgClientAction');
 const Center = require('../models/Center');
 
 // ---------------------------------------------------------------------------
@@ -270,6 +272,251 @@ exports.getActivityMetrics = async (req, res) => {
       highRiskPct,
       totalAttendances: weeklyAttendance.reduce((s, w) => s + w.count, 0),
     });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// ---------------------------------------------------------------------------
+// GET /api/tfg/client-detail/:clientHash?centerId=...
+// Vista detalle de un cliente: score actual + histórico de scores.
+// ---------------------------------------------------------------------------
+exports.getClientDetail = async (req, res) => {
+  try {
+    const { clientHash } = req.params;
+    const { centerId } = req.query;
+
+    if (!centerId) {
+      return res.status(400).json({ success: false, message: 'centerId requerido' });
+    }
+    if (!mongoose.Types.ObjectId.isValid(centerId)) {
+      return res.status(400).json({ success: false, message: 'centerId no es un ObjectId valido' });
+    }
+
+    const centerOid = new mongoose.Types.ObjectId(centerId);
+
+    // Histórico de scores ordenado desc (el primero es el más reciente)
+    const history = await TfgChurnScore.find({
+      center: centerOid,
+      clientHash,
+    })
+      .sort({ cutoffDate: -1 })
+      .limit(52)
+      .lean();
+
+    if (history.length === 0) {
+      return res.status(404).json({ success: false, message: 'Cliente no encontrado' });
+    }
+
+    const current = history[0];
+
+    const scoreHistory = history.map((h) => ({
+      cutoffDate: h.cutoffDate.toISOString().slice(0, 10),
+      score: h.score,
+      riskBand: h.riskBand,
+    }));
+
+    return res.json({
+      success: true,
+      data: {
+        clientHash: current.clientHash,
+        clientName: current.clientName || '',
+        phone: current.phone || '',
+        aimharderId: current.aimharderId || '',
+        tarifa: current.tarifa || '',
+        cohortType: current.cohortType || 'regular',
+        currentScore: {
+          score: current.score,
+          riskBand: current.riskBand,
+          cutoffDate: current.cutoffDate.toISOString().slice(0, 10),
+          horizonDays: current.horizonDays,
+          modelVersion: current.modelVersion,
+          baselineScore: current.baselineScore ?? null,
+          topFeatures: current.topFeatures || [],
+        },
+        scoreHistory,
+      },
+    });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// ---------------------------------------------------------------------------
+// GET /api/tfg/client-activity/:clientHash?centerId=...&days=365
+// Actividad del cliente: asistencias (heatmap), no-shows, pagos, cambios tarifa.
+// Lee de la colección tfgclientactivity escrita por el batch Python.
+// ---------------------------------------------------------------------------
+exports.getClientActivity = async (req, res) => {
+  try {
+    const { clientHash } = req.params;
+    const { centerId } = req.query;
+    const days = Math.min(parseInt(req.query.days, 10) || 365, 730);
+
+    if (!centerId) {
+      return res.status(400).json({ success: false, message: 'centerId requerido' });
+    }
+    if (!mongoose.Types.ObjectId.isValid(centerId)) {
+      return res.status(400).json({ success: false, message: 'centerId no es un ObjectId valido' });
+    }
+
+    const centerOid = new mongoose.Types.ObjectId(centerId);
+
+    const doc = await TfgClientActivity.findOne({
+      center: centerOid,
+      clientHash,
+    }).lean();
+
+    if (!doc) {
+      // Devolver estructura vacía si aún no se ha poblado la colección
+      return res.json({
+        success: true,
+        dataSource: 'empty',
+        message: 'Sin datos de actividad. Ejecuta el batch con soporte client-activity.',
+        data: {
+          attendances: [],
+          noShows: [],
+          payments: [],
+          tarifaChanges: [],
+        },
+      });
+    }
+
+    // Filtrar por ventana temporal solicitada
+    const cutoff = new Date();
+    const fromDate = new Date(cutoff.getTime() - days * 24 * 60 * 60 * 1000);
+    const fromStr = fromDate.toISOString().slice(0, 10);
+
+    const filterByDate = (items) =>
+      (items || []).filter((item) => item.date >= fromStr);
+
+    return res.json({
+      success: true,
+      dataSource: 'mongo',
+      data: {
+        attendances: filterByDate(doc.attendances),
+        noShows: filterByDate(doc.noShows),
+        payments: filterByDate(doc.payments),
+        tarifaChanges: filterByDate(doc.tarifaChanges),
+      },
+    });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// ---------------------------------------------------------------------------
+// POST /api/tfg/client-actions
+// Registra una accion sobre un cliente (contacted / snoozed / false_positive).
+// Body: { centerId, clientHash, action, notes?, snoozeUntil? }
+// ---------------------------------------------------------------------------
+exports.createClientAction = async (req, res) => {
+  try {
+    const { centerId, clientHash, action, notes, snoozeUntil } = req.body;
+
+    if (!centerId || !clientHash || !action) {
+      return res.status(400).json({ success: false, message: 'centerId, clientHash y action son requeridos' });
+    }
+    if (!mongoose.Types.ObjectId.isValid(centerId)) {
+      return res.status(400).json({ success: false, message: 'centerId no es un ObjectId valido' });
+    }
+    if (!['contacted', 'snoozed', 'false_positive'].includes(action)) {
+      return res.status(400).json({ success: false, message: 'action debe ser contacted, snoozed o false_positive' });
+    }
+    if (action === 'snoozed' && !snoozeUntil) {
+      return res.status(400).json({ success: false, message: 'snoozeUntil es requerido para action=snoozed' });
+    }
+
+    const doc = await TfgClientAction.create({
+      center: new mongoose.Types.ObjectId(centerId),
+      clientHash,
+      action,
+      notes: notes || '',
+      snoozeUntil: snoozeUntil ? new Date(snoozeUntil) : null,
+      createdBy: req.user._id,
+    });
+
+    return res.status(201).json({ success: true, data: doc });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// ---------------------------------------------------------------------------
+// GET /api/tfg/client-actions?centerId=...&clientHashes=hash1,hash2,...
+// Devuelve mapa { clientHash: { lastAction, notes, snoozeUntil, contactedAt } }
+// para los hashes pedidos. Solo considera acciones no eliminadas (deletedAt=null).
+// ---------------------------------------------------------------------------
+exports.getClientActions = async (req, res) => {
+  try {
+    const { centerId, clientHashes } = req.query;
+
+    if (!centerId) {
+      return res.status(400).json({ success: false, message: 'centerId requerido' });
+    }
+    if (!mongoose.Types.ObjectId.isValid(centerId)) {
+      return res.status(400).json({ success: false, message: 'centerId no es un ObjectId valido' });
+    }
+
+    const centerOid = new mongoose.Types.ObjectId(centerId);
+    const hashList = clientHashes
+      ? clientHashes.split(',').map((h) => h.trim()).filter(Boolean)
+      : [];
+
+    const filter = { center: centerOid, deletedAt: null };
+    if (hashList.length > 0) filter.clientHash = { $in: hashList };
+
+    // Traer todas las acciones vigentes, ordenadas por fecha desc
+    const actions = await TfgClientAction.find(filter)
+      .sort({ createdAt: -1 })
+      .lean();
+
+    // Agrupar por clientHash: conservar la accion mas reciente por hash
+    const map = {};
+    for (const a of actions) {
+      if (!map[a.clientHash]) {
+        map[a.clientHash] = {
+          lastAction: a.action,
+          notes: a.notes || '',
+          snoozeUntil: a.snoozeUntil || null,
+          contactedAt: a.action === 'contacted' ? a.createdAt : null,
+          actionId: a._id,
+        };
+      } else if (a.action === 'contacted' && !map[a.clientHash].contactedAt) {
+        // Registrar la primera vez que se contacto aunque haya acciones mas recientes de otro tipo
+        map[a.clientHash].contactedAt = a.createdAt;
+      }
+    }
+
+    return res.json({ success: true, data: map });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// ---------------------------------------------------------------------------
+// DELETE /api/tfg/client-actions/:actionId
+// Soft delete de una accion (marca deletedAt).
+// ---------------------------------------------------------------------------
+exports.deleteClientAction = async (req, res) => {
+  try {
+    const { actionId } = req.params;
+
+    if (!mongoose.Types.ObjectId.isValid(actionId)) {
+      return res.status(400).json({ success: false, message: 'actionId no es un ObjectId valido' });
+    }
+
+    const doc = await TfgClientAction.findByIdAndUpdate(
+      actionId,
+      { deletedAt: new Date() },
+      { new: true }
+    );
+
+    if (!doc) {
+      return res.status(404).json({ success: false, message: 'Accion no encontrada' });
+    }
+
+    return res.json({ success: true, data: doc });
   } catch (err) {
     return res.status(500).json({ success: false, message: err.message });
   }
