@@ -1,9 +1,12 @@
 const mongoose = require('mongoose');
+const path = require('path');
+const fs = require('fs');
 const TfgChurnScore = require('../models/tfg/TfgChurnScore');
 const TfgAttendanceEvent = require('../models/tfg/TfgAttendanceEvent');
 const TfgActivityMetric = require('../models/tfg/TfgActivityMetric');
 const TfgClientActivity = require('../models/tfg/TfgClientActivity');
 const TfgClientAction = require('../models/tfg/TfgClientAction');
+const TfgSurvivalCurve = require('../models/tfg/TfgSurvivalCurve');
 const Center = require('../models/Center');
 
 // ---------------------------------------------------------------------------
@@ -190,6 +193,12 @@ exports.getActivityMetrics = async (req, res) => {
           totalAttendances: precomputed.totalAttendances || 0,
           riskDistribution,
           highRiskPct,
+          peakHour: precomputed.peakHour || null,
+          peakDayOfWeek: precomputed.peakDayOfWeek || null,
+          hourHeatmap: precomputed.hourHeatmap || [],
+          attendanceByTarifa: precomputed.attendanceByTarifa || [],
+          attendanceTrend: precomputed.attendanceTrend || [],
+          insights: precomputed.insights || [],
         });
       }
 
@@ -495,6 +504,34 @@ exports.getClientActions = async (req, res) => {
 };
 
 // ---------------------------------------------------------------------------
+// GET /api/tfg/survival-curves?centerId=...&segmentation=global|tarifa|onramp
+// Devuelve curvas Kaplan-Meier precomputadas por el batch para el centro.
+// ---------------------------------------------------------------------------
+exports.getSurvivalCurves = async (req, res) => {
+  try {
+    const { centerId, segmentation } = req.query;
+
+    if (!centerId) {
+      return res.status(400).json({ success: false, message: 'centerId requerido' });
+    }
+    if (!mongoose.Types.ObjectId.isValid(centerId)) {
+      return res.status(400).json({ success: false, message: 'centerId no es un ObjectId valido' });
+    }
+
+    const filter = { center: new mongoose.Types.ObjectId(centerId) };
+    if (segmentation) filter.segmentation = segmentation;
+
+    const curves = await TfgSurvivalCurve.find(filter)
+      .sort({ segmentation: 1, group: 1 })
+      .lean();
+
+    return res.json({ success: true, data: curves });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// ---------------------------------------------------------------------------
 // DELETE /api/tfg/client-actions/:actionId
 // Soft delete de una accion (marca deletedAt).
 // ---------------------------------------------------------------------------
@@ -517,6 +554,318 @@ exports.deleteClientAction = async (req, res) => {
     }
 
     return res.json({ success: true, data: doc });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// ---------------------------------------------------------------------------
+// GET /api/tfg/executive-kpis?centerId=...&compareDays=7
+// Dashboard ejecutivo: compara el corte actual con el de hace ~compareDays dias.
+// ---------------------------------------------------------------------------
+exports.getExecutiveKpis = async (req, res) => {
+  try {
+    const { centerId } = req.query;
+    const compareDays = parseInt(req.query.compareDays, 10) || 7;
+
+    if (!centerId) {
+      return res.status(400).json({ success: false, message: 'centerId requerido' });
+    }
+    if (!mongoose.Types.ObjectId.isValid(centerId)) {
+      return res.status(400).json({ success: false, message: 'centerId no es un ObjectId valido' });
+    }
+
+    const centerOid = new mongoose.Types.ObjectId(centerId);
+
+    // Obtener todos los cutoffDates distintos para este centro, ordenados desc
+    const cutoffDates = await TfgChurnScore.distinct('cutoffDate', { center: centerOid });
+    if (!cutoffDates || cutoffDates.length === 0) {
+      return res.json({
+        success: true,
+        data: {
+          currentCutoffDate: null,
+          previousCutoffDate: null,
+          highRiskNow: 0,
+          highRiskPrev: null,
+          newInHighRisk: [],
+          recovered: [],
+          contactedThisWeek: 0,
+          contactedThisMonth: 0,
+        },
+      });
+    }
+
+    // Ordenar desc
+    cutoffDates.sort((a, b) => new Date(b) - new Date(a));
+    const currentCutoff = cutoffDates[0];
+
+    // Buscar cutoff anterior mas cercano a (current - compareDays)
+    const targetPrev = new Date(currentCutoff);
+    targetPrev.setDate(targetPrev.getDate() - compareDays);
+
+    // Encontrar el cutoff mas cercano al objetivo (diferencia minima)
+    let prevCutoff = null;
+    if (cutoffDates.length > 1) {
+      const candidates = cutoffDates.slice(1); // excluir el actual
+      prevCutoff = candidates.reduce((best, d) => {
+        const diffBest = Math.abs(new Date(best) - targetPrev);
+        const diffD = Math.abs(new Date(d) - targetPrev);
+        return diffD < diffBest ? d : best;
+      });
+    }
+
+    // Cargar scores del corte actual
+    const currentScores = await TfgChurnScore.find({ center: centerOid, cutoffDate: currentCutoff })
+      .select('clientHash clientName riskBand')
+      .lean();
+
+    const currentHighSet = new Set(
+      currentScores.filter((s) => s.riskBand === 'high').map((s) => s.clientHash)
+    );
+    const currentHighMap = new Map(
+      currentScores.filter((s) => s.riskBand === 'high').map((s) => [s.clientHash, s])
+    );
+    const highRiskNow = currentHighSet.size;
+
+    let highRiskPrev = null;
+    let newInHighRisk = [];
+    let recovered = [];
+
+    if (prevCutoff) {
+      const prevScores = await TfgChurnScore.find({ center: centerOid, cutoffDate: prevCutoff })
+        .select('clientHash clientName riskBand')
+        .lean();
+
+      const prevHighSet = new Set(
+        prevScores.filter((s) => s.riskBand === 'high').map((s) => s.clientHash)
+      );
+      const prevHighMap = new Map(
+        prevScores.filter((s) => s.riskBand === 'high').map((s) => [s.clientHash, s])
+      );
+
+      highRiskPrev = prevHighSet.size;
+
+      // Nuevos en alto riesgo: en currentHigh pero NO en prevHigh
+      const newHighHashes = [...currentHighSet].filter((h) => !prevHighSet.has(h));
+      newInHighRisk = newHighHashes.slice(0, 5).map((h) => {
+        const s = currentHighMap.get(h);
+        return { clientHash: h, clientName: s?.clientName || '' };
+      });
+
+      // Recuperados: estaban en prevHigh pero ya NO en currentHigh
+      const recoveredHashes = [...prevHighSet].filter((h) => !currentHighSet.has(h));
+      recovered = recoveredHashes.slice(0, 5).map((h) => {
+        const s = prevHighMap.get(h);
+        return { clientHash: h, clientName: s?.clientName || '' };
+      });
+    }
+
+    // Contactados en ultimos 7 y 30 dias
+    const now = new Date();
+    const weekAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+    const monthAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+
+    const [contactedThisWeek, contactedThisMonth] = await Promise.all([
+      TfgClientAction.countDocuments({
+        center: centerOid,
+        action: 'contacted',
+        deletedAt: null,
+        createdAt: { $gte: weekAgo },
+      }),
+      TfgClientAction.countDocuments({
+        center: centerOid,
+        action: 'contacted',
+        deletedAt: null,
+        createdAt: { $gte: monthAgo },
+      }),
+    ]);
+
+    return res.json({
+      success: true,
+      data: {
+        currentCutoffDate: currentCutoff instanceof Date
+          ? currentCutoff.toISOString().slice(0, 10)
+          : String(currentCutoff).slice(0, 10),
+        previousCutoffDate: prevCutoff
+          ? (prevCutoff instanceof Date ? prevCutoff.toISOString().slice(0, 10) : String(prevCutoff).slice(0, 10))
+          : null,
+        highRiskNow,
+        highRiskPrev,
+        newInHighRisk,
+        recovered,
+        contactedThisWeek,
+        contactedThisMonth,
+      },
+    });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// ---------------------------------------------------------------------------
+// GET /api/tfg/model-info?centerId=...
+// Informacion del modelo: metadata, historico de ejecuciones, distribucion de
+// scores y top features globales por mean SHAP del ultimo corte.
+// ---------------------------------------------------------------------------
+exports.getModelInfo = async (req, res) => {
+  try {
+    const { centerId } = req.query;
+
+    if (!centerId) {
+      return res.status(400).json({ success: false, message: 'centerId requerido' });
+    }
+    if (!mongoose.Types.ObjectId.isValid(centerId)) {
+      return res.status(400).json({ success: false, message: 'centerId no es un ObjectId valido' });
+    }
+
+    const centerOid = new mongoose.Types.ObjectId(centerId);
+
+    // --- modelMeta: leer del filesystem ---
+    let modelMeta = null;
+    try {
+      const metaPath = path.resolve(__dirname, '../../../tfg-ml/models/best_model_metadata.json');
+      if (fs.existsSync(metaPath)) {
+        const raw = fs.readFileSync(metaPath, 'utf8');
+        const parsed = JSON.parse(raw);
+        modelMeta = {
+          name: parsed.model_name || null,
+          trainDate: parsed.train_date || null,
+          version: parsed.train_date
+            ? `${parsed.train_date.slice(0, 10)}_${(parsed.model_name || '').replace(/\s/g, '')}`
+            : null,
+          calibration: parsed.calibration || null,
+          testMetrics: parsed.test_metrics || null,
+          featureNames: parsed.feature_names || [],
+        };
+      }
+    } catch (_) {
+      modelMeta = null;
+    }
+
+    // --- batchRuns: agregar por cutoffDate para TODOS los centros ---
+    // Primero obtener todos los centros para saber sus nombres
+    const allCenters = await Center.find({}).select('_id name').lean();
+    const centerNameMap = {};
+    allCenters.forEach((c) => { centerNameMap[String(c._id)] = c.name; });
+
+    const batchAgg = await TfgChurnScore.aggregate([
+      {
+        $group: {
+          _id: { cutoffDate: '$cutoffDate', center: '$center', riskBand: '$riskBand' },
+          count: { $sum: 1 },
+          avgScore: { $avg: '$score' },
+        },
+      },
+      { $sort: { '_id.cutoffDate': -1 } },
+    ]);
+
+    // Reagrupar por cutoffDate
+    const batchMap = new Map();
+    for (const row of batchAgg) {
+      const dateKey = row._id.cutoffDate instanceof Date
+        ? row._id.cutoffDate.toISOString().slice(0, 10)
+        : String(row._id.cutoffDate).slice(0, 10);
+      const cid = String(row._id.center);
+      const band = row._id.riskBand;
+
+      if (!batchMap.has(dateKey)) {
+        batchMap.set(dateKey, {
+          cutoffDate: dateKey,
+          totalClients: 0,
+          highRiskCount: 0,
+          mediumRiskCount: 0,
+          lowRiskCount: 0,
+          avgScore: 0,
+          _scoreSum: 0,
+          _scoreCount: 0,
+          byCenter: {},
+        });
+      }
+      const entry = batchMap.get(dateKey);
+      entry.totalClients += row.count;
+      if (band === 'high') entry.highRiskCount += row.count;
+      if (band === 'medium') entry.mediumRiskCount += row.count;
+      if (band === 'low') entry.lowRiskCount += row.count;
+      entry._scoreSum += row.avgScore * row.count;
+      entry._scoreCount += row.count;
+
+      const cname = centerNameMap[cid] || cid;
+      if (!entry.byCenter[cname]) entry.byCenter[cname] = { total: 0, high: 0 };
+      entry.byCenter[cname].total += row.count;
+      if (band === 'high') entry.byCenter[cname].high += row.count;
+    }
+
+    const batchRuns = [...batchMap.values()]
+      .sort((a, b) => b.cutoffDate.localeCompare(a.cutoffDate))
+      .slice(0, 20)
+      .map((e) => ({
+        cutoffDate: e.cutoffDate,
+        totalClients: e.totalClients,
+        highRiskCount: e.highRiskCount,
+        mediumRiskCount: e.mediumRiskCount,
+        lowRiskCount: e.lowRiskCount,
+        avgScore: e._scoreCount > 0 ? parseFloat((e._scoreSum / e._scoreCount).toFixed(4)) : 0,
+        byCenter: e.byCenter,
+      }));
+
+    // --- scoreDistribution: ultimo corte del centro solicitado ---
+    const latestCutoffDoc = await TfgChurnScore.findOne({ center: centerOid })
+      .sort({ cutoffDate: -1 })
+      .select('cutoffDate')
+      .lean();
+
+    let scoreDistribution = [];
+    if (latestCutoffDoc) {
+      const allScores = await TfgChurnScore.find({
+        center: centerOid,
+        cutoffDate: latestCutoffDoc.cutoffDate,
+      })
+        .select('score')
+        .lean();
+
+      // 10 buckets uniformes 0-1
+      const buckets = Array.from({ length: 10 }, (_, i) => ({
+        bucket: `${(i / 10).toFixed(1)}-${((i + 1) / 10).toFixed(1)}`,
+        count: 0,
+      }));
+      for (const s of allScores) {
+        const idx = Math.min(Math.floor(s.score * 10), 9);
+        buckets[idx].count++;
+      }
+      scoreDistribution = buckets;
+    }
+
+    // --- topGlobalFeatures: mean SHAP del ultimo corte del centro ---
+    let topGlobalFeatures = [];
+    if (latestCutoffDoc) {
+      const featureAgg = await TfgChurnScore.aggregate([
+        { $match: { center: centerOid, cutoffDate: latestCutoffDoc.cutoffDate } },
+        { $unwind: '$topFeatures' },
+        {
+          $group: {
+            _id: '$topFeatures.name',
+            meanShap: { $avg: '$topFeatures.contribution' },
+            count: { $sum: 1 },
+          },
+        },
+        { $sort: { meanShap: -1 } },
+        { $limit: 10 },
+      ]);
+      topGlobalFeatures = featureAgg.map((f) => ({
+        name: f._id,
+        meanShap: parseFloat(f.meanShap.toFixed(4)),
+      }));
+    }
+
+    return res.json({
+      success: true,
+      data: {
+        modelMeta,
+        batchRuns,
+        scoreDistribution,
+        topGlobalFeatures,
+      },
+    });
   } catch (err) {
     return res.status(500).json({ success: false, message: err.message });
   }

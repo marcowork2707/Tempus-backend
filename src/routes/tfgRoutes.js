@@ -5,11 +5,14 @@ const {
   listChurnScores,
   getClientChurnHistory,
   getActivityMetrics,
+  getSurvivalCurves,
   getClientDetail,
   getClientActivity,
   createClientAction,
   getClientActions,
   deleteClientAction,
+  getExecutiveKpis,
+  getModelInfo,
 } = require('../controllers/tfgController');
 
 router.get('/churn-scores', isAuthenticatedUser, authorizeRoles('admin'), listChurnScores);
@@ -20,6 +23,7 @@ router.get(
   getClientChurnHistory
 );
 router.get('/activity-metrics', isAuthenticatedUser, authorizeRoles('admin'), getActivityMetrics);
+router.get('/survival-curves', isAuthenticatedUser, authorizeRoles('admin'), getSurvivalCurves);
 router.get(
   '/client-detail/:clientHash',
   isAuthenticatedUser,
@@ -41,5 +45,8 @@ router.delete(
   authorizeRoles('admin'),
   deleteClientAction
 );
+
+router.get('/executive-kpis', isAuthenticatedUser, authorizeRoles('admin'), getExecutiveKpis);
+router.get('/model-info', isAuthenticatedUser, authorizeRoles('admin'), getModelInfo);
 
 module.exports = router;

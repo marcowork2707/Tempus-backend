@@ -9,6 +9,36 @@ const tfgActivityMetricSchema = new mongoose.Schema(
     noShowRate: { type: Number, default: null },
     topClasses: [{ classType: String, count: Number }],
     weeklyAttendance: [{ weekStart: String, count: Number }],
+    // Nuevos campos — dashboard UX6
+    peakHour: {
+      type: mongoose.Schema.Types.Mixed,
+      default: null,
+      // { hour: Number, count: Number }
+    },
+    peakDayOfWeek: {
+      type: mongoose.Schema.Types.Mixed,
+      default: null,
+      // { day: String ('monday'...'sunday'), count: Number }
+    },
+    hourHeatmap: {
+      type: [mongoose.Schema.Types.Mixed],
+      default: [],
+      // [{ dayOfWeek: String, hour: Number, count: Number }]
+    },
+    attendanceByTarifa: {
+      type: [mongoose.Schema.Types.Mixed],
+      default: [],
+      // [{ tarifa: String, totalAttendances: Number, uniqueClients: Number, avgPerClient: Number }]
+    },
+    attendanceTrend: {
+      type: [mongoose.Schema.Types.Mixed],
+      default: [],
+      // [{ month: 'YYYY-MM', count: Number }]
+    },
+    insights: {
+      type: [String],
+      default: [],
+    },
   },
   { timestamps: true, collection: 'tfgactivitymetrics' }
 );
