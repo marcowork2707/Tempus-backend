@@ -1,6 +1,8 @@
 const mongoose = require('mongoose');
 const path = require('path');
 const fs = require('fs');
+const axios = require('axios');
+const FormData = require('form-data');
 const TfgChurnScore = require('../models/tfg/TfgChurnScore');
 const TfgAttendanceEvent = require('../models/tfg/TfgAttendanceEvent');
 const TfgActivityMetric = require('../models/tfg/TfgActivityMetric');
@@ -868,5 +870,127 @@ exports.getModelInfo = async (req, res) => {
     });
   } catch (err) {
     return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// ---------------------------------------------------------------------------
+// Helpers comunes para los endpoints de import-jobs
+// ---------------------------------------------------------------------------
+
+const ML_SERVICE_URL = () => process.env.TFG_ML_SERVICE_URL || 'http://localhost:8000';
+
+function handleMlServiceError(err, res) {
+  if (err.code === 'ECONNREFUSED' || err.code === 'ECONNRESET' || err.code === 'ETIMEDOUT' || err.code === 'ERR_CANCELED') {
+    return res.status(503).json({
+      success: false,
+      message: 'Servicio de procesamiento no disponible. Asegurate de que el microservicio Python esta en ejecucion.',
+    });
+  }
+  if (err.response) {
+    const status = err.response.status;
+    if (status === 422) {
+      return res.status(422).json({ success: false, message: err.response.data?.detail || 'Validacion fallida en el servicio Python.' });
+    }
+    return res.status(500).json({ success: false, message: 'Error interno en el servicio de procesamiento.' });
+  }
+  return res.status(503).json({
+    success: false,
+    message: 'Servicio de procesamiento no disponible.',
+  });
+}
+
+// ---------------------------------------------------------------------------
+// POST /api/tfg/import-jobs
+// Recibe CSVs del frontend (multipart) y los reenvía al microservicio Python.
+// Multer (memoryStorage) debe estar configurado en la ruta antes de llamar aquí.
+// ---------------------------------------------------------------------------
+exports.importJobsCreate = async (req, res) => {
+  try {
+    const files = req.files;
+    const { center } = req.body;
+
+    if (!center) {
+      return res.status(400).json({ success: false, message: 'El campo center es requerido.' });
+    }
+
+    if (!files || files.length === 0) {
+      return res.status(400).json({ success: false, message: 'Se requiere al menos un archivo CSV.' });
+    }
+
+    if (files.length > 10) {
+      return res.status(400).json({ success: false, message: 'Maximo 10 archivos por envio.' });
+    }
+
+    const totalBytes = files.reduce((sum, f) => sum + f.size, 0);
+    const MAX_BYTES = 50 * 1024 * 1024; // 50 MB
+    if (totalBytes > MAX_BYTES) {
+      return res.status(400).json({ success: false, message: 'El tamano total de los archivos supera el limite de 50 MB.' });
+    }
+
+    for (const f of files) {
+      if (!f.originalname.toLowerCase().endsWith('.csv')) {
+        return res.status(400).json({ success: false, message: `El archivo "${f.originalname}" no es un CSV.` });
+      }
+    }
+
+    const form = new FormData();
+    form.append('center', center);
+    for (const f of files) {
+      form.append('files', f.buffer, { filename: f.originalname, contentType: 'text/csv' });
+    }
+
+    const response = await axios.post(
+      `${ML_SERVICE_URL()}/jobs/process`,
+      form,
+      {
+        headers: form.getHeaders(),
+        timeout: 30000,
+      }
+    );
+
+    return res.status(202).json({ success: true, data: response.data });
+  } catch (err) {
+    return handleMlServiceError(err, res);
+  }
+};
+
+// ---------------------------------------------------------------------------
+// GET /api/tfg/import-jobs/:jobId
+// Proxy puro al microservicio Python GET /jobs/{jobId}.
+// ---------------------------------------------------------------------------
+exports.importJobsGet = async (req, res) => {
+  try {
+    const { jobId } = req.params;
+
+    const response = await axios.get(
+      `${ML_SERVICE_URL()}/jobs/${encodeURIComponent(jobId)}`,
+      { timeout: 10000 }
+    );
+
+    return res.json({ success: true, data: response.data });
+  } catch (err) {
+    if (err.response && err.response.status === 404) {
+      return res.status(404).json({ success: false, message: 'Job no encontrado.' });
+    }
+    return handleMlServiceError(err, res);
+  }
+};
+
+// ---------------------------------------------------------------------------
+// GET /api/tfg/import-jobs
+// Lista los ultimos N jobs del microservicio Python.
+// ---------------------------------------------------------------------------
+exports.importJobsList = async (req, res) => {
+  try {
+    const limit = Math.min(parseInt(req.query.limit, 10) || 20, 200);
+
+    const response = await axios.get(
+      `${ML_SERVICE_URL()}/jobs`,
+      { params: { limit }, timeout: 10000 }
+    );
+
+    return res.json({ success: true, data: response.data });
+  } catch (err) {
+    return handleMlServiceError(err, res);
   }
 };

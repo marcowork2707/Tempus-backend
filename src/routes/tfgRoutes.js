@@ -1,4 +1,5 @@
 const express = require('express');
+const multer = require('multer');
 const router = express.Router();
 const { isAuthenticatedUser, authorizeRoles } = require('../middleware/auth');
 const {
@@ -13,7 +14,16 @@ const {
   deleteClientAction,
   getExecutiveKpis,
   getModelInfo,
+  importJobsCreate,
+  importJobsGet,
+  importJobsList,
 } = require('../controllers/tfgController');
+
+// Multer con memoryStorage: los buffers se pasan al microservicio Python sin tocar disco local.
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 50 * 1024 * 1024 }, // 50 MB por archivo
+});
 
 router.get('/churn-scores', isAuthenticatedUser, authorizeRoles('admin'), listChurnScores);
 router.get(
@@ -48,5 +58,10 @@ router.delete(
 
 router.get('/executive-kpis', isAuthenticatedUser, authorizeRoles('admin'), getExecutiveKpis);
 router.get('/model-info', isAuthenticatedUser, authorizeRoles('admin'), getModelInfo);
+
+// Import jobs — proxy al microservicio Python
+router.post('/import-jobs', isAuthenticatedUser, authorizeRoles('admin'), upload.array('files', 10), importJobsCreate);
+router.get('/import-jobs', isAuthenticatedUser, authorizeRoles('admin'), importJobsList);
+router.get('/import-jobs/:jobId', isAuthenticatedUser, authorizeRoles('admin'), importJobsGet);
 
 module.exports = router;
