@@ -8,6 +8,7 @@ const TfgAttendanceEvent = require('../models/tfg/TfgAttendanceEvent');
 const TfgActivityMetric = require('../models/tfg/TfgActivityMetric');
 const TfgClientActivity = require('../models/tfg/TfgClientActivity');
 const TfgClientAction = require('../models/tfg/TfgClientAction');
+const TfgDataCoverage = require('../models/tfg/TfgDataCoverage');
 const TfgSurvivalCurve = require('../models/tfg/TfgSurvivalCurve');
 const Center = require('../models/Center');
 
@@ -992,5 +993,32 @@ exports.importJobsList = async (req, res) => {
     return res.json({ success: true, data: response.data });
   } catch (err) {
     return handleMlServiceError(err, res);
+  }
+};
+
+// ---------------------------------------------------------------------------
+// GET /api/tfg/data-coverage?centerId=...
+// Devuelve la fecha hasta la que hay datos cargados por tipo de CSV.
+// ---------------------------------------------------------------------------
+exports.getDataCoverage = async (req, res) => {
+  try {
+    const { centerId } = req.query;
+    if (!centerId) {
+      return res.status(400).json({ success: false, message: 'centerId requerido' });
+    }
+    if (!mongoose.Types.ObjectId.isValid(centerId)) {
+      return res.status(400).json({ success: false, message: 'centerId no valido' });
+    }
+    const doc = await TfgDataCoverage.findOne({ center: new mongoose.Types.ObjectId(centerId) }).lean();
+    if (!doc) {
+      return res.json({
+        success: true,
+        data: null,
+        message: 'Sin cobertura registrada todavia. Ejecuta una ingesta para inicializarla.',
+      });
+    }
+    return res.json({ success: true, data: doc });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
   }
 };

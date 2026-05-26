@@ -17,6 +17,7 @@ const {
   importJobsCreate,
   importJobsGet,
   importJobsList,
+  getDataCoverage,
 } = require('../controllers/tfgController');
 
 // Multer con memoryStorage: los buffers se pasan al microservicio Python sin tocar disco local.
@@ -63,5 +64,7 @@ router.get('/model-info', isAuthenticatedUser, authorizeRoles('admin'), getModel
 router.post('/import-jobs', isAuthenticatedUser, authorizeRoles('admin'), upload.array('files', 10), importJobsCreate);
 router.get('/import-jobs', isAuthenticatedUser, authorizeRoles('admin'), importJobsList);
 router.get('/import-jobs/:jobId', isAuthenticatedUser, authorizeRoles('admin'), importJobsGet);
+
+router.get('/data-coverage', isAuthenticatedUser, authorizeRoles('admin'), getDataCoverage);
 
 module.exports = router;
