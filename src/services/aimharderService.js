@@ -1484,11 +1484,11 @@ async function upsertClassReportRoster(centerId, date, reports = []) {
 
 async function getClassReportStatus(dateStr = null, centerId, options = {}) {
   const targetDate = dateStr || toDateString(new Date());
-  const { initialize = false } = options;
+  const { initialize = false, forceRefresh = false } = options;
 
   let roster = await ClassReportRoster.findOne({ center: centerId, date: targetDate }).lean();
   const rosterNeedsRefresh = roster && (roster.instructors || []).some((entry) => !entry.classTime || !entry.className);
-  if ((!roster || rosterNeedsRefresh) && initialize) {
+  if ((forceRefresh || ((!roster || rosterNeedsRefresh) && initialize))) {
     const context = await getClassReportContext(targetDate, centerId, '', true, null);
     roster = (await upsertClassReportRoster(centerId, context.date, context.reports || [])).toObject();
   }

@@ -330,7 +330,7 @@ exports.getClassReports = async (req, res) => {
 
 exports.getClassReportStatus = async (req, res) => {
   try {
-    const { centerId, date, initialize } = req.query;
+    const { centerId, date, initialize, forceRefresh } = req.query;
     if (!centerId) {
       return res.status(400).json({ success: false, message: 'centerId es obligatorio' });
     }
@@ -349,6 +349,7 @@ exports.getClassReportStatus = async (req, res) => {
 
     const result = await getClassReportStatus(date || null, centerId, {
       initialize: initialize === 'true',
+      forceRefresh: forceRefresh === 'true',
     });
     const currentUser = await User.findById(req.user.id).select('name nickname firstName lastName');
     const userNameCandidates = buildUserNameCandidates(currentUser);
