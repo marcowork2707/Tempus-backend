@@ -4553,7 +4553,7 @@ exports.getVacationRequests = catchAsyncErrors(async (req, res, next) => {
 });
 
 exports.createVacationRequest = catchAsyncErrors(async (req, res, next) => {
-  const { startDate, endDate, reason, userId, attributedYear } = req.body;
+  const { startDate, endDate, reason, userId, attributedYear, allowRestrictionOverride } = req.body;
   const center = await Center.findById(req.params.id);
   if (!center) return next(new ErrorHandler('Center not found', 404));
 
@@ -4566,6 +4566,8 @@ exports.createVacationRequest = catchAsyncErrors(async (req, res, next) => {
 
   const targetUserId = canManage && userId ? userId : req.user.id;
   const isAdminRequester = req.user.role === 'admin' || roleName === 'admin';
+  const isManagedWorkerCreation = canManage && Boolean(userId);
+  const canOverrideRestrictions = isManagedWorkerCreation && Boolean(allowRestrictionOverride);
 
   if (!startDate || !endDate || !reason?.trim()) {
     return next(new ErrorHandler('startDate, endDate and reason are required', 400));
@@ -4577,14 +4579,46 @@ exports.createVacationRequest = catchAsyncErrors(async (req, res, next) => {
     return next(new ErrorHandler('endDate cannot be earlier than startDate', 400));
   }
 
-  await _assertVacationRangeAlignedWithWorkCycle(req.params.id, targetUserId, start, end);
-
   const createAsApproved = canManage && Boolean(userId);
   const shouldBypassAdminWorkerCreationRules = isAdminRequester && Boolean(userId);
 
-  await _assertVacationConflictRules(req.params.id, targetUserId, start, end, null, {
-    skipBlockedUserOverlapRule: shouldBypassAdminWorkerCreationRules,
-  });
+  if (!canOverrideRestrictions) {
+    try {
+      await _assertVacationRangeAlignedWithWorkCycle(req.params.id, targetUserId, start, end);
+
+      await _assertVacationConflictRules(req.params.id, targetUserId, start, end, null, {
+        skipBlockedUserOverlapRule: false,
+      });
+
+      await _assertVacationPolicyRules(
+        req.params.id,
+        targetUserId,
+        start,
+        end,
+        _normalizeVacationAttributionYear(
+          canManage ? attributedYear : undefined,
+          start
+        ),
+        null,
+        {
+          skipSeptemberRule: false,
+          skipNoticeOutsideSeasonRule: false,
+          skipSummerLengthRules: false,
+          skipShortPeriodLimitRule: false,
+        }
+      );
+    } catch (validationErr) {
+      if (isManagedWorkerCreation && validationErr instanceof ErrorHandler) {
+        return res.status(409).json({
+          success: false,
+          requiresConfirmation: true,
+          warningType: 'vacation_restriction',
+          message: validationErr.message,
+        });
+      }
+      throw validationErr;
+    }
+  }
 
   const overlapping = await VacationRequest.findOne({
     center: req.params.id,
@@ -4603,20 +4637,22 @@ exports.createVacationRequest = catchAsyncErrors(async (req, res, next) => {
     start
   );
 
-  await _assertVacationPolicyRules(
-    req.params.id,
-    targetUserId,
-    start,
-    end,
-    normalizedAttributedYear,
-    null,
-    {
-      skipSeptemberRule: shouldBypassAdminWorkerCreationRules,
-      skipNoticeOutsideSeasonRule: shouldBypassAdminWorkerCreationRules,
-      skipSummerLengthRules: shouldBypassAdminWorkerCreationRules,
-      skipShortPeriodLimitRule: shouldBypassAdminWorkerCreationRules,
-    }
-  );
+  if (!canOverrideRestrictions) {
+    await _assertVacationPolicyRules(
+      req.params.id,
+      targetUserId,
+      start,
+      end,
+      normalizedAttributedYear,
+      null,
+      {
+        skipSeptemberRule: shouldBypassAdminWorkerCreationRules,
+        skipNoticeOutsideSeasonRule: shouldBypassAdminWorkerCreationRules,
+        skipSummerLengthRules: shouldBypassAdminWorkerCreationRules,
+        skipShortPeriodLimitRule: shouldBypassAdminWorkerCreationRules,
+      }
+    );
+  }
 
   const request = await VacationRequest.create({
     center: req.params.id,
@@ -4638,7 +4674,11 @@ exports.createVacationRequest = catchAsyncErrors(async (req, res, next) => {
     .populate('user', 'name email')
     .populate('reviewedBy', 'name email');
 
-  res.status(201).json({ success: true, request: populated });
+  res.status(201).json({
+    success: true,
+    request: populated,
+    restrictionOverrideUsed: canOverrideRestrictions,
+  });
 });
 
 exports.reviewVacationRequest = catchAsyncErrors(async (req, res, next) => {
