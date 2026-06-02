@@ -445,7 +445,7 @@ exports.createClientAction = async (req, res) => {
       action,
       notes: notes || '',
       snoozeUntil: snoozeUntil ? new Date(snoozeUntil) : null,
-      createdBy: req.user._id,
+      createdBy: req.user.id,
     });
 
     return res.status(201).json({ success: true, data: doc });
