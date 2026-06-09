@@ -35,6 +35,9 @@ const {
   getCenterMonthlyOvertimeSummary,
   upsertCenterPayrollEntry,
   deleteCenterPayrollEntry,
+  getCenterOvertimeBank,
+  settleCenterOvertimeMonth,
+  undoCenterOvertimeSettlement,
   getCenterExpensesSummary,
   previewCenterExpenseProration,
   createCenterExpense,
@@ -147,6 +150,9 @@ router.get('/:id/payroll', authorizeRoles('admin'), getCenterPayroll);
 router.get('/:id/overtime-summary', authorizeRoles('admin'), getCenterMonthlyOvertimeSummary);
 router.post('/:id/payroll', authorizeRoles('admin'), upsertCenterPayrollEntry);
 router.delete('/:id/payroll/:entryId', authorizeRoles('admin'), deleteCenterPayrollEntry);
+router.get('/:id/overtime-bank', authorizeRoles('admin'), getCenterOvertimeBank);
+router.post('/:id/overtime-bank/settle', authorizeRoles('admin'), settleCenterOvertimeMonth);
+router.delete('/:id/overtime-bank/settle/:settlementId', authorizeRoles('admin'), undoCenterOvertimeSettlement);
 router.get('/:id/expenses', authorizeRoles('admin'), getCenterExpensesSummary);
 router.post('/:id/expenses/proration-preview', authorizeRoles('admin'), previewCenterExpenseProration);
 router.get('/:id/balance-range', authorizeRoles('admin'), getBalanceRange);

@@ -11,6 +11,7 @@ const VacationConflictRule = require('../models/VacationConflictRule');
 const ExtraIncentive = require('../models/ExtraIncentive');
 const RecurringIncentiveRule = require('../models/RecurringIncentiveRule');
 const PayrollEntry = require('../models/PayrollEntry');
+const OvertimeSettlement = require('../models/OvertimeSettlement');
 const CenterExpense = require('../models/CenterExpense');
 const RecurringExpenseConcept = require('../models/RecurringExpenseConcept');
 const CenterTariffGroup = require('../models/CenterTariffGroup');
@@ -1055,6 +1056,75 @@ const buildWeeklyOvertimeSummaries = ({ month, assignments, entries, aggregation
   return summaries.sort((left, right) => left.user.name.localeCompare(right.user.name, 'es'));
 };
 
+// Gathers fichajes + jornada + créditos de vacaciones para un mes y devuelve los
+// resúmenes de horas extra por trabajador (coach). Reutilizado por el endpoint de
+// resumen y por la bolsa de horas extra. Lanza ErrorHandler si falta centro o rol.
+const gatherMonthlyOvertimeSummaries = async ({ centerId, month, userId }) => {
+  const center = await Center.findById(centerId);
+  if (!center) throw new ErrorHandler('Center not found', 404);
+
+  const { monthStart, monthEnd } = parseMonthRange(month);
+  const queryStart = getStartOfIsoWeek(monthStart);
+  const queryEnd = addDaysLocal(getStartOfIsoWeek(monthEnd), 6);
+  const coachRole = await Role.findOne({ name: 'coach' });
+  if (!coachRole) throw new ErrorHandler('Coach role not found', 404);
+
+  const assignmentFilter = { center: centerId, role: coachRole._id, active: true };
+  if (userId) assignmentFilter.user = userId;
+
+  const assignments = await UserCenterRole.find(assignmentFilter)
+    .populate('user', 'name email active')
+    .populate('role', 'name');
+
+  const validAssignments = assignments.filter((assignment) => Boolean(assignment.user?._id));
+  const userIds = validAssignments.map((assignment) => assignment.user._id);
+  const entries = userIds.length === 0
+    ? []
+    : await TimeEntry.find({
+        center: centerId,
+        user: { $in: userIds },
+        date: {
+          $gte: queryStart,
+          $lt: endOfDayLocal(queryEnd),
+        },
+        status: 'completed',
+      })
+        .populate('user', 'name email')
+        .sort({ date: 1, entryTime: 1 });
+
+  const [patterns, vacationOverrides] = userIds.length === 0
+    ? [[], []]
+    : await Promise.all([
+        ShiftPattern.find({ center: centerId, user: { $in: userIds }, active: true })
+          .populate('user', 'name email')
+          .populate('shift', 'name startTime endTime'),
+        ShiftOverride.find({
+          center: centerId,
+          user: { $in: userIds },
+          date: {
+            $gte: queryStart,
+            $lte: queryEnd,
+          },
+        }).populate('user', 'name email'),
+      ]);
+
+  const vacationCreditByUserDate = buildOffDayCreditMap({
+    baseOccurrences: computeOccurrences(patterns.filter(hasResolvedUser), queryStart, queryEnd),
+    overrides: vacationOverrides.filter(hasResolvedUser),
+  });
+
+  const aggregationMode = center.overtimeSettings?.monthlyAggregationMode || 'positive_only';
+  const summaries = buildWeeklyOvertimeSummaries({
+    month,
+    assignments: validAssignments,
+    entries,
+    aggregationMode,
+    vacationCreditByUserDate,
+  });
+
+  return { center, coachRole, aggregationMode, summaries };
+};
+
 // Public centers list for registration flow
 exports.getPublicCenters = catchAsyncErrors(async (req, res, next) => {
   const centers = await Center.find({ active: true }).sort({ name: 1 });
@@ -1430,77 +1500,15 @@ exports.updateUserCenterRole = catchAsyncErrors(async (req, res, next) => {
 });
 
 exports.getCenterMonthlyOvertimeSummary = catchAsyncErrors(async (req, res, next) => {
-  const center = await Center.findById(req.params.id);
-  if (!center) return next(new ErrorHandler('Center not found', 404));
-
   const { month, userId } = req.query;
   if (!month) {
     return next(new ErrorHandler('month query param is required', 400));
   }
 
-  const { monthStart, monthEnd } = parseMonthRange(month);
-  const queryStart = getStartOfIsoWeek(monthStart);
-  const queryEnd = addDaysLocal(getStartOfIsoWeek(monthEnd), 6);
-  const coachRole = await Role.findOne({ name: 'coach' });
-  if (!coachRole) {
-    return next(new ErrorHandler('Coach role not found', 404));
-  }
-
-  const assignmentFilter = {
-    center: req.params.id,
-    role: coachRole._id,
-    active: true,
-  };
-  if (userId) assignmentFilter.user = userId;
-
-  const assignments = await UserCenterRole.find(assignmentFilter)
-    .populate('user', 'name email active')
-    .populate('role', 'name');
-
-  const validAssignments = assignments.filter((assignment) => Boolean(assignment.user?._id));
-  const userIds = validAssignments.map((assignment) => assignment.user._id);
-  const entries = userIds.length === 0
-    ? []
-    : await TimeEntry.find({
-        center: req.params.id,
-        user: { $in: userIds },
-        date: {
-          $gte: queryStart,
-          $lt: endOfDayLocal(queryEnd),
-        },
-        status: 'completed',
-      })
-        .populate('user', 'name email')
-        .sort({ date: 1, entryTime: 1 });
-
-  const [patterns, vacationOverrides] = userIds.length === 0
-    ? [[], []]
-    : await Promise.all([
-        ShiftPattern.find({ center: req.params.id, user: { $in: userIds }, active: true })
-          .populate('user', 'name email')
-          .populate('shift', 'name startTime endTime'),
-        ShiftOverride.find({
-          center: req.params.id,
-          user: { $in: userIds },
-          date: {
-            $gte: queryStart,
-            $lte: queryEnd,
-          },
-        }).populate('user', 'name email'),
-      ]);
-
-  const vacationCreditByUserDate = buildOffDayCreditMap({
-    baseOccurrences: computeOccurrences(patterns.filter(hasResolvedUser), queryStart, queryEnd),
-    overrides: vacationOverrides.filter(hasResolvedUser),
-  });
-
-  const aggregationMode = center.overtimeSettings?.monthlyAggregationMode || 'positive_only';
-  const summaries = buildWeeklyOvertimeSummaries({
+  const { aggregationMode, summaries } = await gatherMonthlyOvertimeSummaries({
+    centerId: req.params.id,
     month,
-    assignments: validAssignments,
-    entries,
-    aggregationMode,
-    vacationCreditByUserDate,
+    userId,
   });
 
   res.status(200).json({
@@ -3140,6 +3148,217 @@ exports.deleteCenterPayrollEntry = catchAsyncErrors(async (req, res, next) => {
   if (!deleted) return next(new ErrorHandler('Payroll entry not found', 404));
 
   res.status(200).json({ success: true, message: 'Payroll entry deleted' });
+});
+
+// ─── Bolsa de horas extra ───────────────────────────────────────────────────
+
+const formatSignedMinutesLabel = (minutes) => {
+  const value = Math.round(minutes || 0);
+  const sign = value > 0 ? '+' : value < 0 ? '-' : '';
+  return `${sign}${formatMinutesForLabel(value)}`;
+};
+
+const deriveSettlementDecision = ({ generatedMinutes, paidMinutes }) => {
+  const banked = generatedMinutes - paidMinutes;
+  if (paidMinutes > 0 && banked > 0) return 'mixed';
+  if (paidMinutes > 0) return 'paid';
+  if (generatedMinutes < 0) return 'debt';
+  return 'banked';
+};
+
+// El saldo de la bolsa vive en la asignación de coach del trabajador en el centro.
+const findCoachAssignment = async (centerId, userId) => {
+  const coachRole = await Role.findOne({ name: 'coach' });
+  if (!coachRole) throw new ErrorHandler('Coach role not found', 404);
+  return UserCenterRole.findOne({ center: centerId, user: userId, role: coachRole._id, active: true });
+};
+
+exports.getCenterOvertimeBank = catchAsyncErrors(async (req, res, next) => {
+  const center = await Center.findById(req.params.id).select('_id');
+  if (!center) return next(new ErrorHandler('Center not found', 404));
+
+  const { userId } = req.query;
+  if (!userId) return next(new ErrorHandler('userId query param is required', 400));
+  const month = typeof req.query.month === 'string' && req.query.month
+    ? req.query.month
+    : new Date().toISOString().slice(0, 7);
+  if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(month)) {
+    return next(new ErrorHandler('month must be in format YYYY-MM', 400));
+  }
+
+  const assignment = await findCoachAssignment(req.params.id, userId);
+  if (!assignment) return next(new ErrorHandler('User is not assigned to this center as coach', 400));
+
+  const balanceMinutes = Math.round(Number(assignment.overtimeBankMinutes || 0));
+  const lastSettledMonth = assignment.overtimeBankUpdatedMonth || null;
+
+  // Neto real del mes seleccionado (desde fichajes), con signo.
+  const { summaries } = await gatherMonthlyOvertimeSummaries({ centerId: req.params.id, month, userId });
+  const summary = summaries[0] || null;
+  const generatedMinutes = summary ? Math.round(Number(summary.totalDeltaMinutes || 0)) : 0;
+
+  const existing = await OvertimeSettlement.findOne({ center: req.params.id, user: userId, month });
+  const history = await OvertimeSettlement.find({ center: req.params.id, user: userId })
+    .populate('createdBy', 'name email')
+    .sort({ month: 1 });
+
+  let status;
+  let canSettle = false;
+  let canUndo = false;
+  if (existing) {
+    status = 'settled';
+    canUndo = lastSettledMonth === month; // solo la última liquidación es reversible
+  } else if (lastSettledMonth && month <= lastSettledMonth) {
+    status = 'locked_past'; // hay un mes posterior ya liquidado; este quedó fuera de la cadena
+  } else {
+    status = 'pending';
+    canSettle = true;
+  }
+
+  // Proyección de cómo quedaría si se liquidase ahora con el saldo actual.
+  const projectedAvailableMinutes = balanceMinutes + generatedMinutes;
+  const payableMinutes = Math.max(0, projectedAvailableMinutes);
+  const amortizedMinutes = balanceMinutes < 0 && generatedMinutes > 0
+    ? Math.min(generatedMinutes, -balanceMinutes)
+    : 0;
+
+  res.status(200).json({
+    success: true,
+    month,
+    balanceMinutes,
+    balanceLabel: formatSignedMinutesLabel(balanceMinutes),
+    lastSettledMonth,
+    generatedMinutes,
+    generatedLabel: formatSignedMinutesLabel(generatedMinutes),
+    workedLabel: summary?.totalWorkedLabel || '0h 0m',
+    theoreticalLabel: summary?.totalTheoreticalLabel || '0h 0m',
+    configurationMissing: summary ? Boolean(summary.configurationMissing) : true,
+    projectedAvailableMinutes,
+    payableMinutes,
+    payableLabel: formatMinutesForLabel(payableMinutes),
+    amortizedMinutes,
+    amortizedLabel: formatMinutesForLabel(amortizedMinutes),
+    status,
+    canSettle,
+    canUndo,
+    settlement: existing || null,
+    history,
+  });
+});
+
+exports.settleCenterOvertimeMonth = catchAsyncErrors(async (req, res, next) => {
+  const center = await Center.findById(req.params.id).select('_id');
+  if (!center) return next(new ErrorHandler('Center not found', 404));
+
+  const { userId, month, paidMinutes, notes } = req.body || {};
+  if (!userId || !month) return next(new ErrorHandler('userId and month are required', 400));
+  if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(month)) {
+    return next(new ErrorHandler('month must be in format YYYY-MM', 400));
+  }
+
+  const assignment = await findCoachAssignment(req.params.id, userId);
+  if (!assignment) return next(new ErrorHandler('User is not assigned to this center as coach', 400));
+
+  const existing = await OvertimeSettlement.findOne({ center: req.params.id, user: userId, month });
+  if (existing) return next(new ErrorHandler('Este mes ya está liquidado', 409));
+
+  const lastSettledMonth = assignment.overtimeBankUpdatedMonth || null;
+  if (lastSettledMonth && month <= lastSettledMonth) {
+    return next(new ErrorHandler('Las liquidaciones deben hacerse en orden cronológico; ya hay un mes posterior o igual liquidado', 400));
+  }
+
+  const { summaries } = await gatherMonthlyOvertimeSummaries({ centerId: req.params.id, month, userId });
+  const summary = summaries[0] || null;
+  const generatedMinutes = summary ? Math.round(Number(summary.totalDeltaMinutes || 0)) : 0;
+
+  const balanceBeforeMinutes = Math.round(Number(assignment.overtimeBankMinutes || 0));
+  const available = balanceBeforeMinutes + generatedMinutes;
+  const maxPayable = Math.max(0, available);
+
+  const parsedPaid = Math.round(Number(paidMinutes ?? 0));
+  if (!Number.isFinite(parsedPaid) || parsedPaid < 0) {
+    return next(new ErrorHandler('paidMinutes must be a number >= 0', 400));
+  }
+  if (parsedPaid > maxPayable) {
+    return next(new ErrorHandler(`No puedes pagar más de ${formatMinutesForLabel(maxPayable)} este mes`, 400));
+  }
+
+  const balanceAfterMinutes = balanceBeforeMinutes + generatedMinutes - parsedPaid;
+  const amortizedMinutes = balanceBeforeMinutes < 0 && generatedMinutes > 0
+    ? Math.min(generatedMinutes, -balanceBeforeMinutes)
+    : 0;
+  const bankedMinutes = generatedMinutes - parsedPaid;
+  const decision = deriveSettlementDecision({ generatedMinutes, paidMinutes: parsedPaid });
+
+  const created = await OvertimeSettlement.create({
+    center: req.params.id,
+    user: userId,
+    month,
+    generatedMinutes,
+    balanceBeforeMinutes,
+    amortizedMinutes,
+    paidMinutes: parsedPaid,
+    bankedMinutes,
+    balanceAfterMinutes,
+    decision,
+    notes: notes ? String(notes).trim() : undefined,
+    createdBy: req.user.id,
+  });
+
+  assignment.overtimeBankMinutes = balanceAfterMinutes;
+  assignment.overtimeBankUpdatedMonth = month;
+  await assignment.save();
+
+  await created.populate('createdBy', 'name email');
+
+  res.status(201).json({
+    success: true,
+    settlement: created,
+    balanceMinutes: balanceAfterMinutes,
+    balanceLabel: formatSignedMinutesLabel(balanceAfterMinutes),
+  });
+});
+
+exports.undoCenterOvertimeSettlement = catchAsyncErrors(async (req, res, next) => {
+  const center = await Center.findById(req.params.id).select('_id');
+  if (!center) return next(new ErrorHandler('Center not found', 404));
+
+  const settlement = await OvertimeSettlement.findOne({ _id: req.params.settlementId, center: req.params.id });
+  if (!settlement) return next(new ErrorHandler('Liquidación no encontrada', 404));
+
+  // Solo se puede deshacer la última liquidación del trabajador (LIFO) para no
+  // romper la cadena de saldos.
+  const laterExists = await OvertimeSettlement.exists({
+    center: req.params.id,
+    user: settlement.user,
+    month: { $gt: settlement.month },
+  });
+  if (laterExists) {
+    return next(new ErrorHandler('Solo puedes deshacer la última liquidación; deshaz primero las posteriores', 400));
+  }
+
+  const assignment = await findCoachAssignment(req.params.id, settlement.user);
+  // El mes liquidado inmediatamente anterior pasa a ser el nuevo "último".
+  const previous = await OvertimeSettlement.findOne({
+    center: req.params.id,
+    user: settlement.user,
+    month: { $lt: settlement.month },
+  }).sort({ month: -1 });
+
+  if (assignment) {
+    assignment.overtimeBankMinutes = settlement.balanceBeforeMinutes;
+    assignment.overtimeBankUpdatedMonth = previous ? previous.month : null;
+    await assignment.save();
+  }
+
+  await settlement.deleteOne();
+
+  res.status(200).json({
+    success: true,
+    message: 'Liquidación deshecha',
+    balanceMinutes: settlement.balanceBeforeMinutes,
+    balanceLabel: formatSignedMinutesLabel(settlement.balanceBeforeMinutes),
+  });
 });
 
 exports.getCenterExpensesSummary = catchAsyncErrors(async (req, res, next) => {

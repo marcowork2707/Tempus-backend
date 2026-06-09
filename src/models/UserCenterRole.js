@@ -55,6 +55,20 @@ const userCenterRoleSchema = new mongoose.Schema(
       type: [weeklyContractHoursHistorySchema],
       default: [],
     },
+    // Saldo cacheado de la bolsa de horas extra (en minutos, con signo).
+    // Positivo = el centro le debe horas al trabajador; negativo = el trabajador
+    // las debe. Reconstruible desde las liquidaciones (OvertimeSettlement).
+    overtimeBankMinutes: {
+      type: Number,
+      default: 0,
+    },
+    // Último mes liquidado (YYYY-MM). Marca hasta dónde llega el saldo cacheado
+    // y fuerza que las liquidaciones se hagan en orden cronológico.
+    overtimeBankUpdatedMonth: {
+      type: String,
+      match: [/^\d{4}-(0[1-9]|1[0-2])$/, 'overtimeBankUpdatedMonth must be YYYY-MM'],
+      default: null,
+    },
   },
   { timestamps: true }
 );
