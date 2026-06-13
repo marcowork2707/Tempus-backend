@@ -1433,6 +1433,7 @@ async function getClassReportContext(dateStr = null, centerId, userName = '', is
             className: classItem.className,
             classTime: classItem.classTime,
             saved: hasLegacyWholeReportCompletion || savedClasses.has(buildSavedClassKey(classItem.classTime, classItem.className)),
+            comment: savedClasses.get(buildSavedClassKey(classItem.classTime, classItem.className))?.comment || '',
             savedAt:
               savedClasses.get(buildSavedClassKey(classItem.classTime, classItem.className))?.savedAt ||
               (hasLegacyWholeReportCompletion ? saved?.submittedAt || saved?.updatedAt || null : null),
@@ -1589,6 +1590,8 @@ async function saveClassReport(data) {
     .map((classItem) => ({
       className: String(classItem.className || '').trim(),
       classTime: String(classItem.classTime || '').trim(),
+      // undefined => no se tocó el comentario en esta petición (se preserva el existente).
+      comment: classItem.comment !== undefined ? String(classItem.comment || '').trim() : undefined,
     }))
     .filter((classItem) => classItem.className && classItem.classTime);
 
@@ -1643,9 +1646,12 @@ async function saveClassReport(data) {
   );
 
   for (const classItem of normalizedCompletedClasses) {
-    savedClassesMap.set(buildSavedClassKey(classItem.classTime, classItem.className), {
+    const savedClassKey = buildSavedClassKey(classItem.classTime, classItem.className);
+    const existingSavedClass = savedClassesMap.get(savedClassKey);
+    savedClassesMap.set(savedClassKey, {
       className: classItem.className,
       classTime: classItem.classTime,
+      comment: classItem.comment !== undefined ? classItem.comment : (existingSavedClass?.comment || ''),
       savedBy: updatedBy,
       savedAt: new Date(),
     });
@@ -3765,6 +3771,43 @@ async function getTariffCancellationRenewals(centerId, referenceDateStr = null) 
   }
 }
 
+// Resumen global de los comentarios generales de clase para un centro, en un
+// rango de fechas opcional. Aplana los savedClasses con comentario no vacío.
+async function getClassCommentsSummary({ centerId, from = null, to = null }) {
+  const query = { center: centerId };
+  if (from && to) query.date = { $gte: from, $lte: to };
+  else if (from) query.date = { $gte: from };
+  else if (to) query.date = { $lte: to };
+
+  const reports = await ClassReport.find(query)
+    .populate('updatedBy', 'name email')
+    .lean();
+
+  const comments = [];
+  for (const report of reports) {
+    for (const savedClass of report.savedClasses || []) {
+      const comment = String(savedClass.comment || '').trim();
+      if (!comment) continue;
+      comments.push({
+        date: report.date,
+        period: report.period,
+        instructorName: report.instructorName,
+        className: savedClass.className,
+        classTime: savedClass.classTime,
+        comment,
+        updatedAt: savedClass.savedAt || report.updatedAt || null,
+      });
+    }
+  }
+
+  comments.sort((a, b) => {
+    if (a.date !== b.date) return b.date.localeCompare(a.date);
+    return String(a.classTime).localeCompare(String(b.classTime));
+  });
+
+  return { from, to, count: comments.length, comments };
+}
+
 module.exports = {
   getAbsences,
   getStoredAbsences,
@@ -3781,6 +3824,7 @@ module.exports = {
   getClassReportContext,
   getClassReportStatus,
   saveClassReport,
+  getClassCommentsSummary,
   resetClassReportTask,
   setClassReportHandoffStatus,
   getPendingPaymentsWithTPVError,

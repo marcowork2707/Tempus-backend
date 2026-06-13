@@ -12,6 +12,7 @@ const {
   getClassReportContext,
   getClassReportStatus,
   saveClassReport,
+  getClassCommentsSummary,
   resetClassReportTask,
   setClassReportHandoffStatus,
   getPendingPaymentsWithTPVError,
@@ -423,6 +424,42 @@ exports.saveClassReport = async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Error al guardar los avisos de las clases.',
+      detail: process.env.NODE_ENV === 'development' ? err.message : undefined,
+    });
+  }
+};
+
+exports.getClassCommentsSummary = async (req, res) => {
+  try {
+    const { centerId, from, to } = req.query;
+    if (!centerId) {
+      return res.status(400).json({ success: false, message: 'centerId es obligatorio' });
+    }
+
+    if (req.user.role !== 'admin') {
+      const assignment = await UserCenterRole.findOne({
+        user: req.user.id,
+        center: centerId,
+        active: true,
+      });
+
+      if (!assignment) {
+        return res.status(403).json({ success: false, message: 'No tienes acceso a este centro' });
+      }
+    }
+
+    const result = await getClassCommentsSummary({
+      centerId,
+      from: from || null,
+      to: to || null,
+    });
+
+    res.json({ success: true, ...result });
+  } catch (err) {
+    console.error('[AimHarder Controller] Error getClassCommentsSummary:', err.message);
+    res.status(500).json({
+      success: false,
+      message: 'Error al obtener el resumen de comentarios de clase.',
       detail: process.env.NODE_ENV === 'development' ? err.message : undefined,
     });
   }

@@ -51,6 +51,12 @@ const classReportSavedClassSchema = new mongoose.Schema(
       required: true,
       trim: true,
     },
+    // Comentario general de la clase (a nivel de clase, no de cliente).
+    comment: {
+      type: String,
+      default: '',
+      trim: true,
+    },
     savedBy: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'User',

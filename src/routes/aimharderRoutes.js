@@ -11,6 +11,7 @@ const {
   getClassReports,
   getClassReportStatus,
   saveClassReport,
+  getClassCommentsSummary,
   resetClassReportTask,
   setClassReportHandoff,
   getTpvRedsysPayments,
@@ -40,6 +41,7 @@ router.get('/integration/:centerId', isAuthenticatedUser, authorizeRoles('admin'
 router.put('/integration/:centerId', isAuthenticatedUser, authorizeRoles('admin'), updateIntegration);
 router.get('/class-reports', isAuthenticatedUser, getClassReports);
 router.get('/class-reports/status', isAuthenticatedUser, getClassReportStatus);
+router.get('/class-reports/comments-summary', isAuthenticatedUser, getClassCommentsSummary);
 router.put('/class-reports', isAuthenticatedUser, saveClassReport);
 router.post('/class-reports/reset', isAuthenticatedUser, authorizeRoles('admin'), resetClassReportTask);
 router.put('/class-reports/handoff', isAuthenticatedUser, setClassReportHandoff);
