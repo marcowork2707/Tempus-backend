@@ -76,6 +76,7 @@ const {
   deleteShiftPattern,
   upsertShiftOverride,
   deleteShiftOverride,
+  swapShiftDay,
   getShiftCalendar,
   getVacationRequests,
   createVacationRequest,
@@ -203,6 +204,7 @@ router.put('/:id/shift-patterns/:patternId', authorizeRoles('admin'), updateShif
 router.delete('/:id/shift-patterns/:patternId', authorizeRoles('admin'), deleteShiftPattern);
 router.post('/:id/shift-overrides', authorizeRoles('admin'), upsertShiftOverride);
 router.delete('/:id/shift-overrides/:overrideId', authorizeRoles('admin'), deleteShiftOverride);
+router.post('/:id/shift-swap', authorizeRoles('admin'), swapShiftDay);
 router.get('/:id/vacation-requests', getVacationRequests);
 router.post('/:id/vacation-requests', createVacationRequest);
 router.patch('/:id/vacation-requests/:requestId', reviewVacationRequest);

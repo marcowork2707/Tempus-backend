@@ -47,7 +47,8 @@ const shiftOverrideSchema = new mongoose.Schema(
     },
     reasonType: {
       type: String,
-      enum: ['custom', 'holiday', 'vacation'],
+      // 'cleared' = el turno recurrente del patrón se elimina solo ese día (celda vacía).
+      enum: ['custom', 'holiday', 'vacation', 'cleared'],
       default: 'custom',
     },
     notes: {

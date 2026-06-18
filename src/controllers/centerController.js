@@ -23,6 +23,7 @@ const CenterWaitlistEntry = require('../models/CenterWaitlistEntry');
 const WaitlistTariffType = require('../models/WaitlistTariffType');
 const TimeEntry = require('../models/TimeEntry');
 const Checklist = require('../models/Checklist');
+const mongoose = require('mongoose');
 const ErrorHandler = require('../utils/errorHandler');
 const catchAsyncErrors = require('../utils/catchAsyncErrors');
 const { buildPlanningMessage } = require('../services/weeklyPlanningService');
@@ -5210,6 +5211,36 @@ function applyOverrides(baseOccurrences, overrides) {
     const key = `${userId}|${date}`;
     byKey.delete(key);
 
+    // 'cleared': el turno del patrón se elimina solo ese día. Suprime la
+    // ocurrencia base y marca la celda como vacía (isCleared) — el frontend no
+    // la pinta, pero conserva el overrideId para poder restaurar el patrón.
+    if (override.reasonType === 'cleared') {
+      byKey.set(key, {
+        date,
+        userId,
+        userName: override.user.name,
+        userEmail: override.user.email,
+        patternId: '',
+        shiftId: '',
+        shiftName: '',
+        startTime: '',
+        endTime: '',
+        timeSegments: [],
+        recurrence: 'override',
+        cycleLengthWeeks: 1,
+        cycleWeeks: [1],
+        dayTimeOverrides: [],
+        label: '',
+        notes: override.notes || '',
+        isOverride: true,
+        isOff: true,
+        isCleared: true,
+        reasonType: 'cleared',
+        overrideId: override._id.toString(),
+      });
+      continue;
+    }
+
     byKey.set(key, {
       date,
       userId,
@@ -5403,11 +5434,14 @@ exports.upsertShiftOverride = catchAsyncErrors(async (req, res, next) => {
   const effectiveStartTime = effectiveSegments.length > 0 ? effectiveSegments[0].startTime : startTime;
   const effectiveEndTime = effectiveSegments.length > 0 ? effectiveSegments[effectiveSegments.length - 1].endTime : endTime;
 
-  if (!isOff && (!label || (!effectiveStartTime || !effectiveEndTime))) {
+  const normalizedReasonType = ['custom', 'holiday', 'vacation', 'cleared'].includes(reasonType) ? reasonType : 'custom';
+  const isCleared = normalizedReasonType === 'cleared';
+  // 'cleared' siempre implica día sin turno (como un off, pero oculto en el calendario).
+  const effectiveIsOff = !!isOff || isCleared;
+
+  if (!effectiveIsOff && (!label || (!effectiveStartTime || !effectiveEndTime))) {
     return next(new ErrorHandler('label, startTime and endTime are required unless the day is marked off', 400));
   }
-
-  const normalizedReasonType = ['custom', 'holiday', 'vacation'].includes(reasonType) ? reasonType : 'custom';
 
   if (normalizedReasonType === 'vacation' && !isOff) {
     return next(new ErrorHandler('Vacation overrides must be marked off', 400));
@@ -5510,11 +5544,11 @@ exports.upsertShiftOverride = catchAsyncErrors(async (req, res, next) => {
         user: userId,
         vacationRequest: normalizedReasonType === 'vacation' ? linkedVacationRequest?._id : undefined,
         date: dateOnly,
-        label: label || (normalizedReasonType === 'vacation' ? 'Vacaciones' : normalizedReasonType === 'holiday' ? 'Festivo' : undefined),
-        startTime: isOff ? undefined : effectiveStartTime,
-        endTime: isOff ? undefined : effectiveEndTime,
-        segments: isOff ? [] : effectiveSegments,
-        isOff: !!isOff,
+        label: label || (normalizedReasonType === 'vacation' ? 'Vacaciones' : normalizedReasonType === 'holiday' ? 'Festivo' : isCleared ? 'Sin turno' : undefined),
+        startTime: effectiveIsOff ? undefined : effectiveStartTime,
+        endTime: effectiveIsOff ? undefined : effectiveEndTime,
+        segments: effectiveIsOff ? [] : effectiveSegments,
+        isOff: effectiveIsOff,
         reasonType: normalizedReasonType,
         notes: notes || undefined,
       },
@@ -5531,6 +5565,126 @@ exports.deleteShiftOverride = catchAsyncErrors(async (req, res, next) => {
   const override = await ShiftOverride.findOneAndDelete({ _id: req.params.overrideId, center: req.params.id });
   if (!override) return next(new ErrorHandler('Override not found', 404));
   res.status(200).json({ success: true, message: 'Override deleted' });
+});
+
+// Intercambia el turno de dos trabajadores SOLO para un día concreto. Escribe
+// dos overrides cruzados (A recibe el turno de B y viceversa) de forma atómica,
+// sin tocar los patrones recurrentes. Bloquea si alguno tiene vacaciones,
+// festivo o día no laborable ese día.
+exports.swapShiftDay = catchAsyncErrors(async (req, res, next) => {
+  const { date, userAId, userBId } = req.body || {};
+  if (!date || !userAId || !userBId) {
+    return next(new ErrorHandler('date, userAId and userBId are required', 400));
+  }
+  if (String(userAId) === String(userBId)) {
+    return next(new ErrorHandler('Selecciona dos trabajadores distintos', 400));
+  }
+
+  const center = await Center.findById(req.params.id).select('_id');
+  if (!center) return next(new ErrorHandler('Center not found', 404));
+
+  const day = _startOfDay(date);
+
+  const assignments = await UserCenterRole.find({
+    center: req.params.id,
+    user: { $in: [userAId, userBId] },
+    active: true,
+  });
+  const assignedIds = new Set(assignments.map((a) => a.user.toString()));
+  if (!assignedIds.has(String(userAId)) || !assignedIds.has(String(userBId))) {
+    return next(new ErrorHandler('Ambos trabajadores deben estar asignados al centro', 400));
+  }
+
+  // Turno efectivo de ese día para cada uno (patrón + overrides ya aplicados).
+  const patterns = await ShiftPattern.find({
+    center: req.params.id,
+    active: true,
+    user: { $in: [userAId, userBId] },
+  })
+    .populate('user', 'name email')
+    .populate('shift', 'name startTime endTime');
+  const overrides = await ShiftOverride.find({
+    center: req.params.id,
+    user: { $in: [userAId, userBId] },
+    date: day,
+  }).populate('user', 'name email');
+
+  const occurrences = applyOverrides(
+    computeOccurrences(patterns.filter(hasResolvedUser), day, day),
+    overrides.filter(hasResolvedUser)
+  );
+  const occA = occurrences.find((o) => o.userId === String(userAId));
+  const occB = occurrences.find((o) => o.userId === String(userBId));
+
+  // Bloqueo de seguridad: nada de vacaciones / festivo / no laborable.
+  const isBlocked = (occ) => occ && !occ.isCleared && (occ.isOff || occ.reasonType === 'vacation' || occ.reasonType === 'holiday');
+  if (isBlocked(occA) || isBlocked(occB)) {
+    return next(new ErrorHandler('No se puede intercambiar: alguno tiene vacaciones, festivo o día no laborable ese día', 400));
+  }
+
+  // Un turno "cleared" cuenta como sin turno.
+  const effA = occA && !occA.isCleared ? occA : null;
+  const effB = occB && !occB.isCleared ? occB : null;
+  if (!effA && !effB) {
+    return next(new ErrorHandler('No hay turnos que intercambiar ese día', 400));
+  }
+
+  // Construye el doc del override destino a partir de la ocurrencia origen
+  // (o un 'cleared' si el origen no tiene turno).
+  const buildDoc = (sourceOcc) => {
+    if (!sourceOcc) {
+      return { label: 'Sin turno', startTime: undefined, endTime: undefined, segments: [], isOff: true, reasonType: 'cleared', notes: undefined };
+    }
+    const segs = (sourceOcc.timeSegments && sourceOcc.timeSegments.length)
+      ? sourceOcc.timeSegments.map((s) => ({ startTime: s.startTime, endTime: s.endTime }))
+      : (sourceOcc.startTime && sourceOcc.endTime ? [{ startTime: sourceOcc.startTime, endTime: sourceOcc.endTime }] : []);
+    return {
+      label: sourceOcc.label || sourceOcc.shiftName || 'Turno',
+      startTime: segs[0]?.startTime,
+      endTime: segs[segs.length - 1]?.endTime,
+      segments: segs,
+      isOff: false,
+      reasonType: 'custom',
+      notes: sourceOcc.notes || undefined,
+    };
+  };
+
+  const docForA = buildDoc(effB); // A recibe el turno de B
+  const docForB = buildDoc(effA); // B recibe el turno de A
+
+  const makeUpdate = (userId, doc) => ({
+    center: req.params.id,
+    user: userId,
+    vacationRequest: undefined,
+    date: day,
+    label: doc.label,
+    startTime: doc.startTime,
+    endTime: doc.endTime,
+    segments: doc.segments,
+    isOff: doc.isOff,
+    reasonType: doc.reasonType,
+    notes: doc.notes,
+  });
+
+  const session = await mongoose.startSession();
+  try {
+    await session.withTransaction(async () => {
+      await ShiftOverride.findOneAndUpdate(
+        { center: req.params.id, user: userAId, date: day },
+        makeUpdate(userAId, docForA),
+        { new: true, upsert: true, setDefaultsOnInsert: true, session }
+      );
+      await ShiftOverride.findOneAndUpdate(
+        { center: req.params.id, user: userBId, date: day },
+        makeUpdate(userBId, docForB),
+        { new: true, upsert: true, setDefaultsOnInsert: true, session }
+      );
+    });
+  } finally {
+    await session.endSession();
+  }
+
+  res.status(200).json({ success: true, message: 'Turnos intercambiados' });
 });
 
 // Get computed shift calendar for a center (admin: all workers; others: own only)
