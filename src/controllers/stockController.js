@@ -1,6 +1,8 @@
+const mongoose = require('mongoose');
 const StockConfig = require('../models/StockConfig');
 const StockReport = require('../models/StockReport');
 const StockAlert = require('../models/StockAlert');
+const CenterInventory = require('../models/CenterInventory');
 const ErrorHandler = require('../utils/errorHandler');
 const catchAsyncErrors = require('../utils/catchAsyncErrors');
 
@@ -402,4 +404,148 @@ exports.dismissStockAlert = catchAsyncErrors(async (req, res, next) => {
   await alert.save();
 
   res.status(200).json({ success: true });
+});
+
+// ─── Inventario mensual ──────────────────────────────────────────────────────
+
+const MONTH_REGEX = /^\d{4}-(0[1-9]|1[0-2])$/;
+
+function currentMonthStr() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+}
+
+// Normaliza la estructura entrante (grupos/artículos) usando las cantidades que
+// envía el cliente (que cargó el inventario actual). Conserva los _id existentes
+// para que el endpoint de cantidades pueda referenciarlos; los nuevos se generan.
+function sanitizeStructureGroups(groups) {
+  return (Array.isArray(groups) ? groups : [])
+    .map((group) => {
+      const groupDoc = { name: String(group?.name || '').trim() };
+      if (group?._id && mongoose.isValidObjectId(group._id)) groupDoc._id = group._id;
+      groupDoc.articles = (Array.isArray(group?.articles) ? group.articles : [])
+        .map((article) => {
+          const articleDoc = {
+            name: String(article?.name || '').trim(),
+            unit: String(article?.unit || '').trim(),
+            notes: String(article?.notes || '').trim(),
+            quantity: Math.max(0, Number(article?.quantity) || 0),
+          };
+          if (article?._id && mongoose.isValidObjectId(article._id)) articleDoc._id = article._id;
+          return articleDoc;
+        })
+        .filter((a) => a.name);
+      return groupDoc;
+    })
+    .filter((g) => g.name);
+}
+
+// Lectura del inventario de un mes (todos los roles del centro).
+exports.getCenterInventory = catchAsyncErrors(async (req, res) => {
+  const { centerId } = req.params;
+  const month = MONTH_REGEX.test(req.query.month || '') ? req.query.month : currentMonthStr();
+
+  const inventory = await CenterInventory.findOne({ center: centerId, month })
+    .populate('updatedBy', 'name nickname');
+
+  res.status(200).json({
+    inventory: inventory || { center: centerId, month, groups: [] },
+  });
+});
+
+// Meses con inventario guardado (para el selector/histórico).
+exports.getCenterInventoryMonths = catchAsyncErrors(async (req, res) => {
+  const { centerId } = req.params;
+  const months = await CenterInventory.find({ center: centerId }).select('month').sort({ month: -1 }).lean();
+  res.status(200).json({ months: months.map((m) => m.month) });
+});
+
+// Editar la ESTRUCTURA (grupos/artículos). Solo encargado/admin.
+exports.upsertCenterInventoryStructure = catchAsyncErrors(async (req, res, next) => {
+  const { centerId } = req.params;
+  const { month, groups } = req.body || {};
+  if (!MONTH_REGEX.test(month || '')) {
+    return next(new ErrorHandler('month debe tener formato YYYY-MM', 400));
+  }
+
+  const sanitized = sanitizeStructureGroups(groups);
+
+  const inventory = await CenterInventory.findOneAndUpdate(
+    { center: centerId, month },
+    { center: centerId, month, groups: sanitized, updatedBy: req.user.id },
+    { new: true, upsert: true, setDefaultsOnInsert: true }
+  ).populate('updatedBy', 'name nickname');
+
+  res.status(200).json({ inventory });
+});
+
+// Actualizar SOLO cantidades/notas de artículos existentes. Todos los roles.
+exports.updateCenterInventoryQuantities = catchAsyncErrors(async (req, res, next) => {
+  const { centerId } = req.params;
+  const { month, quantities } = req.body || {};
+  if (!MONTH_REGEX.test(month || '')) {
+    return next(new ErrorHandler('month debe tener formato YYYY-MM', 400));
+  }
+
+  const inventory = await CenterInventory.findOne({ center: centerId, month });
+  if (!inventory) {
+    return next(new ErrorHandler('No hay inventario para ese mes todavía. Pide a un encargado que cree la estructura.', 404));
+  }
+
+  const updates = new Map();
+  (Array.isArray(quantities) ? quantities : []).forEach((q) => {
+    if (q && q.articleId) updates.set(String(q.articleId), q);
+  });
+
+  inventory.groups.forEach((group) => {
+    group.articles.forEach((article) => {
+      const update = updates.get(String(article._id));
+      if (!update) return;
+      if (update.quantity !== undefined) article.quantity = Math.max(0, Number(update.quantity) || 0);
+      if (update.notes !== undefined) article.notes = String(update.notes || '').trim();
+    });
+  });
+
+  inventory.updatedBy = req.user.id;
+  await inventory.save();
+  await inventory.populate('updatedBy', 'name nickname');
+
+  res.status(200).json({ inventory });
+});
+
+// Copiar el inventario del mes anterior como punto de partida. Solo encargado/admin.
+exports.copyPreviousCenterInventory = catchAsyncErrors(async (req, res, next) => {
+  const { centerId } = req.params;
+  const { month } = req.body || {};
+  if (!MONTH_REGEX.test(month || '')) {
+    return next(new ErrorHandler('month debe tener formato YYYY-MM', 400));
+  }
+
+  const existing = await CenterInventory.findOne({ center: centerId, month });
+  if (existing && (existing.groups || []).length > 0) {
+    return next(new ErrorHandler('Ya existe un inventario con datos para ese mes', 400));
+  }
+
+  const previous = await CenterInventory.findOne({ center: centerId, month: { $lt: month } }).sort({ month: -1 });
+  if (!previous || (previous.groups || []).length === 0) {
+    return next(new ErrorHandler('No hay un inventario anterior que copiar', 404));
+  }
+
+  const clonedGroups = (previous.groups || []).map((group) => ({
+    name: group.name,
+    articles: (group.articles || []).map((article) => ({
+      name: article.name,
+      quantity: Number(article.quantity) || 0,
+      unit: article.unit || '',
+      notes: article.notes || '',
+    })),
+  }));
+
+  const inventory = await CenterInventory.findOneAndUpdate(
+    { center: centerId, month },
+    { center: centerId, month, groups: clonedGroups, updatedBy: req.user.id },
+    { new: true, upsert: true, setDefaultsOnInsert: true }
+  ).populate('updatedBy', 'name nickname');
+
+  res.status(200).json({ inventory, copiedFromMonth: previous.month });
 });
