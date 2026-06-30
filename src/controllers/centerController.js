@@ -5422,6 +5422,7 @@ exports.upsertShiftOverride = catchAsyncErrors(async (req, res, next) => {
     reasonType,
     vacationRequestId,
     attributedYear,
+    allowRestrictionOverride,
   } = req.body;
 
   if (!userId || !date) {
@@ -5469,16 +5470,33 @@ exports.upsertShiftOverride = catchAsyncErrors(async (req, res, next) => {
         ? (await VacationRequest.findOne({ _id: vacationRequestId, center: req.params.id, user: userId }).select('attributedYear startDate'))?.attributedYear || start.getFullYear()
         : start.getFullYear());
 
-    await _assertVacationRangeAlignedWithWorkCycle(req.params.id, userId, start, end, vacationRequestId || null);
-    await _assertVacationConflictRules(req.params.id, userId, start, end, vacationRequestId || null);
-    await _assertVacationPolicyRules(
-      req.params.id,
-      userId,
-      start,
-      end,
-      effectiveAttributedYear,
-      vacationRequestId || null
-    );
+    // El admin asigna vacaciones a mano: si no fuerza, validamos y, si alguna
+    // norma se incumple, devolvemos 409 con el aviso (el frontend confirma y
+    // reenvía con allowRestrictionOverride). Si fuerza, se saltan las normas.
+    if (!allowRestrictionOverride) {
+      try {
+        await _assertVacationRangeAlignedWithWorkCycle(req.params.id, userId, start, end, vacationRequestId || null);
+        await _assertVacationConflictRules(req.params.id, userId, start, end, vacationRequestId || null);
+        await _assertVacationPolicyRules(
+          req.params.id,
+          userId,
+          start,
+          end,
+          effectiveAttributedYear,
+          vacationRequestId || null
+        );
+      } catch (validationErr) {
+        if (validationErr instanceof ErrorHandler) {
+          return res.status(409).json({
+            success: false,
+            requiresConfirmation: true,
+            warningType: 'vacation_restriction',
+            message: validationErr.message,
+          });
+        }
+        throw validationErr;
+      }
+    }
 
     const overlapFilter = {
       center: req.params.id,
