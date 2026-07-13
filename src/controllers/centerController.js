@@ -951,12 +951,13 @@ const getEffectiveWeeklyContractHours = (assignment, month) => {
   return assignment.weeklyContractHours === undefined ? null : assignment.weeklyContractHours;
 };
 
-// Horas extra MENSUALES: compara lo trabajado (fichajes) contra las horas de
-// turno ASIGNADAS ese mes (plannedByUserDate). En el mes en curso solo cuenta
-// hasta hoy (todayCutoff), para no arrastrar déficit de días/semanas futuras.
-// Fallback: si no hay turnos planificados pero sí jornada de contrato, se
-// prorratea el contrato por los días transcurridos del mes.
-const buildWeeklyOvertimeSummaries = ({ month, assignments, entries, aggregationMode, plannedByUserDate = new Map(), todayCutoff = null }) => {
+// Horas extra MENSUALES: compara lo trabajado (fichajes) contra el CONTRATO
+// (jornada semanal de configuración del centro) prorrateado por día = jornada/7.
+// La teórica NO depende del planning: aunque se asignen turnos extra en el
+// horario, la base sigue siendo el contrato, para que las horas de más cuenten
+// como extra. En el mes en curso solo cuenta hasta hoy (todayCutoff); los días
+// de vacaciones/festivo (offByUserDate) no exigen contrato.
+const buildWeeklyOvertimeSummaries = ({ month, assignments, entries, aggregationMode, offByUserDate = new Set(), todayCutoff = null }) => {
   const { monthStart, monthEnd } = parseMonthRange(month);
   const rangeStart = getStartOfIsoWeek(monthStart);
   const rangeEnd = addDaysLocal(getStartOfIsoWeek(monthEnd), 6);
@@ -985,22 +986,11 @@ const buildWeeklyOvertimeSummaries = ({ month, assignments, entries, aggregation
       : 0;
     const userEntries = entriesByUser.get(userId) || [];
 
-    // ¿Tiene turnos asignados este mes (hasta el corte)?
-    let plannedMonthTotal = 0;
-    if (effectiveMonthEnd) {
-      for (const [key, minutes] of plannedByUserDate.entries()) {
-        const [entryUserId, dateKey] = key.split('|');
-        if (entryUserId !== userId) continue;
-        const d = startOfDayLocal(dateKey);
-        if (d < monthStart || d > effectiveMonthEnd) continue;
-        plannedMonthTotal += Number(minutes || 0);
-      }
-    }
-    // Fallback al contrato prorrateado solo si no hay planning cargado.
-    const useContractFallback = plannedMonthTotal === 0 && weeklyContractMinutes > 0;
-    const fallbackDailyMinutes = useContractFallback ? weeklyContractMinutes / 7 : 0;
-    const plannedForDate = (dateKey) => (
-      useContractFallback ? fallbackDailyMinutes : Number(plannedByUserDate.get(`${userId}|${dateKey}`) || 0)
+    // Contrato prorrateado por día natural (jornada semanal / 7). Un día de
+    // vacaciones/festivo no exige contrato.
+    const dailyContractMinutes = weeklyContractMinutes / 7;
+    const theoreticalForDate = (dateKey) => (
+      offByUserDate.has(`${userId}|${dateKey}`) ? 0 : dailyContractMinutes
     );
 
     const weeks = [];
@@ -1011,14 +1001,14 @@ const buildWeeklyOvertimeSummaries = ({ month, assignments, entries, aggregation
       const intersectsMonth = weekEnd >= monthStart && weekStart <= monthEnd;
 
       if (intersectsMonth) {
-        let plannedMinutes = 0;
+        let theoreticalMinutes = 0;
         let workedMinutes = 0;
         if (effectiveMonthEnd) {
           const spanStart = weekStart < monthStart ? monthStart : weekStart;
           const spanEnd = weekEnd < effectiveMonthEnd ? weekEnd : effectiveMonthEnd;
           let day = new Date(spanStart);
           while (day <= spanEnd) {
-            plannedMinutes += plannedForDate(formatLocalDateKey(day));
+            theoreticalMinutes += theoreticalForDate(formatLocalDateKey(day));
             day = addDaysLocal(day, 1);
           }
           workedMinutes = userEntries.reduce((total, entry) => {
@@ -1027,8 +1017,8 @@ const buildWeeklyOvertimeSummaries = ({ month, assignments, entries, aggregation
             return total + Number(entry.duration || 0);
           }, 0);
         }
-        plannedMinutes = Math.round(plannedMinutes);
-        const deltaMinutes = workedMinutes - plannedMinutes;
+        theoreticalMinutes = Math.round(theoreticalMinutes);
+        const deltaMinutes = workedMinutes - theoreticalMinutes;
         const countedExtraMinutes = aggregationMode === 'net'
           ? deltaMinutes
           : Math.max(0, deltaMinutes);
@@ -1041,11 +1031,11 @@ const buildWeeklyOvertimeSummaries = ({ month, assignments, entries, aggregation
           weekStart: formatLocalDateKey(displayStart),
           weekEnd: formatLocalDateKey(displayEnd),
           workedMinutes,
-          theoreticalMinutes: plannedMinutes,
+          theoreticalMinutes,
           deltaMinutes,
           countedExtraMinutes,
           workedLabel: formatMinutesForLabel(workedMinutes),
-          theoreticalLabel: formatMinutesForLabel(plannedMinutes),
+          theoreticalLabel: formatMinutesForLabel(theoreticalMinutes),
           deltaLabel: `${deltaMinutes > 0 ? '+' : deltaMinutes < 0 ? '-' : ''}${formatMinutesForLabel(deltaMinutes)}`,
           countedExtraLabel: `${countedExtraMinutes > 0 ? '+' : countedExtraMinutes < 0 ? '-' : ''}${formatMinutesForLabel(countedExtraMinutes)}`,
         });
@@ -1069,9 +1059,8 @@ const buildWeeklyOvertimeSummaries = ({ month, assignments, entries, aggregation
         ? Number(effectiveWeeklyContractHours.toFixed(2))
         : null,
       weeklyContractMinutes,
-      // Solo "falta configuración" si no hay ni turnos planificados ni contrato.
-      configurationMissing: totalTheoreticalMinutes <= 0 && plannedMonthTotal <= 0 && weeklyContractMinutes <= 0,
-      usesContractFallback: useContractFallback,
+      // Falta configuración si no hay jornada de contrato definida.
+      configurationMissing: weeklyContractMinutes <= 0,
       totalWorkedMinutes,
       totalTheoreticalMinutes,
       totalExtraMinutes,
@@ -1139,20 +1128,15 @@ const gatherMonthlyOvertimeSummaries = async ({ centerId, month, userId }) => {
         }).populate('user', 'name email'),
       ]);
 
-  // Horario planificado del mes = ocurrencias reales (patrones + excepciones)
-  // aplicando overrides. Cada día/usuario queda con sus franjas; los días off
-  // (vacaciones/festivos/libres) no suman horas teóricas.
-  const scheduledOccurrences = applyOverrides(
-    computeOccurrences(patterns.filter(hasResolvedUser), queryStart, queryEnd),
-    vacationOverrides.filter(hasResolvedUser)
-  );
-  const plannedByUserDate = new Map();
-  for (const occ of scheduledOccurrences) {
-    if (occ.isOff) continue;
-    const key = `${occ.userId}|${occ.date}`;
-    const minutes = getMinutesFromSegments(occ.timeSegments || []);
-    if (minutes <= 0) continue;
-    plannedByUserDate.set(key, (plannedByUserDate.get(key) || 0) + minutes);
+  // La base es el CONTRATO (jornada semanal de configuración), no el planning.
+  // Solo necesitamos los días de vacaciones/festivo para NO exigir contrato esos
+  // días (no generan déficit).
+  const offByUserDate = new Set();
+  for (const override of vacationOverrides) {
+    if (!override.user?._id) continue;
+    if (override.isOff && (override.reasonType === 'vacation' || override.reasonType === 'holiday')) {
+      offByUserDate.add(`${override.user._id.toString()}|${formatLocalDateKey(override.date)}`);
+    }
   }
 
   const aggregationMode = center.overtimeSettings?.monthlyAggregationMode || 'positive_only';
@@ -1161,7 +1145,7 @@ const gatherMonthlyOvertimeSummaries = async ({ centerId, month, userId }) => {
     assignments: validAssignments,
     entries,
     aggregationMode,
-    plannedByUserDate,
+    offByUserDate,
     todayCutoff: startOfDayLocal(new Date()),
   });
 
