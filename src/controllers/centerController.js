@@ -1033,9 +1033,13 @@ const buildWeeklyOvertimeSummaries = ({ month, assignments, entries, aggregation
           ? deltaMinutes
           : Math.max(0, deltaMinutes);
 
+        // Etiquetas recortadas al mes: nunca mostrar días de meses adyacentes.
+        const displayStart = weekStart < monthStart ? monthStart : weekStart;
+        const displayEnd = weekEnd > monthEnd ? monthEnd : weekEnd;
+
         weeks.push({
-          weekStart: formatLocalDateKey(weekStart),
-          weekEnd: formatLocalDateKey(weekEnd),
+          weekStart: formatLocalDateKey(displayStart),
+          weekEnd: formatLocalDateKey(displayEnd),
           workedMinutes,
           theoreticalMinutes: plannedMinutes,
           deltaMinutes,
