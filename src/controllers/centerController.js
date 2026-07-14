@@ -2917,10 +2917,13 @@ function buildExpensesSummary({ manualExpenses, salaryExpenses }) {
     byTypeMap.set(type, current);
   }
   if (salaryTotal > 0) {
+    // SUMA (no sobrescribe): si además hay gastos manuales tipados "Sueldos",
+    // antes se perdían al machacar la entrada del mapa.
+    const currentSalary = byTypeMap.get('Sueldos') || { type: 'Sueldos', amount: 0, count: 0 };
     byTypeMap.set('Sueldos', {
       type: 'Sueldos',
-      amount: salaryTotal,
-      count: salaryExpenses.length,
+      amount: currentSalary.amount + salaryTotal,
+      count: currentSalary.count + salaryExpenses.length,
     });
   }
 
