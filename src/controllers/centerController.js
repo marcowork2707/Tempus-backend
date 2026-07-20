@@ -2466,9 +2466,14 @@ function getExpenseProrationKind({ concept, expenseType, entryType }) {
   if (/\btgss\b/.test(haystack) || /(\bcot\b|\bcot\.)/.test(haystack)) {
     return 'tgss';
   }
-  // El IVA y, en general, cualquier gasto de tipo/categoría "Impuestos" se
-  // prorratean igual: repartidos entre meses y ponderados por facturación.
-  if (/\biva\b/.test(haystack) || /\bimpuestos?\b/.test(haystack)) {
+  // IVA, MOD 111 y en general cualquier gasto de tipo/categoría "Impuestos" se
+  // prorratean igual: repartidos entre meses y ponderados por facturación o por
+  // sueldos (la base la elige el usuario; MOD 111 sugiere sueldos).
+  if (
+    /\biva\b/.test(haystack)
+    || /\bimpuestos?\b/.test(haystack)
+    || /\b(mod|modelo)\s*\.?\s*111\b/.test(haystack)
+  ) {
     return 'iva';
   }
 
@@ -2584,9 +2589,15 @@ async function buildExpenseProrationPlan({
   monthsAhead = 3,
   redistributeAcrossCenters = true,
   prorationKind = 'iva',
+  // 'billing' = reparto por facturación · 'salary' = reparto por sueldos.
+  // TGSS siempre por sueldos; el resto (IVA, Impuestos, MOD 111) es elegible.
+  weightBasis = null,
 }) {
   const sourceMonth = monthFromDate(date);
   const isTgss = prorationKind === 'tgss';
+  const effectiveWeightBasis = isTgss
+    ? 'salary'
+    : (weightBasis === 'salary' ? 'salary' : 'billing');
   const safeMonthsAhead = isTgss
     ? 1
     : Math.max(1, Math.min(24, Number(monthsAhead || 1)));
@@ -2601,7 +2612,7 @@ async function buildExpenseProrationPlan({
   }];
 
   if (redistributeAcrossCenters) {
-    weightedTargets = isTgss
+    weightedTargets = effectiveWeightBasis === 'salary'
       ? await getCenterSalaryWeights({ sourceCenterId, sourceMonth })
       : await getCenterBillingWeights({ sourceCenterId, sourceMonth, monthsBack: 3 });
   }
@@ -2636,6 +2647,7 @@ async function buildExpenseProrationPlan({
 
   return {
     prorationKind,
+    weightBasis: effectiveWeightBasis,
     sourceMonth,
     distributionMonths,
     monthsAhead: safeMonthsAhead,
@@ -2660,6 +2672,7 @@ async function createProratedExpenses({
   monthsAhead,
   redistributeAcrossCenters,
   prorationKind,
+  weightBasis = null,
 }) {
   const plan = await buildExpenseProrationPlan({
     sourceCenterId,
@@ -2668,9 +2681,12 @@ async function createProratedExpenses({
     monthsAhead,
     redistributeAcrossCenters,
     prorationKind,
+    weightBasis,
   });
 
-  const prorationMode = prorationKind === 'tgss' ? 'tgss_weight' : 'iva';
+  // Si el reparto es por sueldos, se marca como tgss_weight aunque el origen
+  // sea un impuesto (MOD 111), para reflejar la base real del prorrateo.
+  const prorationMode = plan.weightBasis === 'salary' ? 'tgss_weight' : 'iva';
   const prorationGroupKey = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 
   const docsToInsert = [];
@@ -3487,6 +3503,7 @@ exports.previewCenterExpenseProration = catchAsyncErrors(async (req, res, next) 
     monthsAhead,
     redistributeAcrossCenters,
     prorationKind,
+    weightBasis: prorationOptions?.weightBasis,
   });
 
   res.status(200).json({
@@ -3573,6 +3590,7 @@ exports.createCenterExpense = catchAsyncErrors(async (req, res, next) => {
       monthsAhead,
       redistributeAcrossCenters,
       prorationKind,
+      weightBasis: prorationOptions?.weightBasis,
     });
 
     const createdIds = createdExpenses.map((expense) => expense._id);
