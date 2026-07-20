@@ -2466,7 +2466,9 @@ function getExpenseProrationKind({ concept, expenseType, entryType }) {
   if (/\btgss\b/.test(haystack) || /(\bcot\b|\bcot\.)/.test(haystack)) {
     return 'tgss';
   }
-  if (/\biva\b/.test(haystack)) {
+  // El IVA y, en general, cualquier gasto de tipo/categoría "Impuestos" se
+  // prorratean igual: repartidos entre meses y ponderados por facturación.
+  if (/\biva\b/.test(haystack) || /\bimpuestos?\b/.test(haystack)) {
     return 'iva';
   }
 
