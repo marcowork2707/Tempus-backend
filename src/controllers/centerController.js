@@ -2533,13 +2533,20 @@ async function getCenterBillingWeights({ sourceCenterId, sourceMonth, monthsBack
   }));
 }
 
-async function getCenterSalaryWeights({ sourceCenterId, sourceMonth }) {
+// Pesos por sueldos. Por defecto mira los últimos `monthsBack` meses (3), igual
+// que el reparto por facturación, para no depender de un mes puntual.
+// Con monthsBack = 0 se usa solo el mes de origen (caso TGSS COT).
+async function getCenterSalaryWeights({ sourceCenterId, sourceMonth, monthsBack = 3 }) {
+  const salaryMonths = monthsBack > 0
+    ? getPreviousMonths(sourceMonth, monthsBack)
+    : [sourceMonth];
+
   const [centers, payrollRows, incentiveRows] = await Promise.all([
     Center.find({ active: { $ne: false } }).select('_id name').lean(),
     PayrollEntry.aggregate([
       {
         $match: {
-          month: sourceMonth,
+          month: { $in: salaryMonths },
         },
       },
       {
@@ -2552,7 +2559,7 @@ async function getCenterSalaryWeights({ sourceCenterId, sourceMonth }) {
     ExtraIncentive.aggregate([
       {
         $match: {
-          month: sourceMonth,
+          month: { $in: salaryMonths },
         },
       },
       {
@@ -2613,7 +2620,9 @@ async function buildExpenseProrationPlan({
 
   if (redistributeAcrossCenters) {
     weightedTargets = effectiveWeightBasis === 'salary'
-      ? await getCenterSalaryWeights({ sourceCenterId, sourceMonth })
+      // TGSS COT corresponde a los sueldos de ese mes concreto; el resto
+      // (MOD 111, impuestos) se pondera con los últimos 3 meses de sueldos.
+      ? await getCenterSalaryWeights({ sourceCenterId, sourceMonth, monthsBack: isTgss ? 0 : 3 })
       : await getCenterBillingWeights({ sourceCenterId, sourceMonth, monthsBack: 3 });
   }
 
