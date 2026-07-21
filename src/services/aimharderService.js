@@ -519,6 +519,77 @@ async function dismissCookies(page) {
 }
 
 // ─────────────────────────────────────────────────────
+// Cierre de banners promocionales / avisos de AimHarder
+// (p. ej. "¡Hemos rediseñado el menú!") que se superponen y tapan botones
+// como "Generar informe". Sin cerrarlos, el clic no llega al botón real.
+// ─────────────────────────────────────────────────────
+
+async function dismissAimHarderPromos(page) {
+  try {
+    const removed = await page.evaluate(() => {
+      const stripAccents = (v) => String(v || '').normalize('NFD').replace(/[̀-ͯ]/g, '');
+      const norm = (v) => stripAccents(String(v || '').replace(/\s+/g, ' ').trim().toLowerCase());
+      // Frases (sin acentos) que identifican estos avisos flotantes.
+      const promoNeedles = [
+        'hemos rediseñado',
+        'rediseñado el menu',
+        'probar ahora',
+        'nuevas opciones',
+      ].map(stripAccents).map((s) => s.toLowerCase());
+
+      const matchesPromo = (el) => {
+        const text = norm(el.textContent);
+        if (text.length > 400) return false; // evitar contenedores enormes
+        return promoNeedles.some((needle) => text.includes(needle));
+      };
+
+      let actions = 0;
+      const candidates = Array.from(document.querySelectorAll('div, section, aside'))
+        .filter((el) => matchesPromo(el));
+
+      for (const el of candidates) {
+        // Subir hasta el contenedor flotante (fixed/absolute) del aviso.
+        let container = el;
+        for (let i = 0; i < 6 && container.parentElement; i += 1) {
+          const pos = window.getComputedStyle(container).position;
+          if (pos === 'fixed' || pos === 'absolute') break;
+          container = container.parentElement;
+        }
+
+        // Intentar pulsar su botón de cerrar (× / close) antes de eliminar.
+        const closeBtn = Array.from(container.querySelectorAll('button, a, span, i, [class*="close"], [aria-label]'))
+          .find((btn) => {
+            const t = norm(btn.textContent);
+            const aria = norm(btn.getAttribute && btn.getAttribute('aria-label'));
+            const cls = norm(btn.className && btn.className.baseVal !== undefined ? btn.className.baseVal : btn.className);
+            return t === '×' || t === 'x' || t === '✕' || aria.includes('cerrar') || aria.includes('close') || cls.includes('close');
+          });
+        if (closeBtn) {
+          try { closeBtn.click(); actions += 1; } catch { /* noop */ }
+        }
+
+        // Como refuerzo, ocultar/eliminar el contenedor para que no tape nada.
+        try {
+          container.style.setProperty('display', 'none', 'important');
+          actions += 1;
+        } catch { /* noop */ }
+      }
+
+      return actions;
+    });
+
+    if (removed > 0) {
+      console.log(`[AimHarder] Banners promocionales cerrados/ocultados: ${removed}`);
+      await page.waitForTimeout(300).catch(() => {});
+    }
+    return removed > 0;
+  } catch (e) {
+    console.warn('[AimHarder] No se pudieron cerrar los banners promocionales:', e.message);
+    return false;
+  }
+}
+
+// ─────────────────────────────────────────────────────
 // Login
 // ─────────────────────────────────────────────────────
 
@@ -3508,6 +3579,8 @@ async function getTariffCancellationRenewals(centerId, referenceDateStr = null, 
       expiry: Date.now() + SESSION_TTL_MS,
     });
 
+    // Cerrar avisos promocionales que tapan botones (p. ej. rediseño del menú).
+    await dismissAimHarderPromos(page);
     await snap('01-informes');
 
     // Paso 1: abrir explícitamente "Cancelaciones de tarifa" desde Informes.
@@ -3579,6 +3652,7 @@ async function getTariffCancellationRenewals(centerId, referenceDateStr = null, 
       };
     });
     console.log('[AimHarder] Diagnostico pantalla:', screenDiagnostics);
+    await dismissAimHarderPromos(page);
     await snap('02-cancelaciones-abierto');
 
     const evaluateResult = await page.evaluate(({ startInput, endInput }) => {
@@ -3699,6 +3773,8 @@ async function getTariffCancellationRenewals(centerId, referenceDateStr = null, 
     console.log('[AimHarder] Diagnostico fechas:', dateDiagnostics);
 
     // Paso 4: click real en el botón visible "Generar informe".
+    // Cerrar de nuevo cualquier aviso flotante que pudiera tapar el botón.
+    await dismissAimHarderPromos(page);
     const generateCandidates = page.locator('button, input[type="button"], input[type="submit"], a').filter({ hasText: /generar informe/i });
     const generateCount = await generateCandidates.count();
     console.log('[AimHarder] Botones generar informe visibles:', generateCount);
