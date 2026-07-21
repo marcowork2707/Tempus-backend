@@ -3438,7 +3438,7 @@ async function getClientMonthlyReport(centerId, monthStr = null, options = {}) {
   };
 }
 
-async function getTariffCancellationRenewals(centerId, referenceDateStr = null) {
+async function getTariffCancellationRenewals(centerId, referenceDateStr = null, options = {}) {
   const config = await getCenterAimHarderConfig(centerId);
 
   if (!config.username || !config.password) {
@@ -3446,6 +3446,12 @@ async function getTariffCancellationRenewals(centerId, referenceDateStr = null) 
       `Faltan credenciales de AimHarder para ${config.centerName}. Configura las credenciales en la integración del centro.`
     );
   }
+
+  // Modo debug: captura pantallazos (base64) y un volcado de todas las tablas
+  // que se ven en AimHarder, para diagnosticar cambios en su interfaz.
+  const debug = Boolean(options.debug);
+  const debugSteps = [];
+  let debugTables = [];
 
   const range = getTermRenewalReportRange(referenceDateStr);
   console.log('[AimHarder] ===== Scraping cancelaciones de tarifa (trimestral/semestral) =====');
@@ -3467,6 +3473,21 @@ async function getTariffCancellationRenewals(centerId, referenceDateStr = null) 
     const page = await context.newPage();
     const reportsUrl = `${config.baseUrl}/reports`;
 
+    // Captura un pantallazo (base64) del estado actual para el modo debug.
+    const snap = async (label) => {
+      if (!debug) return;
+      try {
+        const buffer = await page.screenshot({ fullPage: true });
+        debugSteps.push({
+          label,
+          url: page.url(),
+          image: `data:image/png;base64,${buffer.toString('base64')}`,
+        });
+      } catch (e) {
+        debugSteps.push({ label, url: page.url(), error: e.message });
+      }
+    };
+
     // Esta tarea debe entrar directamente a Informes (no pasar por /control).
     console.log('[AimHarder] Navegando directamente a Informes...');
     await page.goto(reportsUrl, { waitUntil: 'domcontentloaded', timeout: 45000 });
@@ -3486,6 +3507,8 @@ async function getTariffCancellationRenewals(centerId, referenceDateStr = null) 
       cookies: await context.cookies(),
       expiry: Date.now() + SESSION_TTL_MS,
     });
+
+    await snap('01-informes');
 
     // Paso 1: abrir explícitamente "Cancelaciones de tarifa" desde Informes.
     const cancelacionesCard = page
@@ -3556,6 +3579,7 @@ async function getTariffCancellationRenewals(centerId, referenceDateStr = null) 
       };
     });
     console.log('[AimHarder] Diagnostico pantalla:', screenDiagnostics);
+    await snap('02-cancelaciones-abierto');
 
     const evaluateResult = await page.evaluate(({ startInput, endInput }) => {
       const normalize = (value) => String(value || '').replace(/\s+/g, ' ').trim().toLowerCase();
@@ -3739,6 +3763,25 @@ async function getTariffCancellationRenewals(centerId, referenceDateStr = null) 
       };
     });
     console.log('[AimHarder] Diagnostico tablas:', JSON.stringify(tableDiagnostics));
+    await snap('03-informe-generado');
+
+    // Volcado de TODAS las tablas visibles (cabeceras + primeras filas), para
+    // detectar si AimHarder cambió los nombres de columna / estructura.
+    if (debug) {
+      debugTables = await page.evaluate(() => {
+        const norm = (v) => String(v || '').replace(/\s+/g, ' ').trim();
+        return Array.from(document.querySelectorAll('table')).slice(0, 8).map((table, idx) => {
+          const headers = Array.from(table.querySelectorAll('thead th, tr th')).map((th) => norm(th.textContent)).filter(Boolean);
+          const bodyRows = Array.from(table.querySelectorAll('tbody tr')).length
+            ? Array.from(table.querySelectorAll('tbody tr'))
+            : Array.from(table.querySelectorAll('tr')).slice(1);
+          const sampleRows = bodyRows.slice(0, 3).map((row) =>
+            Array.from(row.querySelectorAll('td')).map((td) => norm(td.textContent))
+          );
+          return { idx, rowCount: bodyRows.length, headers, sampleRows };
+        });
+      }).catch(() => []);
+    }
 
     let clients = await parseTariffCancellationRows(page);
 
@@ -3764,6 +3807,7 @@ async function getTariffCancellationRenewals(centerId, referenceDateStr = null) 
       startDate: range.startIso,
       endDate: range.endIso,
       clients,
+      ...(debug ? { debug: { steps: debugSteps, tables: debugTables, parsedCount: clients.length } } : {}),
     };
   } finally {
     await browser.close();

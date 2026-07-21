@@ -654,13 +654,15 @@ exports.getTariffCancellationRenewals = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Formato de fecha inválido. Usa YYYY-MM-DD' });
     }
 
-    const result = await getTariffCancellationRenewals(centerId, date || null);
+    const debug = req.query.debug === 'true';
+    const result = await getTariffCancellationRenewals(centerId, date || null, { debug });
     res.json({
       success: true,
       startDate: result.startDate,
       endDate: result.endDate,
       count: result.clients.length,
       clients: result.clients,
+      ...(debug && result.debug ? { debug: result.debug } : {}),
     });
   } catch (err) {
     console.error('[AimHarder Controller] Error cancelaciones de tarifa:', err.message);
