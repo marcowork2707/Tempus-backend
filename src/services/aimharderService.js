@@ -2998,6 +2998,9 @@ async function getActiveClientsMonthlyReport(centerId, monthStr = null) {
       expiry: Date.now() + SESSION_TTL_MS,
     });
 
+    // Cerrar avisos promocionales que tapan botones (rediseño del menú, etc.).
+    await dismissAimHarderPromos(page);
+
     const activeClientsCard = page
       .locator('a, button')
       .filter({ hasText: /clientes activos/i })
@@ -3034,6 +3037,7 @@ async function getActiveClientsMonthlyReport(centerId, monthStr = null) {
 
     await page.waitForTimeout(700).catch(() => {});
     await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
+    await dismissAimHarderPromos(page);
 
     const formSetupDebug = await page.evaluate(({ startInput, endInput }) => {
       const normalize = (value) => String(value || '').replace(/\s+/g, ' ').trim().toLowerCase();
@@ -3212,6 +3216,8 @@ async function getActiveClientsMonthlyReport(centerId, monthStr = null) {
     }
     console.log('[AimHarder] Filtro tarifa verificado correctamente');
 
+    // Cerrar de nuevo cualquier aviso flotante que pudiera tapar el botón.
+    await dismissAimHarderPromos(page);
     const generateButton = page.locator('button, input[type="button"], input[type="submit"], a').filter({ hasText: /generar informe/i }).first();
     if (await generateButton.count()) {
       await generateButton.click({ force: true, timeout: 12000 }).catch(async () => {
