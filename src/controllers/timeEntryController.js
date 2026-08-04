@@ -515,8 +515,9 @@ exports.getTimeEntries = catchAsyncErrors(async (req, res, next) => {
     if (entryKeySet.has(key)) return total;
     return total + Number(minutes || 0);
   }, 0);
+  // "Horas trabajadas" = solo fichajes reales. Los festivos/vacaciones sin
+  // fichaje se guardan aparte (informativo), NO se suman a lo trabajado.
   summary.totalCreditedOffMinutes = creditedOffMinutes;
-  summary.totalWorkedMinutes += creditedOffMinutes;
 
   if (filter.center && req.query.userId) {
     const assignment = await UserCenterRole.findOne({
