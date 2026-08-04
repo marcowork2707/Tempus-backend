@@ -60,6 +60,7 @@ const centerSchema = new mongoose.Schema(
           'class-notes',
           'class-report',
           'wod-recommendations',
+          'social-content',
           'whatsapp-reviews',
           'tpv-redsys',
           'pending-payments-no-tpv',
