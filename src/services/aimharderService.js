@@ -2559,6 +2559,112 @@ async function parseTariffCancellationRows(context) {
   });
 }
 
+async function parseTariffChangeRows(context) {
+  return context.evaluate(() => {
+    const normalize = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+    const includesAny = (source, needles) => needles.some((needle) => source.includes(needle));
+
+    const tables = Array.from(document.querySelectorAll('table'));
+    let selectedTable = null;
+    let selectedHeader = [];
+
+    for (const table of tables) {
+      const headers = Array.from(table.querySelectorAll('thead th, tr th')).map((th) =>
+        normalize(th.textContent).toLowerCase()
+      );
+
+      if (!headers.length) continue;
+
+      if (headers.some((h) => h.includes('nuevas tarifas')) && headers.some((h) => h.includes('tarifas dadas de baja'))) {
+        selectedTable = table;
+        selectedHeader = headers;
+        break;
+      }
+    }
+
+    if (!selectedTable) {
+      // Fallback robusto: detectar filas por contenido, aunque no haya header estándar.
+      const fallbackRows = [];
+      const seen = new Set();
+      const allRows = Array.from(document.querySelectorAll('table tr'));
+
+      for (const row of allRows) {
+        const cells = Array.from(row.querySelectorAll('td')).map((td) => normalize(td.textContent));
+        if (cells.length < 3) continue;
+
+        const nameFromLink = normalize(row.querySelector('a')?.textContent || '');
+        const memberName = nameFromLink || normalize(cells[1] || cells[0] || '');
+        const phone = normalize(cells.find((c) => /^\d{7,15}(?:[\s,;/.-]\d{7,15})*$/.test(c)) || '');
+        const joinDate = normalize(cells.find((c) => /^\d{2}\/\d{2}\/\d{4}$/.test(c)) || '');
+
+        if (!memberName) continue;
+
+        const dedupeKey = `${memberName}::${phone}::${joinDate}`;
+        if (seen.has(dedupeKey)) continue;
+        seen.add(dedupeKey);
+
+        fallbackRows.push({
+          memberName,
+          phone,
+          cancelledTariff: '',
+          newTariff: '',
+          joinDate,
+        });
+      }
+
+      return fallbackRows;
+    }
+
+    const findIdx = (candidates) => selectedHeader.findIndex((header) => includesAny(header, candidates));
+
+    const idIdx = findIdx(['id']);
+    const nameIdx = findIdx(['nombre y apellidos', 'cliente', 'nombre']);
+    const phoneIdx = findIdx(['telefonos', 'teléfonos', 'telefono', 'teléfono', 'movil', 'móvil']);
+    const localityIdx = findIdx(['localidad', 'ciudad']);
+    const cancelledTariffIdx = findIdx(['tarifas dadas de baja', 'tarifa dada de baja', 'tarifas de baja', 'baja']);
+    const newTariffIdx = findIdx(['nuevas tarifas', 'nueva tarifa', 'tarifas nuevas', 'alta tarifa']);
+    const joinDateIdx = findIdx(['fecha de alta', 'alta']);
+
+    const rows = Array.from(selectedTable.querySelectorAll('tbody tr')).length
+      ? Array.from(selectedTable.querySelectorAll('tbody tr'))
+      : Array.from(selectedTable.querySelectorAll('tr')).slice(1);
+
+    const results = [];
+    const seen = new Set();
+
+    for (const row of rows) {
+      const cells = Array.from(row.querySelectorAll('td')).map((td) => normalize(td.textContent));
+      if (!cells.length) continue;
+
+      const id = normalize(idIdx >= 0 ? cells[idIdx] : '');
+      const memberName = normalize(nameIdx >= 0 ? cells[nameIdx] : cells[1] || cells[0]);
+      const phone = normalize(phoneIdx >= 0 ? cells[phoneIdx] : '');
+      const locality = normalize(localityIdx >= 0 ? cells[localityIdx] : '');
+      const cancelledTariff = normalize(cancelledTariffIdx >= 0 ? cells[cancelledTariffIdx] : '');
+      const newTariff = normalize(newTariffIdx >= 0 ? cells[newTariffIdx] : '');
+      const joinDate = normalize(joinDateIdx >= 0 ? cells[joinDateIdx] : '');
+
+      if (!memberName) continue;
+
+      const dedupeKey = `${id}::${memberName}::${phone}::${cancelledTariff}::${newTariff}::${joinDate}`;
+      if (seen.has(dedupeKey)) continue;
+      seen.add(dedupeKey);
+
+      results.push({
+        id,
+        memberName,
+        phone,
+        locality,
+        cancelledTariff,
+        newTariff,
+        joinDate,
+      });
+    }
+
+    return results;
+  });
+}
+
 async function parseActiveClientsRows(context) {
   return context.evaluate(() => {
     const normalize = (value) => String(value || '').replace(/\s+/g, ' ').trim();
@@ -3897,6 +4003,405 @@ async function getTariffCancellationRenewals(centerId, referenceDateStr = null, 
   }
 }
 
+function stripAccents(value) {
+  return String(value || '').normalize('NFD').replace(/[̀-ͯ]/g, '');
+}
+
+function isOnRampTariff(value) {
+  const normalized = stripAccents(value).toLowerCase().replace(/\s+/g, ' ').trim();
+  return normalized.includes('on ramp') || normalized.includes('onramp');
+}
+
+function isCrossfitTariff(value) {
+  return /(medium|starter|iron|silver|gold|full)/i.test(stripAccents(value));
+}
+
+async function getTariffChangeReport(centerId, referenceDateStr = null, options = {}) {
+  const config = await getCenterAimHarderConfig(centerId);
+
+  if (!config.username || !config.password) {
+    throw new Error(
+      `Faltan credenciales de AimHarder para ${config.centerName}. Configura las credenciales en la integración del centro.`
+    );
+  }
+
+  // Modo debug: captura pantallazos (base64) y un volcado de todas las tablas
+  // que se ven en AimHarder, para diagnosticar cambios en su interfaz.
+  const debug = Boolean(options.debug);
+  const debugSteps = [];
+  let debugTables = [];
+
+  const range = getTermRenewalReportRange(referenceDateStr);
+  console.log('[AimHarder] ===== Scraping cambios de tarifa (on ramp -> crossfit) =====');
+  console.log(`[AimHarder] Rango informe: ${range.startIso} -> ${range.endIso}`);
+
+  const browser = await chromium.launch({ headless: true, slowMo: 0 });
+  try {
+    const context = await browser.newContext({
+      userAgent:
+        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+    });
+
+    const sessionCache = await getSessionCache(config);
+    if (sessionCache.cookies && sessionCache.expiry && Date.now() < sessionCache.expiry) {
+      await context.addCookies(sessionCache.cookies);
+      console.log('[AimHarder] Sesión restaurada desde caché');
+    }
+
+    const page = await context.newPage();
+    const reportsUrl = `${config.baseUrl}/reports`;
+
+    // Captura un pantallazo (base64) del estado actual para el modo debug.
+    const snap = async (label) => {
+      if (!debug) return;
+      try {
+        const buffer = await page.screenshot({ fullPage: true });
+        debugSteps.push({
+          label,
+          url: page.url(),
+          image: `data:image/png;base64,${buffer.toString('base64')}`,
+        });
+      } catch (e) {
+        debugSteps.push({ label, url: page.url(), error: e.message });
+      }
+    };
+
+    // Esta tarea debe entrar directamente a Informes (no pasar por /control).
+    console.log('[AimHarder] Navegando directamente a Informes...');
+    await page.goto(reportsUrl, { waitUntil: 'domcontentloaded', timeout: 45000 });
+    await dismissCookies(page);
+    await page.waitForLoadState('networkidle', { timeout: 20000 }).catch(() => {});
+
+    const initialReportsUrl = page.url();
+    if (!isAuthenticatedAimHarderUrl(initialReportsUrl)) {
+      console.log('[AimHarder] Sesión no válida en /reports, iniciando login...');
+      await login(page, config);
+      await page.goto(reportsUrl, { waitUntil: 'domcontentloaded', timeout: 45000 });
+      await dismissCookies(page);
+      await page.waitForLoadState('networkidle', { timeout: 20000 }).catch(() => {});
+    }
+
+    await setSessionCache(config, {
+      cookies: await context.cookies(),
+      expiry: Date.now() + SESSION_TTL_MS,
+    });
+
+    // Cerrar avisos promocionales que tapan botones (p. ej. rediseño del menú).
+    await dismissAimHarderPromos(page);
+    await snap('01-informes');
+
+    // Paso 1: abrir explícitamente "Cambios de tarifa" desde Informes.
+    const cambiosCard = page
+      .locator('a, button')
+      .filter({ hasText: /cambios de tarifa/i })
+      .first();
+
+    const cardCount = await cambiosCard.count();
+    console.log(`[AimHarder] Card "Cambios de tarifa" detectada: ${cardCount > 0}`);
+
+    if (!cardCount) {
+      throw new Error('No se encontró la tarjeta de "Cambios de tarifa" en Informes');
+    }
+
+    const verMeta = await cambiosCard.evaluate((el) => ({
+      tag: el.tagName,
+      text: (el.textContent || '').trim(),
+      id: el.id || null,
+      className: el.className || null,
+      href: el.getAttribute('href'),
+      onclick: el.getAttribute('onclick'),
+    })).catch(() => null);
+    console.log('[AimHarder] Meta Cambios enlace:', verMeta);
+
+    let clicked = false;
+    try {
+      await cambiosCard.click({ force: true, timeout: 8000 });
+      clicked = true;
+    } catch {
+      clicked = false;
+    }
+
+    if (!clicked && verMeta?.onclick) {
+      const invoked = await page.evaluate((onclickCode) => {
+        try {
+          // eslint-disable-next-line no-eval
+          eval(onclickCode);
+          return true;
+        } catch {
+          return false;
+        }
+      }, verMeta.onclick);
+      console.log('[AimHarder] onclick Cambios ejecutado:', invoked);
+    }
+
+    await page.waitForTimeout(700).catch(() => {});
+    await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
+
+    await page.waitForFunction(() => {
+      const text = String(document.body?.textContent || '').toLowerCase();
+      return text.includes('informes') && text.includes('cambios de tarifa') && text.includes('generar informe');
+    }, { timeout: 20000 }).catch(() => {});
+
+    const screenDiagnostics = await page.evaluate(() => {
+      const norm = (v) => String(v || '').replace(/\s+/g, ' ').trim();
+      const lower = (v) => norm(v).toLowerCase();
+      const bodyText = lower(document.body?.textContent || '');
+      const breadcrumbRaw = Array.from(document.querySelectorAll('h1,h2,h3,h4,.breadcrumb,nav,div,span'))
+        .map((el) => norm(el.textContent))
+        .find((text) => lower(text).includes('informes') && lower(text).includes('cambios de tarifa')) || '';
+      const hasChangePanel = bodyText.includes('descartar bonos') && bodyText.includes('grupo de tarifas');
+      const breadcrumb = breadcrumbRaw.length > 220 ? `${breadcrumbRaw.slice(0, 220)}...` : breadcrumbRaw;
+      return {
+        url: window.location.href,
+        breadcrumb,
+        hasGenerateReportFn: typeof window.generateReport === 'function',
+        hasChangePanel,
+      };
+    });
+    console.log('[AimHarder] Diagnostico pantalla:', screenDiagnostics);
+    await dismissAimHarderPromos(page);
+    await snap('02-cambios-abierto');
+
+    const evaluateResult = await page.evaluate(({ startInput, endInput }) => {
+      const normalize = (value) => String(value || '').replace(/\s+/g, ' ').trim().toLowerCase();
+
+      const parseEsDate = (value) => {
+        const match = String(value || '').match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+        if (!match) return null;
+        const day = Number(match[1]);
+        const month = Number(match[2]);
+        const year = Number(match[3]);
+        const date = new Date(year, month - 1, day);
+        return Number.isNaN(date.getTime()) ? null : date;
+      };
+
+      const getFormScope = () => {
+        const containers = Array.from(document.querySelectorAll('form, fieldset, .box, .panel, .card, section, div'));
+        return containers.find((container) => {
+          const text = normalize(container.textContent);
+          return (
+            text.includes('cambios de tarifa') &&
+            text.includes('fechas') &&
+            text.includes('desde') &&
+            text.includes('hasta') &&
+            text.includes('generar informe')
+          );
+        }) || null;
+      };
+
+      const getDateInputsFromFechasPanel = () => {
+        const candidate = getFormScope();
+
+        if (!candidate) return [];
+
+        return Array.from(candidate.querySelectorAll('input[type="text"], input[type="date"]'))
+          .filter((input) => {
+            const style = window.getComputedStyle(input);
+            return style.display !== 'none' && style.visibility !== 'hidden';
+          });
+      };
+
+      const setDateInput = (input, value) => {
+        if (!input) return;
+
+        try {
+          if (window.jQuery && window.jQuery.fn && typeof window.jQuery(input).datepicker === 'function') {
+            const parsed = parseEsDate(value);
+            window.jQuery(input).datepicker('setDate', parsed || value);
+          }
+        } catch {
+          // fallback manual below
+        }
+
+        input.focus();
+        input.value = value;
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        input.dispatchEvent(new Event('change', { bubbles: true }));
+        input.blur();
+      };
+
+      const dateInputsInDatePanel = getDateInputsFromFechasPanel();
+      const fromInput = dateInputsInDatePanel[0] || null;
+      const toInput = dateInputsInDatePanel[1] || null;
+
+      if (fromInput && toInput) {
+        setDateInput(fromInput, startInput);
+        setDateInput(toInput, endInput);
+      }
+
+      const selects = Array.from(document.querySelectorAll('select'));
+      for (const select of selects) {
+        const labelText = normalize(
+          (select.closest('label') && select.closest('label').textContent) ||
+          (select.parentElement && select.parentElement.textContent) ||
+          ''
+        );
+        const shouldSetNo = labelText.includes('descartar bonos') || labelText.includes('listar clientes');
+        if (!shouldSetNo) continue;
+
+        const noOption = Array.from(select.options).find((option) => normalize(option.textContent) === 'no');
+        if (noOption) {
+          select.value = noOption.value;
+          select.dispatchEvent(new Event('change', { bubbles: true }));
+        }
+      }
+
+      const scope = getFormScope() || document;
+      const triggerCandidates = Array.from(scope.querySelectorAll('button, input[type="button"], input[type="submit"], a'))
+        .filter((el) => normalize(el.textContent || el.getAttribute('value')).includes('generar informe'));
+
+      return {
+        sameInputResolved: fromInput && toInput ? fromInput === toInput : false,
+        scopeFound: !!scope,
+        panelInputCount: dateInputsInDatePanel.length,
+        fromFound: !!fromInput,
+        toFound: !!toInput,
+        fromValue: fromInput ? String(fromInput.value || '') : '',
+        toValue: toInput ? String(toInput.value || '') : '',
+        triggerFound: triggerCandidates.length > 0,
+        triggerCount: triggerCandidates.length,
+      };
+    }, { startInput: range.startInput, endInput: range.endInput });
+
+    console.log('[AimHarder] Resultado evaluate fechas:', {
+      ...evaluateResult,
+    });
+
+    const dateDiagnostics = await page.evaluate(() => {
+      const normalize = (value) => String(value || '').replace(/\s+/g, ' ').trim().toLowerCase();
+      const labels = Array.from(document.querySelectorAll('label, span, div, td, strong'));
+      const fromLabel = labels.find((el) => normalize(el.textContent) === 'desde');
+      const toLabel = labels.find((el) => normalize(el.textContent) === 'hasta');
+      return {
+        hasFromLabel: !!fromLabel,
+        hasToLabel: !!toLabel,
+      };
+    });
+    console.log('[AimHarder] Diagnostico fechas:', dateDiagnostics);
+
+    // Paso 4: click real en el botón visible "Generar informe".
+    // Cerrar de nuevo cualquier aviso flotante que pudiera tapar el botón.
+    await dismissAimHarderPromos(page);
+    const generateCandidates = page.locator('button, input[type="button"], input[type="submit"], a').filter({ hasText: /generar informe/i });
+    const generateCount = await generateCandidates.count();
+    console.log('[AimHarder] Botones generar informe visibles:', generateCount);
+    let generated = false;
+    if (generateCount > 0) {
+      try {
+        await generateCandidates.first().click({ force: true, timeout: 12000 });
+        generated = true;
+      } catch {
+        generated = false;
+      }
+    }
+
+    if (!generated) {
+      const invoked = await page.evaluate(() => {
+        try {
+          if (typeof window.generateReport === 'function') {
+            window.generateReport();
+            return 'window.generateReport';
+          }
+
+          const trigger = document.getElementById('generateReportButton');
+          if (trigger) {
+            trigger.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+            return '#generateReportButton.click';
+          }
+        } catch {
+          // ignore
+        }
+        return null;
+      });
+      console.log('[AimHarder] Fallback generar informe:', invoked || 'no disponible');
+    }
+
+    await page.waitForTimeout(1200).catch(() => {});
+    await page.waitForLoadState('networkidle', { timeout: 25000 }).catch(() => {});
+    await page.waitForFunction(() => {
+      const headers = Array.from(document.querySelectorAll('table th')).map((th) =>
+        String(th.textContent || '').toLowerCase().replace(/\s+/g, ' ').trim()
+      );
+      const hasTargetTable = headers.some((h) => h.includes('nuevas tarifas'));
+      if (hasTargetTable) return true;
+
+      const bodyText = String(document.body?.textContent || '').toLowerCase();
+      return bodyText.includes('no hay resultados') || bodyText.includes('0 resultados');
+    }, { timeout: 25000 }).catch(() => {});
+
+    const tableDiagnostics = await page.evaluate(() => {
+      const normalize = (value) => String(value || '').replace(/\s+/g, ' ').trim().toLowerCase();
+      const tables = Array.from(document.querySelectorAll('table'));
+      return {
+        url: window.location.href,
+        tables: tables.slice(0, 6).map((table, idx) => {
+          const headers = Array.from(table.querySelectorAll('th')).map((th) => normalize(th.textContent)).filter(Boolean);
+          const rows = table.querySelectorAll('tbody tr').length || Math.max(0, table.querySelectorAll('tr').length - 1);
+          return { idx, rows, headers: headers.slice(0, 10) };
+        }),
+        bodyHints: {
+          hasNuevasTarifasText: normalize(document.body?.textContent || '').includes('nuevas tarifas'),
+          hasNoResults: normalize(document.body?.textContent || '').includes('no hay resultados') || normalize(document.body?.textContent || '').includes('0 resultados'),
+        },
+      };
+    });
+    console.log('[AimHarder] Diagnostico tablas:', JSON.stringify(tableDiagnostics));
+    await snap('03-informe-generado');
+
+    // Volcado de TODAS las tablas visibles (cabeceras + primeras filas), para
+    // detectar si AimHarder cambió los nombres de columna / estructura.
+    if (debug) {
+      debugTables = await page.evaluate(() => {
+        const norm = (v) => String(v || '').replace(/\s+/g, ' ').trim();
+        return Array.from(document.querySelectorAll('table')).slice(0, 8).map((table, idx) => {
+          const headers = Array.from(table.querySelectorAll('thead th, tr th')).map((th) => norm(th.textContent)).filter(Boolean);
+          const bodyRows = Array.from(table.querySelectorAll('tbody tr')).length
+            ? Array.from(table.querySelectorAll('tbody tr'))
+            : Array.from(table.querySelectorAll('tr')).slice(1);
+          const sampleRows = bodyRows.slice(0, 3).map((row) =>
+            Array.from(row.querySelectorAll('td')).map((td) => norm(td.textContent))
+          );
+          return { idx, rowCount: bodyRows.length, headers, sampleRows };
+        });
+      }).catch(() => []);
+    }
+
+    let allRows = await parseTariffChangeRows(page);
+
+    // Fallback: algunos layouts de AimHarder renderizan el informe dentro de un iframe.
+    if (!allRows.length) {
+      const frames = page.frames().filter((frame) => frame !== page.mainFrame());
+      for (const frame of frames) {
+        try {
+          const frameRows = await parseTariffChangeRows(frame);
+          if (frameRows.length) {
+            allRows = frameRows;
+            break;
+          }
+        } catch {
+          // Ignorar frames no accesibles o sin contenido del informe
+        }
+      }
+    }
+
+    const clients = allRows.filter(
+      (row) => isOnRampTariff(row.cancelledTariff) && isCrossfitTariff(row.newTariff)
+    );
+
+    console.log(`[AimHarder] ${allRows.length} cambios de tarifa detectados, ${clients.length} on ramp -> crossfit`);
+
+    return {
+      startDate: range.startIso,
+      endDate: range.endIso,
+      clients,
+      ...(debug ? { debug: { steps: debugSteps, tables: debugTables, parsedCount: allRows.length } } : {}),
+    };
+  } finally {
+    await browser.close();
+    console.log('[AimHarder] ===== Fin scraping cambios de tarifa =====');
+  }
+}
+
 // Resumen global de los comentarios generales de clase para un centro, en un
 // rango de fechas opcional. Aplana los savedClasses con comentario no vacío.
 async function getClassCommentsSummary({ centerId, from = null, to = null }) {
@@ -3960,6 +4465,7 @@ module.exports = {
   setClientMonthlyMetricsManual,
   resetClientMonthlySnapshot,
   getTariffCancellationRenewals,
+  getTariffChangeReport,
   getYesterday,
   toDateString,
 };

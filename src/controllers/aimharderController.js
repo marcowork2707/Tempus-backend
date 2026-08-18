@@ -21,6 +21,7 @@ const {
   setClientMonthlyMetricsManual,
   resetClientMonthlySnapshot,
   getTariffCancellationRenewals,
+  getTariffChangeReport,
 } = require('../services/aimharderService');
 const UserCenterRole = require('../models/UserCenterRole');
 const User = require('../models/User');
@@ -672,6 +673,43 @@ exports.getTariffCancellationRenewals = async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Error al obtener cancelaciones de tarifa desde AimHarder.',
+      detail: process.env.NODE_ENV === 'development' ? err.message : undefined,
+    });
+  }
+};
+
+/**
+ * GET /api/aimharder/tariff-changes?centerId=xxx&date=YYYY-MM-DD
+ * Obtiene clientes que pasan de tarifa On Ramp a tarifa CrossFit desde "Informes > Cambios de tarifa".
+ */
+exports.getTariffChanges = async (req, res) => {
+  try {
+    const { centerId, date } = req.query;
+    if (!centerId) {
+      return res.status(400).json({ success: false, message: 'centerId es obligatorio' });
+    }
+    if (date && !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      return res.status(400).json({ success: false, message: 'Formato de fecha inválido. Usa YYYY-MM-DD' });
+    }
+
+    const debug = req.query.debug === 'true';
+    const result = await getTariffChangeReport(centerId, date || null, { debug });
+    res.json({
+      success: true,
+      startDate: result.startDate,
+      endDate: result.endDate,
+      count: result.clients.length,
+      clients: result.clients,
+      ...(debug && result.debug ? { debug: result.debug } : {}),
+    });
+  } catch (err) {
+    console.error('[AimHarder Controller] Error cambios de tarifa:', err.message);
+    if (err.message.includes('credenciales')) {
+      return res.status(503).json({ success: false, message: err.message });
+    }
+    res.status(500).json({
+      success: false,
+      message: 'Error al obtener cambios de tarifa desde AimHarder.',
       detail: process.env.NODE_ENV === 'development' ? err.message : undefined,
     });
   }
