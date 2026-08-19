@@ -52,6 +52,8 @@ app.use('/api/settings', require('./src/routes/settingsRoutes'));
 app.use('/api/stock', require('./src/routes/stockRoutes'));
 app.use('/api/spj', require('./src/routes/spjRoutes'));
 app.use('/api/tfg', require('./src/routes/tfgRoutes'));
+app.use('/api/training', require('./src/routes/trainingRoutes'));
+app.use('/api/messages', require('./src/routes/messageTemplateRoutes'));
 
 // 404 handler
 app.use((req, res) => {
