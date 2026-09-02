@@ -2615,6 +2615,7 @@ async function parseTariffChangeRows(context) {
         const memberName = nameFromLink || normalize(cells[1] || cells[0] || '');
         const phone = normalize(cells.find((c) => /^\d{7,15}(?:[\s,;/.-]\d{7,15})*$/.test(c)) || '');
         const joinDate = normalize(cells.find((c) => /^\d{2}\/\d{2}\/\d{4}$/.test(c)) || '');
+        const profileHref = normalize(row.querySelector('a')?.getAttribute('href') || '');
 
         if (!memberName) continue;
 
@@ -2628,6 +2629,7 @@ async function parseTariffChangeRows(context) {
           cancelledTariff: '',
           newTariff: '',
           joinDate,
+          profileHref,
         });
       }
 
@@ -2662,6 +2664,8 @@ async function parseTariffChangeRows(context) {
       const cancelledTariff = normalize(cancelledTariffIdx >= 0 ? cells[cancelledTariffIdx] : '');
       const newTariff = normalize(newTariffIdx >= 0 ? cells[newTariffIdx] : '');
       const joinDate = normalize(joinDateIdx >= 0 ? cells[joinDateIdx] : '');
+      // Enlace real al perfil del cliente en AimHarder (el nombre suele ser un <a>).
+      const profileHref = normalize(row.querySelector('a')?.getAttribute('href') || '');
 
       if (!memberName) continue;
 
@@ -2677,6 +2681,7 @@ async function parseTariffChangeRows(context) {
         cancelledTariff,
         newTariff,
         joinDate,
+        profileHref,
       });
     }
 
@@ -4407,9 +4412,23 @@ async function getTariffChangeReport(centerId, referenceDateStr = null, options 
       }
     }
 
-    const clients = allRows.filter(
-      (row) => isOnRampTariff(row.cancelledTariff) && isCrossfitTariff(row.newTariff)
-    );
+    // Convierte el href capturado del informe en una URL absoluta al perfil del
+    // cliente en AimHarder (resuelto contra el dominio del box).
+    const resolveProfileUrl = (href) => {
+      if (!href || /^javascript:/i.test(href) || href === '#') return '';
+      try {
+        return new URL(href, config.baseUrl).toString();
+      } catch {
+        return '';
+      }
+    };
+
+    const clients = allRows
+      .filter((row) => isOnRampTariff(row.cancelledTariff) && isCrossfitTariff(row.newTariff))
+      .map((row) => {
+        const { profileHref, ...rest } = row;
+        return { ...rest, profileUrl: resolveProfileUrl(profileHref) };
+      });
 
     console.log(`[AimHarder] ${allRows.length} cambios de tarifa detectados, ${clients.length} on ramp -> crossfit`);
 
