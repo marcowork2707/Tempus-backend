@@ -2615,7 +2615,10 @@ async function parseTariffChangeRows(context) {
         const memberName = nameFromLink || normalize(cells[1] || cells[0] || '');
         const phone = normalize(cells.find((c) => /^\d{7,15}(?:[\s,;/.-]\d{7,15})*$/.test(c)) || '');
         const joinDate = normalize(cells.find((c) => /^\d{2}\/\d{2}\/\d{4}$/.test(c)) || '');
-        const profileHref = normalize(row.querySelector('a')?.getAttribute('href') || '');
+        const cidMatch = (row.innerHTML || '').match(/cid=(\d+)/i);
+        const profileHref = cidMatch
+          ? `clients?cid=${cidMatch[1]}`
+          : normalize(row.querySelector('a')?.getAttribute('href') || '');
 
         if (!memberName) continue;
 
@@ -2664,8 +2667,13 @@ async function parseTariffChangeRows(context) {
       const cancelledTariff = normalize(cancelledTariffIdx >= 0 ? cells[cancelledTariffIdx] : '');
       const newTariff = normalize(newTariffIdx >= 0 ? cells[newTariffIdx] : '');
       const joinDate = normalize(joinDateIdx >= 0 ? cells[joinDateIdx] : '');
-      // Enlace real al perfil del cliente en AimHarder (el nombre suele ser un <a>).
-      const profileHref = normalize(row.querySelector('a')?.getAttribute('href') || '');
+      // Enlace al perfil del cliente en AimHarder. El perfil se abre con ?cid=NNN
+      // (id interno, distinto del ID de socio de la tabla), así que buscamos el cid
+      // en cualquier parte de la fila (href, onclick o data-attr).
+      const cidMatch = (row.innerHTML || '').match(/cid=(\d+)/i);
+      const profileHref = cidMatch
+        ? `clients?cid=${cidMatch[1]}`
+        : normalize(row.querySelector('a')?.getAttribute('href') || '');
 
       if (!memberName) continue;
 
@@ -3990,7 +3998,12 @@ async function getTariffCancellationRenewals(centerId, referenceDateStr = null, 
           const sampleRows = bodyRows.slice(0, 3).map((row) =>
             Array.from(row.querySelectorAll('td')).map((td) => norm(td.textContent))
           );
-          return { idx, rowCount: bodyRows.length, headers, sampleRows };
+          // Diagnóstico del enlace al perfil: cid detectado + href del primer <a>.
+          const sampleLinks = bodyRows.slice(0, 3).map((row) => {
+            const cid = (row.innerHTML || '').match(/cid=(\d+)/i);
+            return { cid: cid ? cid[1] : '', href: norm(row.querySelector('a')?.getAttribute('href') || '') };
+          });
+          return { idx, rowCount: bodyRows.length, headers, sampleRows, sampleLinks };
         });
       }).catch(() => []);
     }
@@ -4389,7 +4402,12 @@ async function getTariffChangeReport(centerId, referenceDateStr = null, options 
           const sampleRows = bodyRows.slice(0, 3).map((row) =>
             Array.from(row.querySelectorAll('td')).map((td) => norm(td.textContent))
           );
-          return { idx, rowCount: bodyRows.length, headers, sampleRows };
+          // Diagnóstico del enlace al perfil: cid detectado + href del primer <a>.
+          const sampleLinks = bodyRows.slice(0, 3).map((row) => {
+            const cid = (row.innerHTML || '').match(/cid=(\d+)/i);
+            return { cid: cid ? cid[1] : '', href: norm(row.querySelector('a')?.getAttribute('href') || '') };
+          });
+          return { idx, rowCount: bodyRows.length, headers, sampleRows, sampleLinks };
         });
       }).catch(() => []);
     }
