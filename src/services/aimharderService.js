@@ -2582,6 +2582,17 @@ async function parseTariffChangeRows(context) {
   return context.evaluate(() => {
     const normalize = (value) => String(value || '').replace(/\s+/g, ' ').trim();
     const includesAny = (source, needles) => needles.some((needle) => source.includes(needle));
+    // Extrae el cid interno del cliente (el que abre /clients?cid=NNN) desde el
+    // HTML de la fila: parámetro cid=, otros params de usuario, o el id numérico
+    // (>=5 dígitos, distinto del nº de socio) en la URL de la foto del cliente.
+    const extractCid = (html) => {
+      const s = String(html || '');
+      const m =
+        s.match(/[?&]cid=(\d+)/i) ||
+        s.match(/[?&](?:u|uid|user|userid|idcliente|clientid)=(\d{4,})/i) ||
+        s.match(/\/(\d{5,})\.(?:jpg|jpeg|png|webp|gif)/i);
+      return m ? m[1] : '';
+    };
 
     const tables = Array.from(document.querySelectorAll('table'));
     let selectedTable = null;
@@ -2615,9 +2626,9 @@ async function parseTariffChangeRows(context) {
         const memberName = nameFromLink || normalize(cells[1] || cells[0] || '');
         const phone = normalize(cells.find((c) => /^\d{7,15}(?:[\s,;/.-]\d{7,15})*$/.test(c)) || '');
         const joinDate = normalize(cells.find((c) => /^\d{2}\/\d{2}\/\d{4}$/.test(c)) || '');
-        const cidMatch = (row.innerHTML || '').match(/cid=(\d+)/i);
-        const profileHref = cidMatch
-          ? `clients?cid=${cidMatch[1]}`
+        const cid = extractCid(row.innerHTML);
+        const profileHref = cid
+          ? `clients?cid=${cid}`
           : normalize(row.querySelector('a')?.getAttribute('href') || '');
 
         if (!memberName) continue;
@@ -2667,12 +2678,11 @@ async function parseTariffChangeRows(context) {
       const cancelledTariff = normalize(cancelledTariffIdx >= 0 ? cells[cancelledTariffIdx] : '');
       const newTariff = normalize(newTariffIdx >= 0 ? cells[newTariffIdx] : '');
       const joinDate = normalize(joinDateIdx >= 0 ? cells[joinDateIdx] : '');
-      // Enlace al perfil del cliente en AimHarder. El perfil se abre con ?cid=NNN
-      // (id interno, distinto del ID de socio de la tabla), así que buscamos el cid
-      // en cualquier parte de la fila (href, onclick o data-attr).
-      const cidMatch = (row.innerHTML || '').match(/cid=(\d+)/i);
-      const profileHref = cidMatch
-        ? `clients?cid=${cidMatch[1]}`
+      // Enlace al perfil del cliente en AimHarder (se abre con ?cid=NNN, id interno
+      // distinto del ID de socio de la tabla).
+      const cid = extractCid(row.innerHTML);
+      const profileHref = cid
+        ? `clients?cid=${cid}`
         : normalize(row.querySelector('a')?.getAttribute('href') || '');
 
       if (!memberName) continue;
@@ -3998,12 +4008,24 @@ async function getTariffCancellationRenewals(centerId, referenceDateStr = null, 
           const sampleRows = bodyRows.slice(0, 3).map((row) =>
             Array.from(row.querySelectorAll('td')).map((td) => norm(td.textContent))
           );
-          // Diagnóstico del enlace al perfil: cid detectado + href del primer <a>.
-          const sampleLinks = bodyRows.slice(0, 3).map((row) => {
-            const cid = (row.innerHTML || '').match(/cid=(\d+)/i);
-            return { cid: cid ? cid[1] : '', href: norm(row.querySelector('a')?.getAttribute('href') || '') };
-          });
-          return { idx, rowCount: bodyRows.length, headers, sampleRows, sampleLinks };
+          // Diagnóstico del enlace al perfil: cid detectado, href del primer <a>,
+          // src de la foto y el HTML real de la primera fila (base64 recortado).
+          const stripB64 = (s) => String(s || '').replace(/data:image\/[^;]+;base64,[^"')\s]+/gi, 'data:img[B64]');
+          const findCid = (html) => {
+            const s = String(html || '');
+            const m =
+              s.match(/[?&]cid=(\d+)/i) ||
+              s.match(/[?&](?:u|uid|user|userid|idcliente|clientid)=(\d{4,})/i) ||
+              s.match(/\/(\d{5,})\.(?:jpg|jpeg|png|webp|gif)/i);
+            return m ? m[1] : '';
+          };
+          const sampleLinks = bodyRows.slice(0, 3).map((row) => ({
+            cid: findCid(row.innerHTML),
+            href: norm(row.querySelector('a')?.getAttribute('href') || ''),
+            imgSrc: stripB64(row.querySelector('img')?.getAttribute('src') || '').slice(0, 200),
+          }));
+          const firstRowHtml = bodyRows[0] ? stripB64(bodyRows[0].innerHTML).slice(0, 2500) : '';
+          return { idx, rowCount: bodyRows.length, headers, sampleRows, sampleLinks, firstRowHtml };
         });
       }).catch(() => []);
     }
@@ -4402,12 +4424,24 @@ async function getTariffChangeReport(centerId, referenceDateStr = null, options 
           const sampleRows = bodyRows.slice(0, 3).map((row) =>
             Array.from(row.querySelectorAll('td')).map((td) => norm(td.textContent))
           );
-          // Diagnóstico del enlace al perfil: cid detectado + href del primer <a>.
-          const sampleLinks = bodyRows.slice(0, 3).map((row) => {
-            const cid = (row.innerHTML || '').match(/cid=(\d+)/i);
-            return { cid: cid ? cid[1] : '', href: norm(row.querySelector('a')?.getAttribute('href') || '') };
-          });
-          return { idx, rowCount: bodyRows.length, headers, sampleRows, sampleLinks };
+          // Diagnóstico del enlace al perfil: cid detectado, href del primer <a>,
+          // src de la foto y el HTML real de la primera fila (base64 recortado).
+          const stripB64 = (s) => String(s || '').replace(/data:image\/[^;]+;base64,[^"')\s]+/gi, 'data:img[B64]');
+          const findCid = (html) => {
+            const s = String(html || '');
+            const m =
+              s.match(/[?&]cid=(\d+)/i) ||
+              s.match(/[?&](?:u|uid|user|userid|idcliente|clientid)=(\d{4,})/i) ||
+              s.match(/\/(\d{5,})\.(?:jpg|jpeg|png|webp|gif)/i);
+            return m ? m[1] : '';
+          };
+          const sampleLinks = bodyRows.slice(0, 3).map((row) => ({
+            cid: findCid(row.innerHTML),
+            href: norm(row.querySelector('a')?.getAttribute('href') || ''),
+            imgSrc: stripB64(row.querySelector('img')?.getAttribute('src') || '').slice(0, 200),
+          }));
+          const firstRowHtml = bodyRows[0] ? stripB64(bodyRows[0].innerHTML).slice(0, 2500) : '';
+          return { idx, rowCount: bodyRows.length, headers, sampleRows, sampleLinks, firstRowHtml };
         });
       }).catch(() => []);
     }
