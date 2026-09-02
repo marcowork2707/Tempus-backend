@@ -147,6 +147,25 @@ function getTermRenewalReportRange(referenceDateStr = null) {
   };
 }
 
+// Construye un rango de informe a partir de fechas explícitas "desde/hasta"
+// (YYYY-MM-DD) elegidas por el usuario. Devuelve exactamente el mismo shape que
+// getTermRenewalReportRange para que se usen tal cual en los inputs de AimHarder.
+function buildExplicitReportRange(startStr, endStr) {
+  const startDate = new Date(`${startStr}T12:00:00`);
+  const endDate = new Date(`${endStr}T12:00:00`);
+  if (Number.isNaN(startDate.getTime()) || Number.isNaN(endDate.getTime())) {
+    throw new Error('Fechas desde/hasta inválidas para el informe');
+  }
+  return {
+    startDate,
+    endDate,
+    startIso: toDateString(startDate),
+    endIso: toDateString(endDate),
+    startInput: toDateInputValue(startDate),
+    endInput: toDateInputValue(endDate),
+  };
+}
+
 function getMonthlyDateRange(monthStr = null) {
   const today = new Date();
   const parsed = monthStr ? String(monthStr).match(/^(\d{4})-(\d{2})$/) : null;
@@ -4031,7 +4050,11 @@ async function getTariffChangeReport(centerId, referenceDateStr = null, options 
   const debugSteps = [];
   let debugTables = [];
 
-  const range = getTermRenewalReportRange(referenceDateStr);
+  // Si el usuario elige un rango "desde/hasta" explícito, se usa tal cual en
+  // AimHarder; si no, se cae al rango automático (última semana del mes + primera del siguiente).
+  const range = (options.startDate && options.endDate)
+    ? buildExplicitReportRange(options.startDate, options.endDate)
+    : getTermRenewalReportRange(referenceDateStr);
   console.log('[AimHarder] ===== Scraping cambios de tarifa (on ramp -> crossfit) =====');
   console.log(`[AimHarder] Rango informe: ${range.startIso} -> ${range.endIso}`);
 

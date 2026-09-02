@@ -684,16 +684,30 @@ exports.getTariffCancellationRenewals = async (req, res) => {
  */
 exports.getTariffChanges = async (req, res) => {
   try {
-    const { centerId, date } = req.query;
+    const { centerId, date, startDate, endDate } = req.query;
     if (!centerId) {
       return res.status(400).json({ success: false, message: 'centerId es obligatorio' });
     }
-    if (date && !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+    const dateRe = /^\d{4}-\d{2}-\d{2}$/;
+    if (date && !dateRe.test(date)) {
       return res.status(400).json({ success: false, message: 'Formato de fecha inválido. Usa YYYY-MM-DD' });
+    }
+    if ((startDate && !dateRe.test(startDate)) || (endDate && !dateRe.test(endDate))) {
+      return res.status(400).json({ success: false, message: 'Formato de fecha (desde/hasta) inválido. Usa YYYY-MM-DD' });
+    }
+    if ((startDate && !endDate) || (!startDate && endDate)) {
+      return res.status(400).json({ success: false, message: 'Indica tanto "desde" como "hasta"' });
+    }
+    if (startDate && endDate && startDate > endDate) {
+      return res.status(400).json({ success: false, message: 'La fecha "desde" no puede ser posterior a "hasta"' });
     }
 
     const debug = req.query.debug === 'true';
-    const result = await getTariffChangeReport(centerId, date || null, { debug });
+    const result = await getTariffChangeReport(centerId, date || null, {
+      debug,
+      startDate: startDate || null,
+      endDate: endDate || null,
+    });
     res.json({
       success: true,
       startDate: result.startDate,
