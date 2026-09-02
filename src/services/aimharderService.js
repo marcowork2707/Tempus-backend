@@ -4475,39 +4475,41 @@ async function getTariffChangeReport(centerId, referenceDateStr = null, options 
       }
     };
 
-    // Cruce con "Clientes activos" (ya sincronizados por API): mapea nombre
-    // normalizado -> cid interno de AimHarder. Es la vía fiable para el enlace al
-    // perfil, y funciona aunque el cliente no tenga foto en el informe.
+    // Cruce con "Clientes activos" (ya sincronizados por API) para obtener el cid
+    // interno de AimHarder de forma fiable (funciona aunque el cliente no tenga
+    // foto). Clave principal: teléfono (los 9 últimos dígitos); clave secundaria:
+    // nombre normalizado. Se recorre todo el histórico y gana el sync más reciente.
+    const phone9 = (value) => String(value || '').replace(/\D/g, '').slice(-9);
+    const cidByPhone = new Map();
     const cidByName = new Map();
-    const cidByNamePhone = new Map();
     try {
-      const latest = await ActiveClient.findOne({ center: centerId })
+      const actives = await ActiveClient.find({ center: centerId })
+        .select('normalizedName phone aimharderId reportDate')
         .sort({ reportDate: -1 })
-        .select('reportDate')
         .lean();
-      if (latest) {
-        const actives = await ActiveClient.find({ center: centerId, reportDate: latest.reportDate })
-          .select('normalizedName phone aimharderId')
-          .lean();
-        for (const ac of actives) {
-          if (!ac.aimharderId || !ac.normalizedName) continue;
-          cidByName.set(ac.normalizedName, ac.aimharderId);
-          if (ac.phone) cidByNamePhone.set(`${ac.normalizedName}::${ac.phone}`, ac.aimharderId);
-        }
-        console.log(`[AimHarder] Cruce clientes activos (${latest.reportDate}): ${cidByName.size} nombres con cid`);
+      for (const ac of actives) {
+        if (!ac.aimharderId) continue;
+        const p = phone9(ac.phone);
+        // El primer registro visto por clave gana (el más reciente, por el sort desc).
+        if (p.length === 9 && !cidByPhone.has(p)) cidByPhone.set(p, ac.aimharderId);
+        if (ac.normalizedName && !cidByName.has(ac.normalizedName)) cidByName.set(ac.normalizedName, ac.aimharderId);
       }
+      console.log(`[AimHarder] Cruce clientes activos: ${cidByPhone.size} teléfonos, ${cidByName.size} nombres con cid`);
     } catch (e) {
       console.warn('[AimHarder] No se pudo cruzar con clientes activos:', e.message);
     }
+
+    // La columna "Teléfonos" del informe puede traer varios números.
+    const phoneCandidates = (value) => (String(value || '').match(/\d{9,}/g) || []).map((g) => g.slice(-9));
 
     const clients = allRows
       .filter((row) => isOnRampTariff(row.cancelledTariff) && isCrossfitTariff(row.newTariff))
       .map((row) => {
         const { profileHref, ...rest } = row;
         const nn = normalizeName(row.memberName || '');
-        // 1º: cid del cruce con clientes activos (fiable, no depende de la foto).
-        const crossCid = cidByNamePhone.get(`${nn}::${row.phone}`) || cidByName.get(nn) || '';
-        // 2º fallback: cid extraído de la foto/atributos del informe (profileHref).
+        // 1º teléfono (fiable), 2º nombre normalizado, 3º cid de la foto del informe.
+        const cidFromPhone = phoneCandidates(row.phone).map((c) => cidByPhone.get(c)).find(Boolean);
+        const crossCid = cidFromPhone || cidByName.get(nn) || '';
         const profileUrl = crossCid
           ? resolveProfileUrl(`clients?cid=${crossCid}`)
           : resolveProfileUrl(profileHref);
