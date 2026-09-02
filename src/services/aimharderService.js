@@ -4475,11 +4475,43 @@ async function getTariffChangeReport(centerId, referenceDateStr = null, options 
       }
     };
 
+    // Cruce con "Clientes activos" (ya sincronizados por API): mapea nombre
+    // normalizado -> cid interno de AimHarder. Es la vía fiable para el enlace al
+    // perfil, y funciona aunque el cliente no tenga foto en el informe.
+    const cidByName = new Map();
+    const cidByNamePhone = new Map();
+    try {
+      const latest = await ActiveClient.findOne({ center: centerId })
+        .sort({ reportDate: -1 })
+        .select('reportDate')
+        .lean();
+      if (latest) {
+        const actives = await ActiveClient.find({ center: centerId, reportDate: latest.reportDate })
+          .select('normalizedName phone aimharderId')
+          .lean();
+        for (const ac of actives) {
+          if (!ac.aimharderId || !ac.normalizedName) continue;
+          cidByName.set(ac.normalizedName, ac.aimharderId);
+          if (ac.phone) cidByNamePhone.set(`${ac.normalizedName}::${ac.phone}`, ac.aimharderId);
+        }
+        console.log(`[AimHarder] Cruce clientes activos (${latest.reportDate}): ${cidByName.size} nombres con cid`);
+      }
+    } catch (e) {
+      console.warn('[AimHarder] No se pudo cruzar con clientes activos:', e.message);
+    }
+
     const clients = allRows
       .filter((row) => isOnRampTariff(row.cancelledTariff) && isCrossfitTariff(row.newTariff))
       .map((row) => {
         const { profileHref, ...rest } = row;
-        return { ...rest, profileUrl: resolveProfileUrl(profileHref) };
+        const nn = normalizeName(row.memberName || '');
+        // 1º: cid del cruce con clientes activos (fiable, no depende de la foto).
+        const crossCid = cidByNamePhone.get(`${nn}::${row.phone}`) || cidByName.get(nn) || '';
+        // 2º fallback: cid extraído de la foto/atributos del informe (profileHref).
+        const profileUrl = crossCid
+          ? resolveProfileUrl(`clients?cid=${crossCid}`)
+          : resolveProfileUrl(profileHref);
+        return { ...rest, profileUrl };
       });
 
     console.log(`[AimHarder] ${allRows.length} cambios de tarifa detectados, ${clients.length} on ramp -> crossfit`);
