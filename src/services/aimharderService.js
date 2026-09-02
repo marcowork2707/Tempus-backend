@@ -2590,7 +2590,7 @@ async function parseTariffChangeRows(context) {
       const m =
         s.match(/[?&]cid=(\d+)/i) ||
         s.match(/[?&](?:u|uid|user|userid|idcliente|clientid)=(\d{4,})/i) ||
-        s.match(/\/(\d{5,})\.(?:jpg|jpeg|png|webp|gif)/i);
+        s.match(/\/(\d{5,})[^/]*\.(?:jpg|jpeg|png|webp|gif)/i);
       return m ? m[1] : '';
     };
 
@@ -4016,7 +4016,7 @@ async function getTariffCancellationRenewals(centerId, referenceDateStr = null, 
             const m =
               s.match(/[?&]cid=(\d+)/i) ||
               s.match(/[?&](?:u|uid|user|userid|idcliente|clientid)=(\d{4,})/i) ||
-              s.match(/\/(\d{5,})\.(?:jpg|jpeg|png|webp|gif)/i);
+              s.match(/\/(\d{5,})[^/]*\.(?:jpg|jpeg|png|webp|gif)/i);
             return m ? m[1] : '';
           };
           const sampleLinks = bodyRows.slice(0, 3).map((row) => ({
@@ -4432,7 +4432,7 @@ async function getTariffChangeReport(centerId, referenceDateStr = null, options 
             const m =
               s.match(/[?&]cid=(\d+)/i) ||
               s.match(/[?&](?:u|uid|user|userid|idcliente|clientid)=(\d{4,})/i) ||
-              s.match(/\/(\d{5,})\.(?:jpg|jpeg|png|webp|gif)/i);
+              s.match(/\/(\d{5,})[^/]*\.(?:jpg|jpeg|png|webp|gif)/i);
             return m ? m[1] : '';
           };
           const sampleLinks = bodyRows.slice(0, 3).map((row) => ({
