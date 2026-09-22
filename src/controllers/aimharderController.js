@@ -324,8 +324,10 @@ exports.getClassReports = async (req, res) => {
     console.error('[AimHarder Controller] Error getClassReports:', err.message);
     res.status(500).json({
       success: false,
-      message: 'Error al obtener los reportes de clases de AimHarder.',
-      detail: process.env.NODE_ENV === 'development' ? err.message : undefined,
+      // Herramienta interna: mostramos la causa real para poder diagnosticar sin
+      // tener que mirar los logs del servidor.
+      message: `Error al obtener los reportes de clases de AimHarder. ${err.message}`,
+      detail: err.message,
     });
   }
 };

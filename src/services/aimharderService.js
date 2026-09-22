@@ -751,10 +751,27 @@ async function openReservationsDay(page, targetDate, config) {
   await page.goto(scheduleUrl, { waitUntil: 'domcontentloaded', timeout: 45000 });
   await page.waitForTimeout(1200).catch(() => {});
   await dismissCookies(page);
+  // AimHarder muestra banners flotantes ("hemos rediseñado el menú") que pueden
+  // tapar el calendario del horario. Se cierran igual que en el resto de scrapers.
+  await dismissAimHarderPromos(page);
   await page.waitForLoadState('networkidle', { timeout: 20000 }).catch(() => {});
   await saveDebugSnapshot(page, '04_schedule_today');
 
-  await page.waitForSelector('#weekDays, #clasesDiaSel', { timeout: 20000 });
+  try {
+    await page.waitForSelector('#weekDays, #clasesDiaSel', { timeout: 20000 });
+  } catch {
+    // Sin esto el fallo llega al usuario como un 500 genérico: damos contexto real.
+    await saveDebugSnapshot(page, '04b_sin_calendario');
+    const diag = await page.evaluate(() => ({
+      title: document.title,
+      bloques: document.querySelectorAll('.bloqueClase').length,
+      texto: (document.body && document.body.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 180),
+    })).catch(() => null);
+    throw new Error(
+      `No se encontró el calendario del horario (#weekDays/#clasesDiaSel) en ${page.url()}. ` +
+      `Diagnóstico: ${JSON.stringify(diag)}`
+    );
+  }
 
   const dayKey = toAimHarderDayKey(targetDate);
   const daySelector = `#weekDays .wds${dayKey}`;
@@ -786,6 +803,7 @@ async function openReservationsDay(page, targetDate, config) {
   ).catch(() => {});
 
   await dismissCookies(page);
+  await dismissAimHarderPromos(page);
   await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
   await page.waitForFunction(
     () => {
