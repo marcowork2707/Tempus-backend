@@ -373,8 +373,9 @@ exports.getClassReportStatus = async (req, res) => {
     console.error('[AimHarder Controller] Error getClassReportStatus:', err.message);
     res.status(500).json({
       success: false,
-      message: 'Error al obtener el estado de avisos por instructor.',
-      detail: process.env.NODE_ENV === 'development' ? err.message : undefined,
+      // Herramienta interna: la causa real vale más que un mensaje genérico.
+      message: `Error al obtener el estado de avisos por instructor. ${err.message}`,
+      detail: err.message,
     });
   }
 };

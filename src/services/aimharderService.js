@@ -1844,7 +1844,18 @@ async function getClassReportStatus(dateStr = null, centerId, options = {}) {
   const { initialize = false, forceRefresh = false } = options;
 
   let roster = await ClassReportRoster.findOne({ center: centerId, date: targetDate }).lean();
-  const rosterNeedsRefresh = roster && (roster.instructors || []).some((entry) => !entry.classTime || !entry.className);
+  const rosterInstructors = (roster && roster.instructors) || [];
+  const rosterHasIncompleteEntries = rosterInstructors.some((entry) => !entry.classTime || !entry.className);
+  // Un roster vacío se quedaba clavado para siempre: `some()` sobre [] es false,
+  // así que no se consideraba "a refrescar" y, al existir el documento, tampoco
+  // entraba por la rama de `!roster`. Pasaba con días aún sin clases publicadas
+  // (p. ej. una fecha futura) o con un scrapeo fallido. Se reintenta, pero solo
+  // si ya tiene un rato, para no lanzar un navegador en cada carga de la página.
+  const EMPTY_ROSTER_RETRY_MS = 10 * 60 * 1000;
+  const rosterIsStaleEmpty = Boolean(roster)
+    && rosterInstructors.length === 0
+    && (!roster.refreshedAt || (Date.now() - new Date(roster.refreshedAt).getTime()) > EMPTY_ROSTER_RETRY_MS);
+  const rosterNeedsRefresh = rosterHasIncompleteEntries || rosterIsStaleEmpty;
   if ((forceRefresh || ((!roster || rosterNeedsRefresh) && initialize))) {
     const context = await getClassReportContext(targetDate, centerId, '', true, null);
     roster = (await upsertClassReportRoster(centerId, context.date, context.reports || [])).toObject();
