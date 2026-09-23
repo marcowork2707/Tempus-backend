@@ -1130,6 +1130,23 @@ async function openReservationsDay(page, targetDate, config) {
     const tipoWeekSelDay = await page
       .evaluate(() => typeof window.weekSelDay)
       .catch(() => 'desconocido');
+    // Hipótesis: la página carga TODA la semana y weekSelDay solo muestra/oculta.
+    // Si hay varios contenedores de día o varios títulos, el parser estaría
+    // leyendo siempre el del día inicial.
+    const estructura = await page.evaluate(() => {
+      const titulos = Array.from(document.querySelectorAll('.titRvClass'))
+        .map((el) => (el.textContent || '').replace(/\s+/g, ' ').trim())
+        .slice(0, 8);
+      const contenedores = Array.from(document.querySelectorAll('[id*="clasesDia"], [class*="clasesDia"]'))
+        .map((el) => `${el.tagName}#${el.id || ''}.${String(el.className).slice(0, 40)} visible=${el.offsetParent !== null} bloques=${el.querySelectorAll('.bloqueClase').length}`)
+        .slice(0, 8);
+      return {
+        totalBloques: document.querySelectorAll('.bloqueClase').length,
+        bloquesVisibles: Array.from(document.querySelectorAll('.bloqueClase')).filter((b) => b.offsetParent !== null).length,
+        titulos,
+        contenedores,
+      };
+    }).catch(() => null);
     const fuenteWeekSelDay = await page
       .evaluate(() => (typeof window.weekSelDay === 'function' ? String(window.weekSelDay).slice(0, 700) : null))
       .catch(() => null);
@@ -1145,7 +1162,7 @@ async function openReservationsDay(page, targetDate, config) {
       `ErroresJS=${JSON.stringify(erroresJs.slice(-5))}. ` +
       `PeticionesTrasClic=${JSON.stringify(peticionesTrasClic)}. ` +
       `Titulo="${diagFinal?.titulo}". HuellaCambio=${(await huellaListado()) !== huellaInicial}. ` +
-      `FUENTE weekSelDay=${fuenteWeekSelDay}`
+      `ESTRUCTURA=${JSON.stringify(estructura)}. FUENTE weekSelDay=${fuenteWeekSelDay}`
     );
   }
 
