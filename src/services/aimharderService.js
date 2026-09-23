@@ -146,11 +146,11 @@ async function isOnTargetDay(page, targetDate) {
       // Se parsea el título ("23 de Septiembre de 2026") y se comparan día, mes y
       // año EXACTOS. Buscar el número suelto daría falsos positivos: el día 20
       // "aparece" dentro del año 2026, y el día 2 dentro de cualquier fecha.
+      // NO se usa `.wds<dayKey>.active` ni siquiera como respaldo: está comprobado
+      // que AimHarder marca la celda al pulsarla aunque el listado siga en otro
+      // día, y eso daba el día por bueno. Solo vale el título del listado.
       const titulo = normalize(document.querySelector('#clasesDiaSel .titRvClass')?.textContent || '');
-      if (!titulo) {
-        // Solo si este layout no pinta título caemos a la celda activa.
-        return Boolean(document.querySelector(`#weekDays .wds${dayKey}.active`));
-      }
+      if (!titulo) return false;
       const match = titulo.match(/(\d{1,2})\s+de\s+([a-z]+)\s+de\s+(\d{4})/);
       if (!match) return false;
       return (
@@ -855,6 +855,28 @@ async function openReservationsDay(page, targetDate, config) {
     found = await confirmarDia();
   }
 
+  // Estrategia 1b: ejecutar la acción que la propia celda tiene asignada. Es lo
+  // que haría un clic real; el clic sintético puede marcar la celda sin disparar
+  // la recarga del listado.
+  if (!found) {
+    const accion = await page.evaluate((selector) => {
+      const cell = document.querySelector(selector);
+      if (!cell) return null;
+      const onclick = cell.getAttribute('onclick');
+      if (onclick) {
+        try { new Function(onclick).call(cell); return onclick.slice(0, 120); } catch { /* noop */ }
+      }
+      const link = cell.tagName === 'A' ? cell : cell.querySelector('a');
+      if (link) { link.click(); return 'click en <a> interno'; }
+      return null;
+    }, daySelector).catch(() => null);
+    if (accion) {
+      console.log('[AimHarder] Estrategia 1b: ejecutada acción de la celda ->', accion);
+      await settle();
+      found = await confirmarDia();
+    }
+  }
+
   // Estrategia 2: invocar directamente la función JS de AimHarder.
   if (!found) {
     console.log('[AimHarder] Estrategia 2: window.weekSelDay(', dayKey, ')');
@@ -1043,12 +1065,24 @@ async function openReservationsDay(page, targetDate, config) {
 
     if (!confirmado) {
       await saveDebugSnapshot(page, '04d_dia_no_confirmado');
-      const tituloActual = await page
-        .evaluate(() => document.querySelector('#clasesDiaSel .titRvClass')?.textContent?.trim() || null)
-        .catch(() => null);
+      const diagFinal = await page.evaluate((selector) => {
+        const cell = document.querySelector(selector);
+        return {
+          titulo: document.querySelector('#clasesDiaSel .titRvClass')?.textContent?.trim() || null,
+          celdaExiste: Boolean(cell),
+          celdaOnclick: cell ? (cell.getAttribute('onclick') || null) : null,
+          celdaHtml: cell ? cell.outerHTML.slice(0, 220) : null,
+          diasEnTira: Array.from(document.querySelectorAll('#weekDays [class*="wds"]'))
+            .flatMap((el) => Array.from(el.classList).filter((c) => /^wds\d{8}$/.test(c))),
+          funcionesWindow: Object.keys(window)
+            .filter((k) => /week|dia|day|sel|cal|reserva/i.test(k) && typeof window[k] === 'function')
+            .slice(0, 40),
+        };
+      }, daySelector).catch(() => null);
       throw new Error(
-        `El horario no llegó a mostrar el día ${toDateString(targetDate)}: el listado sigue en "${tituloActual}". ` +
-        'Se aborta para no anotar avisos del día equivocado.'
+        `El horario no llegó a mostrar el día ${toDateString(targetDate)}: el listado sigue en ` +
+        `"${diagFinal?.titulo}". Se aborta para no anotar avisos del día equivocado. ` +
+        `Diagnóstico: ${JSON.stringify(diagFinal)}`
       );
     }
   }
@@ -1857,8 +1891,43 @@ async function getClassReportStatus(dateStr = null, centerId, options = {}) {
     && (!roster.refreshedAt || (Date.now() - new Date(roster.refreshedAt).getTime()) > EMPTY_ROSTER_RETRY_MS);
   const rosterNeedsRefresh = rosterHasIncompleteEntries || rosterIsStaleEmpty;
   if ((forceRefresh || ((!roster || rosterNeedsRefresh) && initialize))) {
-    const context = await getClassReportContext(targetDate, centerId, '', true, null);
-    roster = (await upsertClassReportRoster(centerId, context.date, context.reports || [])).toObject();
+    try {
+      const context = await getClassReportContext(targetDate, centerId, '', true, null);
+      roster = (await upsertClassReportRoster(centerId, context.date, context.reports || [])).toObject();
+    } catch (err) {
+      // Si el scrapeo falla (p. ej. AimHarder no deja abrir ese día) NO se puede
+      // dejar al usuario sin seguimiento: se reconstruye el listado a partir de
+      // los avisos YA anotados de ese día, que viven en ClassReport. No se guarda
+      // como roster para no dar por bueno un listado parcial.
+      const yaAnotados = await ClassReport.find({ center: centerId, date: targetDate }).lean();
+      const reconstruido = [];
+      for (const informe of yaAnotados) {
+        const clases = new Map();
+        for (const guardada of informe.savedClasses || []) {
+          clases.set(`${guardada.classTime}::${guardada.className}`, guardada);
+        }
+        for (const item of informe.items || []) {
+          const clave = `${item.classTime}::${item.className}`;
+          if (!clases.has(clave)) clases.set(clave, item);
+        }
+        for (const clase of clases.values()) {
+          reconstruido.push({
+            instructorName: informe.instructorName,
+            period: informe.period,
+            className: clase.className || '',
+            classTime: clase.classTime || '',
+          });
+        }
+      }
+
+      if (reconstruido.length === 0) throw err;
+
+      console.warn(
+        `[AimHarder] Scrapeo de ${targetDate} fallido (${err.message}). ` +
+        `Se muestra el seguimiento reconstruido con ${reconstruido.length} clases ya anotadas.`
+      );
+      roster = { instructors: reconstruido, refreshedAt: null, rebuiltFromReports: true };
+    }
   }
 
   if (!roster) {
