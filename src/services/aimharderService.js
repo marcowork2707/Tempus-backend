@@ -118,6 +118,46 @@ function toDateInputValue(date) {
   return `${day}/${month}/${year}`;
 }
 
+const SPANISH_MONTHS = [
+  'enero', 'febrero', 'marzo', 'abril', 'mayo', 'junio',
+  'julio', 'agosto', 'septiembre', 'octubre', 'noviembre', 'diciembre',
+];
+
+// Comprueba, leyendo directamente el DOM, si el horario mostrado corresponde
+// de verdad al día objetivo. Nunca nos fiamos de que un clic "haya funcionado":
+// mostrar/guardar el día equivocado es peor que fallar con un error explícito.
+async function isOnTargetDay(page, targetDate) {
+  const dayKey = toAimHarderDayKey(targetDate);
+  const dayNumber = targetDate.getDate();
+  const monthName = SPANISH_MONTHS[targetDate.getMonth()];
+  const year = targetDate.getFullYear();
+
+  return page.evaluate(
+    ({ dayKey, dayNumber, monthName, year }) => {
+      const normalize = (v) => String(v || '')
+        .normalize('NFD')
+        .replace(/[̀-ͯ]/g, '')
+        .toLowerCase();
+
+      const activeCell = document.querySelector(`#weekDays .wds${dayKey}.active`);
+      if (activeCell) return true;
+
+      // Se parsea el título ("23 de Septiembre de 2026") y se comparan día, mes y
+      // año EXACTOS. Buscar el número suelto daría falsos positivos: el día 20
+      // "aparece" dentro del año 2026, y el día 2 dentro de cualquier fecha.
+      const titulo = normalize(document.querySelector('#clasesDiaSel .titRvClass')?.textContent || '');
+      const match = titulo.match(/(\d{1,2})\s+de\s+([a-z]+)\s+de\s+(\d{4})/);
+      if (!match) return false;
+      return (
+        Number(match[1]) === dayNumber &&
+        match[2] === normalize(monthName) &&
+        Number(match[3]) === year
+      );
+    },
+    { dayKey, dayNumber, monthName, year }
+  );
+}
+
 function getTermRenewalReportRange(referenceDateStr = null) {
   const referenceDate = referenceDateStr ? new Date(`${referenceDateStr}T12:00:00`) : new Date();
   if (Number.isNaN(referenceDate.getTime())) {
@@ -779,28 +819,175 @@ async function openReservationsDay(page, targetDate, config) {
 
   console.log('[AimHarder] Seleccionando día objetivo:', dayKey);
 
+  // Espera corta de "asentamiento" tras cada intento de navegación, más una
+  // espera de red por si el cambio de día dispara una petición AJAX.
+  const settle = async () => {
+    await page.waitForTimeout(1500).catch(() => {});
+    await page.waitForLoadState('networkidle', { timeout: 8000 }).catch(() => {});
+  };
+
+  let found = false;
+
+  // Estrategia 1: clic directo sobre la celda del día en la tira semanal.
+  // Es el camino habitual (día de hoy, misma semana) y debe seguir siendo rápido.
   const directButton = page.locator(daySelector).first();
   if (await directButton.count()) {
+    console.log('[AimHarder] Estrategia 1: clic directo en', daySelector);
     await directButton.click({ force: true });
-  } else {
-    console.log('[AimHarder] Botón semanal no encontrado, usando weekSelDay()');
+    await settle();
+    found = await isOnTargetDay(page, targetDate);
+  }
+
+  // Estrategia 2: invocar directamente la función JS de AimHarder.
+  if (!found) {
+    console.log('[AimHarder] Estrategia 2: window.weekSelDay(', dayKey, ')');
     await page.evaluate((value) => {
       if (typeof window.weekSelDay === 'function') {
         window.weekSelDay(value);
       }
     }, dayKey);
+    await settle();
+    found = await isOnTargetDay(page, targetDate);
   }
 
-  await page.waitForTimeout(2000).catch(() => {});
-  await page.waitForFunction(
-    ({ selector, day }) => {
-      const active = document.querySelector(`${selector}.active`);
-      const title = document.querySelector('#clasesDiaSel .titRvClass')?.textContent || '';
-      return Boolean(active) || title.includes(String(day));
-    },
-    { selector: daySelector, day: targetDay },
-    { timeout: 20000 }
-  ).catch(() => {});
+  // Estrategia 3: usar el selector de fecha "Ir a día", útil para fechas de
+  // semanas distintas a la mostrada actualmente.
+  if (!found) {
+    console.log('[AimHarder] Estrategia 3: input "Ir a día"');
+    const dateInputValue = [
+      targetDate.getFullYear(),
+      String(targetDate.getMonth() + 1).padStart(2, '0'),
+      String(targetDate.getDate()).padStart(2, '0'),
+    ].join('-');
+    await page.evaluate((value) => {
+      const normalize = (v) => String(v || '')
+        .normalize('NFD')
+        .replace(/[̀-ͯ]/g, '')
+        .toLowerCase();
+
+      const inputs = Array.from(document.querySelectorAll('input[type="date"]'));
+      if (inputs.length === 0) return;
+
+      let input = inputs.find((el) => {
+        const container = el.closest('div, label, form, td, section') || el.parentElement;
+        return container && normalize(container.textContent).includes('ir a dia');
+      });
+      if (!input) input = inputs[0];
+
+      input.value = value;
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+    }, dateInputValue);
+    await settle();
+    found = await isOnTargetDay(page, targetDate);
+  }
+
+  // Estrategia 4: navegar semana a semana con las flechas del calendario hasta
+  // que la celda del día objetivo aparezca en la tira semanal.
+  if (!found) {
+    console.log('[AimHarder] Estrategia 4: flechas de semana');
+    for (let i = 0; i < 8 && !found; i += 1) {
+      const weekInfo = await page.evaluate(() => {
+        const cells = Array.from(document.querySelectorAll('#weekDays [class*="wds"]'));
+        const dates = cells
+          .map((cell) => {
+            const match = Array.from(cell.classList).find((cls) => /^wds\d{8}$/.test(cls));
+            if (!match) return null;
+            const raw = match.replace('wds', '');
+            return {
+              year: Number(raw.slice(0, 4)),
+              month: Number(raw.slice(4, 6)),
+              day: Number(raw.slice(6, 8)),
+            };
+          })
+          .filter(Boolean);
+        if (dates.length === 0) return null;
+        const toTime = (d) => new Date(d.year, d.month - 1, d.day).getTime();
+        const first = dates.reduce((a, b) => (toTime(a) < toTime(b) ? a : b));
+        const last = dates.reduce((a, b) => (toTime(a) > toTime(b) ? a : b));
+        return {
+          firstTime: toTime(first),
+          lastTime: toTime(last),
+        };
+      });
+
+      if (!weekInfo) break;
+
+      const targetTime = new Date(targetDate.getFullYear(), targetDate.getMonth(), targetDate.getDate()).getTime();
+      const direction = targetTime < weekInfo.firstTime ? 'prev' : (targetTime > weekInfo.lastTime ? 'next' : null);
+      if (!direction) break;
+
+      const clicked = await page.evaluate((dir) => {
+        const weekDaysEl = document.querySelector('#weekDays');
+        if (!weekDaysEl) return false;
+
+        // Buscamos el contenedor del navegador semanal (el ancestro que agrupa
+        // la tira de días junto con las flechas de anterior/siguiente semana).
+        let container = weekDaysEl.parentElement;
+        for (let hops = 0; hops < 4 && container; hops += 1) {
+          const candidates = Array.from(container.querySelectorAll('a, button, div, span, img, i')).filter((el) => {
+            if (el.closest('#weekDays')) return false;
+            const attrs = `${el.getAttribute('onclick') || ''} ${el.id || ''} ${el.className || ''}`;
+            return /week|sem/i.test(attrs);
+          });
+          if (candidates.length > 0) {
+            const weekDaysRect = weekDaysEl.getBoundingClientRect();
+            const prevCandidates = candidates.filter((el) => el.getBoundingClientRect().left <= weekDaysRect.left);
+            const nextCandidates = candidates.filter((el) => el.getBoundingClientRect().left > weekDaysRect.left);
+            const target = dir === 'prev'
+              ? (prevCandidates[prevCandidates.length - 1] || candidates[0])
+              : (nextCandidates[0] || candidates[candidates.length - 1]);
+            if (target) {
+              target.click();
+              return true;
+            }
+          }
+          container = container.parentElement;
+        }
+        return false;
+      }, direction);
+
+      if (!clicked) break;
+
+      await settle();
+
+      const dayNowVisible = await page.locator(daySelector).count();
+      if (dayNowVisible) {
+        console.log('[AimHarder] Estrategia 4: celda del día encontrada, clicando', daySelector);
+        await page.locator(daySelector).first().click({ force: true });
+        await settle();
+        found = await isOnTargetDay(page, targetDate);
+      }
+    }
+  }
+
+  if (!found) {
+    await saveDebugSnapshot(page, '04c_dia_no_encontrado');
+    const diag = await page.evaluate(() => {
+      const weekLabel = Array.from(document.querySelectorAll('*'))
+        .find((el) => el.children.length === 0 && /\d{1,2}\s+\w+\s*-\s*\d{1,2}\s+\w+/.test(el.textContent || ''));
+      return {
+        url: window.location.href,
+        titulo: document.querySelector('#clasesDiaSel .titRvClass')?.textContent?.trim() || null,
+        semana: weekLabel ? weekLabel.textContent.trim() : null,
+        diasEnTira: Array.from(document.querySelectorAll('#weekDays [class*="wds"]'))
+          .flatMap((cell) => Array.from(cell.classList).filter((cls) => /^wds\d{8}$/.test(cls))),
+        bloques: document.querySelectorAll('.bloqueClase').length,
+        funcionesWindow: Object.keys(window).filter((k) => /week|dia|day|sel|cal/i.test(k) && typeof window[k] === 'function'),
+      };
+    }).catch(() => null);
+
+    const targetDateStr = [
+      targetDate.getFullYear(),
+      String(targetDate.getMonth() + 1).padStart(2, '0'),
+      String(targetDate.getDate()).padStart(2, '0'),
+    ].join('-');
+
+    throw new Error(
+      `No se pudo abrir el día ${targetDateStr} en el horario de AimHarder. ` +
+      `Diagnóstico: ${JSON.stringify(diag)}`
+    );
+  }
 
   await dismissCookies(page);
   await dismissAimHarderPromos(page);
