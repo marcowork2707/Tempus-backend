@@ -1147,82 +1147,45 @@ async function openReservationsDay(page, targetDate, config, snap = async () => 
   // Confirmación final antes de leer nada: o el título ya es el del día pedido,
   // o el listado ha cambiado con la celda de ese día marcada. Si no, se aborta:
   // anotar avisos sobre el día equivocado es peor que fallar.
-  const confirmado = await confirmarDia(12000);
+  // NO se vuelve a exigir el título aquí. Comprobado en producción: AimHarder
+  // NO repinta "#clasesDiaSel .titRvClass" al cambiar de día (seguía diciendo
+  // "23 de Septiembre" con el día 22 ya cargado). Exigirlo tiraba por la borda
+  // una navegación que SÍ había funcionado ("Resultado del clic: DÍA CORRECTO").
+  // La prueba válida ya se hizo durante la navegación: el listado cambió de
+  // verdad y la celda del día quedó marcada. Aquí solo se verifica que esa celda
+  // siga marcada, que es condición necesaria para no leer otro día.
+  const celdaSigueMarcada = await page
+    .evaluate((sel) => Boolean(document.querySelector(`${sel}.active`)), daySelector)
+    .catch(() => true);
 
-  // Resumen técnico en TEXTO, fácil de copiar y pegar. Las capturas pesan
-  // demasiado para compartirlas; esto cabe en un mensaje.
+  if (!celdaSigueMarcada) {
+    await saveDebugSnapshot(page, '04d_dia_no_confirmado');
+    quitarEscuchas();
+    throw new Error(
+      `El horario dejó de mostrar el día ${toDateString(targetDate)} (la celda ya no está marcada). ` +
+      'Se aborta para no anotar avisos del día equivocado.'
+    );
+  }
+
+  // Resumen técnico en TEXTO, fácil de copiar y pegar.
   const tituloAhora = await page
     .evaluate(() => document.querySelector('#clasesDiaSel .titRvClass')?.textContent?.trim() || null)
     .catch(() => null);
   const bloquesAhora = await page
     .evaluate(() => document.querySelectorAll('.bloqueClase').length)
     .catch(() => -1);
-  const peticionesIniciales = peticiones.slice(0, peticionesPrevias).slice(-12);
-  const peticionesTrasClic = peticiones.slice(peticionesPrevias).slice(0, 12);
   const resumen = [
     `DIA PEDIDO: ${toDateString(targetDate)} (clave ${dayKey})`,
-    `CONFIRMADO: ${confirmado}`,
-    `TITULO AHORA: ${tituloAhora}`,
-    `BLOQUES DE CLASE: ${bloquesAhora}`,
-    `CLIC BLOQUEADO POR: ${motivoClicBloqueado || 'nada, el clic normal funcionó'}`,
+    `CELDA MARCADA: ${celdaSigueMarcada}`,
+    `TITULO (no fiable, no se repinta): ${tituloAhora}`,
+    `BLOQUES DE CLASE LEIDOS: ${bloquesAhora}`,
+    `CLIC BLOQUEADO POR: ${motivoClicBloqueado || 'nada'}`,
     `ONCLICK CELDA: ${resultadoOnclick}`,
     `weekSelDay DIRECTO: ${resultadoWeekSelDay}`,
     `ERRORES JS: ${JSON.stringify(erroresJs.slice(-4))}`,
-    `PETICIONES AL ABRIR: ${JSON.stringify(peticionesIniciales)}`,
-    `PETICIONES TRAS CLIC: ${JSON.stringify(peticionesTrasClic)}`,
   ].join('\n');
   console.log('[AimHarder] RESUMEN\n' + resumen);
-  await snap('RESUMEN TÉCNICO — copia este texto y pégalo en el chat', resumen);
-  if (!confirmado) {
-    await saveDebugSnapshot(page, '04d_dia_no_confirmado');
-    const diagFinal = await page.evaluate((selector) => {
-      const cell = document.querySelector(selector);
-      return {
-        onclickCelda: cell ? (cell.getAttribute('onclick') || '(sin onclick)') : '(celda no existe)',
-        htmlCelda: cell ? cell.outerHTML.slice(0, 200) : null,
-        titulo: document.querySelector('#clasesDiaSel .titRvClass')?.textContent?.trim() || null,
-        diasEnTira: Array.from(document.querySelectorAll('#weekDays [class*="wds"]'))
-          .flatMap((el) => Array.from(el.classList).filter((c) => /^wds\d{8}$/.test(c))),
-      };
-    }, daySelector).catch(() => null);
-    const tipoWeekSelDay = await page
-      .evaluate(() => typeof window.weekSelDay)
-      .catch(() => 'desconocido');
-    // Hipótesis: la página carga TODA la semana y weekSelDay solo muestra/oculta.
-    // Si hay varios contenedores de día o varios títulos, el parser estaría
-    // leyendo siempre el del día inicial.
-    const estructura = await page.evaluate(() => {
-      const titulos = Array.from(document.querySelectorAll('.titRvClass'))
-        .map((el) => (el.textContent || '').replace(/\s+/g, ' ').trim())
-        .slice(0, 8);
-      const contenedores = Array.from(document.querySelectorAll('[id*="clasesDia"], [class*="clasesDia"]'))
-        .map((el) => `${el.tagName}#${el.id || ''}.${String(el.className).slice(0, 40)} visible=${el.offsetParent !== null} bloques=${el.querySelectorAll('.bloqueClase').length}`)
-        .slice(0, 8);
-      return {
-        totalBloques: document.querySelectorAll('.bloqueClase').length,
-        bloquesVisibles: Array.from(document.querySelectorAll('.bloqueClase')).filter((b) => b.offsetParent !== null).length,
-        titulos,
-        contenedores,
-      };
-    }).catch(() => null);
-    const fuenteWeekSelDay = await page
-      .evaluate(() => (typeof window.weekSelDay === 'function' ? String(window.weekSelDay).slice(0, 700) : null))
-      .catch(() => null);
-    const funcionesCarga = await page
-      .evaluate(() => Object.keys(window)
-        .filter((k) => /carga|reserva|dia|day|week|sel/i.test(k) && typeof window[k] === 'function'))
-      .catch(() => []);
-    const peticionesTrasClic = peticiones.slice(peticionesPrevias).slice(-10);
-    quitarEscuchas();
-    throw new Error(
-      `No se pudo abrir el día ${toDateString(targetDate)}. ` +
-      `typeof weekSelDay=${tipoWeekSelDay}. ` +
-      `ErroresJS=${JSON.stringify(erroresJs.slice(-5))}. ` +
-      `PeticionesTrasClic=${JSON.stringify(peticionesTrasClic)}. ` +
-      `Titulo="${diagFinal?.titulo}". HuellaCambio=${(await huellaListado()) !== huellaInicial}. ` +
-      `ClicBloqueadoPor=${motivoClicBloqueado}. ESTRUCTURA=${JSON.stringify(estructura)}`
-    );
-  }
+  await snap(`RESUMEN TÉCNICO (día ${targetDay})`, resumen);
 
   await page.waitForFunction(
     () => {
