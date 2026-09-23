@@ -143,6 +143,119 @@ async function isOnTargetDay(page, targetDate) {
 // Aquí se recorren TODOS los `.titRvClass`, se parsea la fecha de cada uno y se
 // devuelve el contenedor cuyo título coincide exactamente con el día pedido.
 // Eso es una prueba real de que estamos leyendo ese día, no una suposición.
+// Pide el día directamente a la API que usa el propio AimHarder.
+//
+// Descubierto leyendo el código fuente de `window.weekSelDay` en producción:
+//
+//   currCallBook = $.ajax({ type: "GET", url: "/api/coachBookings",
+//     data: { day: fSel, familyId: idFamiliar, showCurrent: showCurrentClassesSend, ... } })
+//
+// Es decir: cambiar de día NO recarga la página ni navega; hace esta llamada y
+// repinta. Por eso ninguna estrategia de clic funcionaba y por eso el título
+// seguía siendo el de hoy. Aquí se reproduce la llamada desde dentro de la
+// página (misma sesión y mismas cookies) y se devuelve su HTML, que es
+// EXACTAMENTE el listado del día pedido: lo garantiza el parámetro `day`.
+async function pedirDiaAApiCoachBookings(page, targetDate) {
+  const dayKey = toAimHarderDayKey(targetDate);
+
+  const respuesta = await page.evaluate(async (day) => {
+    const num = (valor, porDefecto) => (typeof valor === 'number' || typeof valor === 'string' ? valor : porDefecto);
+    // Se copian los mismos valores que usa la página para que la respuesta
+    // tenga la misma forma que la que ya sabemos parsear.
+    const params = new URLSearchParams({
+      day: String(day),
+      familyId: typeof window.idFamiliar === 'string' ? window.idFamiliar : '',
+      showCurrent: String(num(window.showCurrentClassesSend, 1)),
+      showCurrentPrev: String(num(window.showCurrentPrevSend, 2)),
+      showCurrentNext: String(num(window.showCurrentNextSend, 2)),
+      _: String(Date.now()),
+    });
+    try {
+      const r = await fetch(`/api/coachBookings?${params.toString()}`, {
+        credentials: 'include',
+        headers: { 'X-Requested-With': 'XMLHttpRequest' },
+      });
+      const texto = await r.text();
+      return { ok: r.ok, status: r.status, url: `/api/coachBookings?${params.toString()}`, body: texto.slice(0, 3000000) };
+    } catch (e) {
+      return { ok: false, status: 0, url: `/api/coachBookings?${params.toString()}`, body: '', error: String(e && e.message ? e.message : e) };
+    }
+  }, dayKey).catch((e) => ({ ok: false, status: 0, body: '', error: e.message }));
+
+  if (!respuesta || !respuesta.ok || !respuesta.body) {
+    return { ok: false, detalle: `status=${respuesta && respuesta.status} error=${respuesta && respuesta.error} url=${respuesta && respuesta.url}` };
+  }
+
+  // La respuesta puede venir como HTML suelto o como JSON con el HTML dentro.
+  // En vez de suponer la forma, se busca el primer texto que contenga clases.
+  const crudo = respuesta.body.trim();
+  let html = null;
+  if (crudo.startsWith('{') || crudo.startsWith('[')) {
+    try {
+      const datos = JSON.parse(crudo);
+      const buscarHtml = (valor, profundidad = 0) => {
+        if (profundidad > 6 || valor == null) return null;
+        if (typeof valor === 'string') return valor.includes('bloqueClase') ? valor : null;
+        if (Array.isArray(valor)) {
+          for (const hijo of valor) {
+            const hallado = buscarHtml(hijo, profundidad + 1);
+            if (hallado) return hallado;
+          }
+          return null;
+        }
+        if (typeof valor === 'object') {
+          for (const hijo of Object.values(valor)) {
+            const hallado = buscarHtml(hijo, profundidad + 1);
+            if (hallado) return hallado;
+          }
+        }
+        return null;
+      };
+      html = buscarHtml(datos);
+      if (!html) {
+        return {
+          ok: false,
+          detalle: `La respuesta es JSON pero no trae HTML con clases. Claves: ${JSON.stringify(Object.keys(datos || {})).slice(0, 300)}. Muestra: ${crudo.slice(0, 300)}`,
+        };
+      }
+    } catch (e) {
+      return { ok: false, detalle: `JSON ilegible: ${e.message}. Muestra: ${crudo.slice(0, 300)}` };
+    }
+  } else {
+    html = crudo;
+  }
+
+  if (!html.includes('bloqueClase')) {
+    return { ok: false, detalle: `La respuesta no contiene ninguna clase (${html.length} caracteres). Muestra: ${html.slice(0, 300)}` };
+  }
+
+  return { ok: true, html, url: respuesta.url };
+}
+
+// Recorta un HTML al listado del día pedido. Si trae varios días (el endpoint
+// admite `showCurrentPrev`/`showCurrentNext`), se queda solo con el que toca.
+function acotarHtmlAlDia(html, targetDate) {
+  const cheerio = require('cheerio');
+  const $ = cheerio.load(html);
+  const titulos = $('.titRvClass').toArray();
+  if (titulos.length <= 1) return html;
+
+  const dia = targetDate.getDate();
+  const mes = normalizeName(SPANISH_MONTHS[targetDate.getMonth()]);
+  const anio = targetDate.getFullYear();
+
+  for (const titulo of titulos) {
+    const texto = normalizeName($(titulo).text());
+    const m = texto.match(/(\d{1,2})\s+de\s+([a-z]+)\s+de\s+(\d{4})/);
+    if (!m) continue;
+    if (Number(m[1]) !== dia || m[2] !== mes || Number(m[3]) !== anio) continue;
+    let nodo = $(titulo).parent();
+    while (nodo.length && nodo.find('.bloqueClase').length === 0) nodo = nodo.parent();
+    if (nodo.length) return $.html(nodo);
+  }
+  return html;
+}
+
 async function resolverListadoDelDia(page, targetDate) {
   const dayNumber = targetDate.getDate();
   const monthName = SPANISH_MONTHS[targetDate.getMonth()];
@@ -950,6 +1063,19 @@ async function openReservationsDay(page, targetDate, config, snap = async () => 
 
   await snap(`2. Antes de pulsar el día ${targetDay} (tira semanal visible)`);
 
+  // ── Vía principal: pedir el día a la misma API que usa AimHarder ──
+  // Es lo que hace `weekSelDay`: GET /api/coachBookings?day=YYYYMMDD. Ningún
+  // clic recarga la página, por eso todas las estrategias de clic fallaban.
+  const viaApi = await pedirDiaAApiCoachBookings(page, targetDate);
+  if (viaApi.ok) {
+    const htmlDelDia = acotarHtmlAlDia(viaApi.html, targetDate);
+    apunta(`E0 /api/coachBookings?day=${dayKey} -> DÍA CARGADO (${htmlDelDia.length} caracteres)`);
+    await snap(`3. Día ${targetDay} pedido a /api/coachBookings`, `INTENTOS:\n- ${bitacora.join('\n- ')}`);
+    quitarEscuchas();
+    return { scopeHtml: htmlDelDia };
+  }
+  apunta(`E0 /api/coachBookings?day=${dayKey} -> FALLA: ${viaApi.detalle}`);
+
   let found = false;
 
   // Estrategia 1: pulsar la celda del día como lo haría una persona.
@@ -1565,9 +1691,9 @@ function pushUniqueWaitlistMember(target, memberName) {
   }
 }
 
-async function parseReservationsHtml(page, targetDate) {
+async function parseReservationsHtml(page, targetDate, scopeHtml = null) {
   const cheerio = require('cheerio');
-  const html = await page.content();
+  const html = scopeHtml || (await page.content());
   const $ = cheerio.load(html);
   const dateStr = toDateString(targetDate);
   const absences = [];
@@ -1644,9 +1770,9 @@ function isMetaClientLine(text) {
   );
 }
 
-async function parseReservationsHtmlForOccupancy(page) {
+async function parseReservationsHtmlForOccupancy(page, scopeHtml = null) {
   const cheerio = require('cheerio');
-  const html = await page.content();
+  const html = scopeHtml || (await page.content());
   const $ = cheerio.load(html);
   const classes = [];
 
@@ -2738,10 +2864,10 @@ async function getAbsences(dateStr = null, centerId) {
     });
 
     // ── Navegación al día ──
-    await openReservationsDay(page, targetDate, config);
+    const navAusencias = await openReservationsDay(page, targetDate, config);
     await saveDebugSnapshot(page, '06_final_schedule');
 
-    const reservationAbsences = await parseReservationsHtml(page, targetDate);
+    const reservationAbsences = await parseReservationsHtml(page, targetDate, navAusencias && navAusencias.scopeHtml);
     if (reservationAbsences.length > 0) {
       console.log(`[AimHarder] ${reservationAbsences.length} ausencias encontradas en Reservas`);
       return enrichAbsencesFromDb(reservationAbsences, config.centerId);
@@ -2820,8 +2946,8 @@ async function getOccupancy(dateStr = null, centerId) {
       expiry: Date.now() + SESSION_TTL_MS,
     });
 
-    await openReservationsDay(page, targetDate, config);
-    const classes = await parseReservationsHtmlForOccupancy(page);
+    const navOcupacion = await openReservationsDay(page, targetDate, config);
+    const classes = await parseReservationsHtmlForOccupancy(page, navOcupacion && navOcupacion.scopeHtml);
     console.log(`[AimHarder] ${classes.length} clases encontradas para ocupación`);
     return { date: targetDateStr, classes };
   } finally {
