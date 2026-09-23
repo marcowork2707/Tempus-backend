@@ -296,6 +296,7 @@ exports.updateIntegration = async (req, res) => {
 exports.getClassReports = async (req, res) => {
   try {
     const { centerId, date, includeAll } = req.query;
+    const debug = req.query.debug === 'true';
     if (!centerId) {
       return res.status(400).json({ success: false, message: 'centerId es obligatorio' });
     }
@@ -314,7 +315,7 @@ exports.getClassReports = async (req, res) => {
 
     const currentUser = await User.findById(req.user.id).select('name nickname firstName lastName');
     const allowAllReports = includeAll === 'true';
-    const result = await getClassReportContext(date || null, centerId, buildUserNameCandidates(currentUser), allowAllReports, req.user.id);
+    const result = await getClassReportContext(date || null, centerId, buildUserNameCandidates(currentUser), allowAllReports, req.user.id, { debug });
 
     res.json({
       success: true,
@@ -328,6 +329,8 @@ exports.getClassReports = async (req, res) => {
       // tener que mirar los logs del servidor.
       message: `Error al obtener los reportes de clases de AimHarder. ${err.message}`,
       detail: err.message,
+      // Las capturas del scraping son justo lo que hace falta cuando falla.
+      ...(err.debugSteps ? { debug: { steps: err.debugSteps } } : {}),
     });
   }
 };

@@ -790,7 +790,7 @@ async function ensureAuthenticatedSession(page, config) {
 // Navegación a Reservas y al día correcto
 // ─────────────────────────────────────────────────────
 
-async function openReservationsDay(page, targetDate, config) {
+async function openReservationsDay(page, targetDate, config, snap = async () => {}) {
   const scheduleUrl = `${config.baseUrl}/schedule?adm`;
   console.log('[AimHarder] Navegando a schedule:', scheduleUrl);
   await page.goto(scheduleUrl, { waitUntil: 'domcontentloaded', timeout: 45000 });
@@ -801,6 +801,7 @@ async function openReservationsDay(page, targetDate, config) {
   await dismissAimHarderPromos(page);
   await page.waitForLoadState('networkidle', { timeout: 20000 }).catch(() => {});
   await saveDebugSnapshot(page, '04_schedule_today');
+  await snap('1. Reservas recién abierto (debe mostrar HOY)');
 
   try {
     await page.waitForSelector('#weekDays, #clasesDiaSel', { timeout: 20000 });
@@ -899,6 +900,8 @@ async function openReservationsDay(page, targetDate, config) {
     }
   };
 
+  await snap(`2. Antes de pulsar el día ${targetDay} (tira semanal visible)`);
+
   let found = false;
 
   // Estrategia 1: pulsar la celda del día como lo haría una persona.
@@ -923,7 +926,9 @@ async function openReservationsDay(page, targetDate, config) {
       });
     }
     await settle();
+    await snap(`3. Tras pulsar el día ${targetDay}${motivoClicBloqueado ? ' (el clic normal falló)' : ''}`);
     found = await confirmarDia();
+    await snap(`4. Resultado del clic: ${found ? 'DÍA CORRECTO' : 'sigue en otro día'}`);
   }
 
   // Estrategia 1b: ejecutar la acción que la propia celda tiene asignada. Es lo
@@ -1200,6 +1205,7 @@ async function openReservationsDay(page, targetDate, config) {
   ).catch(() => {});
   await page.waitForTimeout(800).catch(() => {});
   quitarEscuchas();
+  await snap(`5. Estado final antes de leer las clases (día ${targetDay})`);
   await saveDebugSnapshot(page, `05_schedule_day${targetDay}`);
 }
 
@@ -1800,7 +1806,7 @@ function toMinutes(time = '') {
   return (hours * 60) + minutes;
 }
 
-async function getClassReportContext(dateStr = null, centerId, userName = '', isAdmin = false, userId = null) {
+async function getClassReportContext(dateStr = null, centerId, userName = '', isAdmin = false, userId = null, options = {}) {
   const config = await getCenterAimHarderConfig(centerId);
   const username = config.username;
   const password = config.password;
@@ -1811,6 +1817,11 @@ async function getClassReportContext(dateStr = null, centerId, userName = '', is
 
   const targetDate = dateStr ? new Date(`${dateStr}T12:00:00`) : new Date();
   const targetDateStr = toDateString(targetDate);
+
+  // Modo depuración: capturas (base64) de cada paso, para ver desde la web
+  // en qué punto se queda atascado el scraping.
+  const debug = Boolean(options.debug);
+  const debugSteps = [];
   const browser = await chromium.launch({ headless: true, slowMo: 0 });
 
   try {
@@ -1848,7 +1859,23 @@ async function getClassReportContext(dateStr = null, centerId, userName = '', is
       expiry: Date.now() + SESSION_TTL_MS,
     });
 
-    await openReservationsDay(page, targetDate, config);
+    const snap = async (label) => {
+      if (!debug) return;
+      try {
+        const buffer = await page.screenshot({ fullPage: true });
+        debugSteps.push({ label, url: page.url(), image: `data:image/png;base64,${buffer.toString('base64')}` });
+      } catch (e) {
+        debugSteps.push({ label, url: page.url(), error: e.message });
+      }
+    };
+
+    try {
+      await openReservationsDay(page, targetDate, config, snap);
+    } catch (e) {
+      // En depuración interesan las capturas aunque falle: se adjuntan al error.
+      if (debug) { e.debugSteps = debugSteps; }
+      throw e;
+    }
     const reservationClasses = await parseReservationsHtmlForClassReports(page);
     const userNameCandidates = Array.isArray(userName) ? userName : [userName];
     const normalizedUserNames = userNameCandidates
@@ -1884,6 +1911,7 @@ async function getClassReportContext(dateStr = null, centerId, userName = '', is
 
     return {
       date: targetDateStr,
+      ...(debug ? { debug: { steps: debugSteps } } : {}),
       reports: Array.from(grouped.values()).map((group) => {
         const latestMinutes = Math.max(...group.classes.map((item) => toMinutes(item.classTime)));
         const ready = !isToday || latestMinutes <= nowMinutes;
