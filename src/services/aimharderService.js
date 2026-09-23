@@ -923,52 +923,26 @@ async function openReservationsDay(page, targetDate, config, snap = async () => 
     await page.waitForLoadState('networkidle', { timeout: 8000 }).catch(() => {});
   };
 
-  // Huella del listado visible (título + primeras clases). Permite detectar que
-  // AimHarder ha recargado el día aunque no repinte el título.
-  const huellaListado = () => page.evaluate(() => {
-    const titulo = document.querySelector('#clasesDiaSel .titRvClass')?.textContent?.trim() || '';
-    const clases = Array.from(document.querySelectorAll('.bloqueClase')).slice(0, 8).map((bloque) => {
-      const hora = bloque.querySelector('.rvHora')?.textContent?.trim() || '';
-      const nombre = bloque.querySelector('.rvNombreCl')?.textContent?.trim() || '';
-      const ocupacion = ((bloque.textContent || '').match(/Plazas ocupadas\s*\d+\s*\/\s*\d+/i) || [''])[0];
-      return `${hora}|${nombre}|${ocupacion}`;
-    });
-    return `${titulo}##${clases.join('~')}`;
-  }).catch(() => '');
+  // Bitácora de TODO lo que se intenta, en texto. Sin esto no hay forma de
+  // saber qué estrategia se ejecutó realmente: el diagnóstico anterior decía
+  // "DÍA CORRECTO" en el paso 4 y las estrategias 1b-4 ni siquiera llegaban a
+  // probarse, porque la confirmación daba un falso positivo.
+  const bitacora = [];
+  const apunta = (texto) => {
+    bitacora.push(texto);
+    console.log('[AimHarder]', texto);
+  };
 
-  const huellaInicial = await huellaListado();
-
-  const peticionesPrevias = peticiones.length;
-
-  // Sondea hasta `timeoutMs` en vez de comprobar una sola vez: si el clic funcionó
-  // pero AimHarder tarda en repintar, darlo por fallido llevaría a probar más
-  // estrategias (flechas incluidas) y acabar en otra semana.
+  // Única prueba admitida de que estamos en el día pedido: existe en el DOM el
+  // listado de ese día (título con la fecha exacta, o contenedor con la clave
+  // del día) y tiene clases. NO vale que la celda quede marcada: AimHarder la
+  // marca al pulsarla aunque el listado no cambie, y eso es exactamente lo que
+  // hacía pasar por buena una navegación que nunca ocurrió.
   const confirmarDia = async (timeoutMs = 6000) => {
     const limite = Date.now() + timeoutMs;
     for (;;) {
-      // Señal fuerte: existe en el DOM el listado del día pedido Y tiene clases.
-      // Se exigen clases para no dar por bueno un contenedor vacío que AimHarder
-      // aún no ha rellenado. El caso legítimo de "ese día no hay clases" se
-      // acepta más abajo, en la comprobación final, cuando ya no quedan
-      // estrategias que probar.
       const ambito = await resolverListadoDelDia(page, targetDate);
       if (ambito && ambito.encontrado && (ambito.bloques > 0 || ambito.totalBloques === 0)) return true;
-
-      // Señal secundaria: la celda del día objetivo está marcada Y el listado ha
-      // cambiado respecto al que había al entrar. Cubre el caso de que AimHarder
-      // recargue las clases sin repintar el título. Exigir el cambio evita el
-      // falso positivo de la versión anterior, que se fiaba solo de la marca.
-      const huellaActual = await huellaListado();
-      if (huellaActual && huellaActual !== huellaInicial) {
-        const marcada = await page
-          .evaluate((sel) => Boolean(document.querySelector(`${sel}.active`)), daySelector)
-          .catch(() => false);
-        if (marcada) {
-          console.log('[AimHarder] Día confirmado por cambio de listado + celda marcada');
-          return true;
-        }
-      }
-
       if (Date.now() >= limite) return false;
       await page.waitForTimeout(500).catch(() => {});
     }
@@ -1004,6 +978,7 @@ async function openReservationsDay(page, targetDate, config, snap = async () => 
     await settle();
     await snap(`3. Tras pulsar el día ${targetDay}${motivoClicBloqueado ? ' (el clic normal falló)' : ''}`);
     found = await confirmarDia();
+    apunta(`E1 clic en la celda -> ${found ? 'DÍA CARGADO' : 'no cambia el día'}${motivoClicBloqueado ? ` (clic normal bloqueado: ${motivoClicBloqueado})` : ''}`);
     await snap(`4. Resultado del clic: ${found ? 'DÍA CORRECTO' : 'sigue en otro día'}`);
   }
 
@@ -1030,9 +1005,11 @@ async function openReservationsDay(page, targetDate, config, snap = async () => 
     }, daySelector).catch(() => null);
     resultadoOnclick = accion;
     if (accion) {
-      console.log('[AimHarder] Estrategia 1b: ejecutada acción de la celda ->', accion);
       await settle();
       found = await confirmarDia();
+      apunta(`E1b onclick de la celda (${accion}) -> ${found ? 'DÍA CARGADO' : 'no cambia el día'}`);
+    } else {
+      apunta('E1b la celda no tiene onclick ni enlace interno');
     }
   }
 
@@ -1052,7 +1029,7 @@ async function openReservationsDay(page, targetDate, config, snap = async () => 
       await dismissAimHarderPromos(page);
       await page.waitForLoadState('networkidle', { timeout: 8000 }).catch(() => {});
       found = await confirmarDia(4000);
-      if (found) console.log('[AimHarder] Día cargado por URL con parámetro', parametro);
+      apunta(`E1c URL ?${parametro}=${dayKey} -> ${found ? 'DÍA CARGADO' : 'no cambia el día'}`);
     }
   }
 
@@ -1068,9 +1045,9 @@ async function openReservationsDay(page, targetDate, config, snap = async () => 
         return `EXCEPCION en weekSelDay: ${e && e.message ? e.message : e}`;
       }
     }, dayKey).catch((e) => `no se pudo evaluar: ${e.message}`);
-    console.log('[AimHarder]', resultadoWeekSelDay);
     await settle();
     found = await confirmarDia();
+    apunta(`E2 weekSelDay(${dayKey}) [${resultadoWeekSelDay}] -> ${found ? 'DÍA CARGADO' : 'no cambia el día'}`);
   }
 
   // Estrategia 3: usar el selector de fecha "Ir a día", útil para fechas de
@@ -1103,6 +1080,7 @@ async function openReservationsDay(page, targetDate, config, snap = async () => 
     }, dateInputValue);
     await settle();
     found = await confirmarDia();
+    apunta(`E3 input "Ir a día" = ${dateInputValue} -> ${found ? 'DÍA CARGADO' : 'no cambia el día'}`);
   }
 
   // Estrategia 4: navegar semana a semana con las flechas del calendario hasta
@@ -1180,6 +1158,7 @@ async function openReservationsDay(page, targetDate, config, snap = async () => 
         await page.locator(daySelector).first().click({ force: true });
         await settle();
         found = await confirmarDia();
+        apunta(`E4 flechas de semana + clic en la celda -> ${found ? 'DÍA CARGADO' : 'no cambia el día'}`);
       }
     }
   }
@@ -1206,9 +1185,13 @@ async function openReservationsDay(page, targetDate, config, snap = async () => 
       String(targetDate.getDate()).padStart(2, '0'),
     ].join('-');
 
+    quitarEscuchas();
     throw new Error(
-      `No se pudo abrir el día ${targetDateStr} en el horario de AimHarder. ` +
-      `Diagnóstico: ${JSON.stringify(diag)}`
+      `No se pudo abrir el día ${targetDateStr} en el horario de AimHarder.\n` +
+      `INTENTOS:\n- ${bitacora.join('\n- ')}\n` +
+      `PETICIONES XHR VISTAS (últimas 12):\n- ${peticiones.slice(-12).join('\n- ')}\n` +
+      `ERRORES JS: ${JSON.stringify(erroresJs.slice(-4))}\n` +
+      `DIAGNÓSTICO: ${JSON.stringify(diag)}`
     );
   }
 
@@ -1239,13 +1222,33 @@ async function openReservationsDay(page, targetDate, config, snap = async () => 
   if (!ambitoFinal || !ambitoFinal.encontrado) {
     await saveDebugSnapshot(page, '04d_dia_no_confirmado');
     quitarEscuchas();
+    const comoCambiaDeDia = await page.evaluate((sel) => {
+      const celda = document.querySelector(sel);
+      const fuente = (nombre) => {
+        try {
+          return typeof window[nombre] === 'function' ? String(window[nombre]).replace(/\s+/g, ' ').slice(0, 700) : null;
+        } catch { return null; }
+      };
+      const candidatas = Object.keys(window)
+        .filter((k) => /week|dia|day|sem|sched|rv|cal/i.test(k) && typeof window[k] === 'function')
+        .slice(0, 25);
+      return {
+        onclickCelda: celda ? celda.getAttribute('onclick') : 'NO EXISTE LA CELDA',
+        htmlCelda: celda ? celda.outerHTML.replace(/\s+/g, ' ').slice(0, 300) : null,
+        weekSelDay: fuente('weekSelDay'),
+        funcionesCandidatas: candidatas,
+      };
+    }, daySelector).catch((e) => ({ error: e.message }));
     const detalle = ambitoFinal
       ? `Títulos encontrados en la página (${ambitoFinal.totalTitulos}): ` +
         JSON.stringify(ambitoFinal.titulos) +
         `. Bloques de clase en todo el documento: ${ambitoFinal.totalBloques}.`
       : 'No se pudo inspeccionar el DOM del horario.';
     throw new Error(
-      `El horario no muestra el día ${toDateString(targetDate)}. ${detalle} ` +
+      `El horario no muestra el día ${toDateString(targetDate)}. ${detalle}\n` +
+      `INTENTOS:\n- ${bitacora.join('\n- ')}\n` +
+      `CÓMO CAMBIA DE DÍA AIMHARDER: ${JSON.stringify(comoCambiaDeDia)}\n` +
+      `PETICIONES XHR VISTAS (últimas 12):\n- ${peticiones.slice(-12).join('\n- ')}\n` +
       'Se aborta para no anotar avisos del día equivocado.'
     );
   }
@@ -1256,9 +1259,7 @@ async function openReservationsDay(page, targetDate, config, snap = async () => 
     `LISTADO DEL DIA LOCALIZADO: si (via=${ambitoFinal.via}, visible=${ambitoFinal.visible})`,
     `BLOQUES DE ESE DIA: ${ambitoFinal.bloques} (en todo el documento: ${ambitoFinal.totalBloques})`,
     `TITULOS EN LA PAGINA (${ambitoFinal.totalTitulos}): ${JSON.stringify(ambitoFinal.titulos)}`,
-    `CLIC BLOQUEADO POR: ${motivoClicBloqueado || 'nada'}`,
-    `ONCLICK CELDA: ${resultadoOnclick}`,
-    `weekSelDay DIRECTO: ${resultadoWeekSelDay}`,
+    `INTENTOS: ${bitacora.join(' | ')}`,
     `ERRORES JS: ${JSON.stringify(erroresJs.slice(-4))}`,
   ].join('\n');
   console.log('[AimHarder] RESUMEN\n' + resumen);
@@ -2167,6 +2168,9 @@ async function upsertClassReportRoster(centerId, date, reports = []) {
         date,
         instructors,
         refreshedAt: new Date(),
+        // Solo se llega aquí con un contexto scrapeado, y el contexto solo se
+        // devuelve si `openReservationsDay` verificó el día en el DOM.
+        verified: true,
       },
     },
     { upsert: true, new: true, setDefaultsOnInsert: true }
@@ -2189,7 +2193,13 @@ async function getClassReportStatus(dateStr = null, centerId, options = {}) {
   const rosterIsStaleEmpty = Boolean(roster)
     && rosterInstructors.length === 0
     && (!roster.refreshedAt || (Date.now() - new Date(roster.refreshedAt).getTime()) > EMPTY_ROSTER_RETRY_MS);
-  const rosterNeedsRefresh = rosterHasIncompleteEntries || rosterIsStaleEmpty;
+  // Un roster de un día pasado guardado ANTES de que el scrapeo supiera
+  // verificar la fecha puede ser el listado de otro día (de ahí los
+  // instructores con un número de clases que no cuadra). No se enseña: se
+  // vuelve a intentar y, si no se puede, se reconstruye con lo ya anotado.
+  const esHoy = targetDate === toDateString(new Date());
+  const rosterNoFiable = Boolean(roster) && roster.verified !== true && !esHoy;
+  const rosterNeedsRefresh = rosterHasIncompleteEntries || rosterIsStaleEmpty || rosterNoFiable;
   if ((forceRefresh || ((!roster || rosterNeedsRefresh) && initialize))) {
     try {
       const context = await getClassReportContext(targetDate, centerId, '', true, null);
@@ -2199,35 +2209,29 @@ async function getClassReportStatus(dateStr = null, centerId, options = {}) {
       // dejar al usuario sin seguimiento: se reconstruye el listado a partir de
       // los avisos YA anotados de ese día, que viven en ClassReport. No se guarda
       // como roster para no dar por bueno un listado parcial.
-      const yaAnotados = await ClassReport.find({ center: centerId, date: targetDate }).lean();
-      const reconstruido = [];
-      for (const informe of yaAnotados) {
-        const clases = new Map();
-        for (const guardada of informe.savedClasses || []) {
-          clases.set(`${guardada.classTime}::${guardada.className}`, guardada);
-        }
-        for (const item of informe.items || []) {
-          const clave = `${item.classTime}::${item.className}`;
-          if (!clases.has(clave)) clases.set(clave, item);
-        }
-        for (const clase of clases.values()) {
-          reconstruido.push({
-            instructorName: informe.instructorName,
-            period: informe.period,
-            className: clase.className || '',
-            classTime: clase.classTime || '',
-          });
-        }
-      }
+      const reconstruido = await clasesYaAnotadas(centerId, targetDate);
 
+      // Si no hay nada anotado y el roster guardado no es de fiar, se prefiere
+      // el error a enseñar las clases de otro día.
       if (reconstruido.length === 0) throw err;
 
       console.warn(
         `[AimHarder] Scrapeo de ${targetDate} fallido (${err.message}). ` +
         `Se muestra el seguimiento reconstruido con ${reconstruido.length} clases ya anotadas.`
       );
-      roster = { instructors: reconstruido, refreshedAt: null, rebuiltFromReports: true };
+      roster = { instructors: reconstruido, refreshedAt: null, verified: false, rebuiltFromReports: true };
     }
+  }
+
+  // Última red: si tras todo seguimos con un roster sin verificar de un día
+  // pasado, se muestra solo lo que ya está anotado, nunca el listado dudoso.
+  if (roster && roster.verified !== true && !roster.rebuiltFromReports && !esHoy) {
+    roster = {
+      instructors: await clasesYaAnotadas(centerId, targetDate),
+      refreshedAt: null,
+      verified: false,
+      rebuiltFromReports: true,
+    };
   }
 
   if (!roster) {

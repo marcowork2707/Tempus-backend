@@ -47,6 +47,13 @@ const classReportRosterSchema = new mongoose.Schema(
       type: Date,
       default: Date.now,
     },
+    // true solo si el scrapeo demostró que el horario mostraba ESE día. Un
+    // roster sin verificar puede contener las clases de otro día (era el caso
+    // de los días pasados) y no debe enseñarse como si fuera real.
+    verified: {
+      type: Boolean,
+      default: false,
+    },
   },
   { timestamps: true }
 );
