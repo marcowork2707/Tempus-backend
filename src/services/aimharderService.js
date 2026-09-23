@@ -846,6 +846,30 @@ async function openReservationsDay(page, targetDate, config) {
 
   const huellaInicial = await huellaListado();
 
+  // Instrumentación para saber DÓNDE se atasca: errores de JS de la página y
+  // peticiones que se disparan al pulsar el día. Si weekSelDay revienta o su
+  // AJAX no sale, aquí queda registrado.
+  const erroresJs = [];
+  const peticiones = [];
+  const onPageError = (err) => erroresJs.push(String(err && err.message ? err.message : err).slice(0, 200));
+  const onConsole = (msg) => {
+    if (msg.type() === 'error') erroresJs.push(`console: ${msg.text()}`.slice(0, 200));
+  };
+  const onRequest = (req) => {
+    const url = req.url();
+    if (/\.(png|jpe?g|gif|css|woff2?|svg|ico)(\?|$)/i.test(url)) return;
+    peticiones.push(`${req.method()} ${url.slice(0, 150)}`);
+  };
+  page.on('pageerror', onPageError);
+  page.on('console', onConsole);
+  page.on('request', onRequest);
+  const quitarEscuchas = () => {
+    page.off('pageerror', onPageError);
+    page.off('console', onConsole);
+    page.off('request', onRequest);
+  };
+  const peticionesPrevias = peticiones.length;
+
   // Sondea hasta `timeoutMs` en vez de comprobar una sola vez: si el clic funcionó
   // pero AimHarder tarda en repintar, darlo por fallido llevaría a probar más
   // estrategias (flechas incluidas) y acabar en otra semana.
@@ -1083,10 +1107,22 @@ async function openReservationsDay(page, targetDate, config) {
           .flatMap((el) => Array.from(el.classList).filter((c) => /^wds\d{8}$/.test(c))),
       };
     }, daySelector).catch(() => null);
+    const tipoWeekSelDay = await page
+      .evaluate(() => typeof window.weekSelDay)
+      .catch(() => 'desconocido');
+    const funcionesCarga = await page
+      .evaluate(() => Object.keys(window)
+        .filter((k) => /carga|reserva|dia|day|week|sel/i.test(k) && typeof window[k] === 'function'))
+      .catch(() => []);
+    const peticionesTrasClic = peticiones.slice(peticionesPrevias).slice(-10);
+    quitarEscuchas();
     throw new Error(
-      `No se pudo abrir el día ${toDateString(targetDate)} en el horario. ` +
-      `onclick de la celda: ${diagFinal?.onclickCelda}. Título actual: "${diagFinal?.titulo}". ` +
-      `Días en la tira: ${JSON.stringify(diagFinal?.diasEnTira)}. HTML: ${diagFinal?.htmlCelda}`
+      `No se pudo abrir el día ${toDateString(targetDate)}. ` +
+      `typeof weekSelDay=${tipoWeekSelDay}. ` +
+      `ErroresJS=${JSON.stringify(erroresJs.slice(-5))}. ` +
+      `PeticionesTrasClic=${JSON.stringify(peticionesTrasClic)}. ` +
+      `Titulo="${diagFinal?.titulo}". HuellaCambio=${(await huellaListado()) !== huellaInicial}. ` +
+      `Funciones=${JSON.stringify(funcionesCarga.slice(0, 30))}`
     );
   }
 
@@ -1108,6 +1144,7 @@ async function openReservationsDay(page, targetDate, config) {
     { timeout: 7000 }
   ).catch(() => {});
   await page.waitForTimeout(800).catch(() => {});
+  quitarEscuchas();
   await saveDebugSnapshot(page, `05_schedule_day${targetDay}`);
 }
 
