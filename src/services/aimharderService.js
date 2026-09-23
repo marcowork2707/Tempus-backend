@@ -791,6 +791,27 @@ async function ensureAuthenticatedSession(page, config) {
 // ─────────────────────────────────────────────────────
 
 async function openReservationsDay(page, targetDate, config, snap = async () => {}) {
+  // Se escucha desde ANTES de abrir la página: así se ve qué petición sirve las
+  // reservas del día, que es la que hay que reproducir para otra fecha.
+  const erroresJs = [];
+  const peticiones = [];
+  const onPageError = (err) => erroresJs.push(String(err && err.message ? err.message : err).slice(0, 200));
+  const onConsole = (msg) => { if (msg.type() === 'error') erroresJs.push(`console: ${msg.text()}`.slice(0, 200)); };
+  const onRequest = (req) => {
+    const url = req.url();
+    if (/\.(png|jpe?g|gif|css|woff2?|svg|ico)(\?|$)/i.test(url)) return;
+    if (/google|gstatic|stripe|facebook|doubleclick|hotjar/i.test(url)) return;
+    peticiones.push(`${req.method()} ${url.slice(0, 170)}`);
+  };
+  page.on('pageerror', onPageError);
+  page.on('console', onConsole);
+  page.on('request', onRequest);
+  const quitarEscuchas = () => {
+    page.off('pageerror', onPageError);
+    page.off('console', onConsole);
+    page.off('request', onRequest);
+  };
+
   const scheduleUrl = `${config.baseUrl}/schedule?adm`;
   console.log('[AimHarder] Navegando a schedule:', scheduleUrl);
   await page.goto(scheduleUrl, { waitUntil: 'domcontentloaded', timeout: 45000 });
@@ -847,28 +868,6 @@ async function openReservationsDay(page, targetDate, config, snap = async () => 
 
   const huellaInicial = await huellaListado();
 
-  // Instrumentación para saber DÓNDE se atasca: errores de JS de la página y
-  // peticiones que se disparan al pulsar el día. Si weekSelDay revienta o su
-  // AJAX no sale, aquí queda registrado.
-  const erroresJs = [];
-  const peticiones = [];
-  const onPageError = (err) => erroresJs.push(String(err && err.message ? err.message : err).slice(0, 200));
-  const onConsole = (msg) => {
-    if (msg.type() === 'error') erroresJs.push(`console: ${msg.text()}`.slice(0, 200));
-  };
-  const onRequest = (req) => {
-    const url = req.url();
-    if (/\.(png|jpe?g|gif|css|woff2?|svg|ico)(\?|$)/i.test(url)) return;
-    peticiones.push(`${req.method()} ${url.slice(0, 150)}`);
-  };
-  page.on('pageerror', onPageError);
-  page.on('console', onConsole);
-  page.on('request', onRequest);
-  const quitarEscuchas = () => {
-    page.off('pageerror', onPageError);
-    page.off('console', onConsole);
-    page.off('request', onRequest);
-  };
   const peticionesPrevias = peticiones.length;
 
   // Sondea hasta `timeoutMs` en vez de comprobar una sola vez: si el clic funcionó
@@ -910,6 +909,8 @@ async function openReservationsDay(page, targetDate, config, snap = async () => 
   // sin que nos enteremos. El clic normal falla con un mensaje que dice QUÉ lo
   // está interceptando, y eso se guarda para el diagnóstico.
   let motivoClicBloqueado = null;
+  let resultadoOnclick = null;
+  let resultadoWeekSelDay = null;
   const directButton = page.locator(daySelector).first();
   if (await directButton.count()) {
     await directButton.scrollIntoViewIfNeeded().catch(() => {});
@@ -940,12 +941,19 @@ async function openReservationsDay(page, targetDate, config, snap = async () => 
       if (!cell) return null;
       const onclick = cell.getAttribute('onclick');
       if (onclick) {
-        try { new Function(onclick).call(cell); return onclick.slice(0, 120); } catch { /* noop */ }
+        try {
+          new Function(onclick).call(cell);
+          return `ejecutado: ${onclick.slice(0, 80)}`;
+        } catch (e) {
+          // Tragarse este error era el fallo: si weekSelDay revienta, aquí está.
+          return `EXCEPCION al ejecutar onclick: ${e && e.message ? e.message : e}`;
+        }
       }
       const link = cell.tagName === 'A' ? cell : cell.querySelector('a');
       if (link) { link.click(); return 'click en <a> interno'; }
       return null;
     }, daySelector).catch(() => null);
+    resultadoOnclick = accion;
     if (accion) {
       console.log('[AimHarder] Estrategia 1b: ejecutada acción de la celda ->', accion);
       await settle();
@@ -976,11 +984,16 @@ async function openReservationsDay(page, targetDate, config, snap = async () => 
   // Estrategia 2: invocar directamente la función JS de AimHarder.
   if (!found) {
     console.log('[AimHarder] Estrategia 2: window.weekSelDay(', dayKey, ')');
-    await page.evaluate((value) => {
-      if (typeof window.weekSelDay === 'function') {
+    resultadoWeekSelDay = await page.evaluate((value) => {
+      if (typeof window.weekSelDay !== 'function') return 'weekSelDay NO es una función';
+      try {
         window.weekSelDay(value);
+        return 'weekSelDay ejecutada sin excepción';
+      } catch (e) {
+        return `EXCEPCION en weekSelDay: ${e && e.message ? e.message : e}`;
       }
-    }, dayKey);
+    }, dayKey).catch((e) => `no se pudo evaluar: ${e.message}`);
+    console.log('[AimHarder]', resultadoWeekSelDay);
     await settle();
     found = await confirmarDia();
   }
@@ -1135,6 +1148,31 @@ async function openReservationsDay(page, targetDate, config, snap = async () => 
   // o el listado ha cambiado con la celda de ese día marcada. Si no, se aborta:
   // anotar avisos sobre el día equivocado es peor que fallar.
   const confirmado = await confirmarDia(12000);
+
+  // Resumen técnico en TEXTO, fácil de copiar y pegar. Las capturas pesan
+  // demasiado para compartirlas; esto cabe en un mensaje.
+  const tituloAhora = await page
+    .evaluate(() => document.querySelector('#clasesDiaSel .titRvClass')?.textContent?.trim() || null)
+    .catch(() => null);
+  const bloquesAhora = await page
+    .evaluate(() => document.querySelectorAll('.bloqueClase').length)
+    .catch(() => -1);
+  const peticionesIniciales = peticiones.slice(0, peticionesPrevias).slice(-12);
+  const peticionesTrasClic = peticiones.slice(peticionesPrevias).slice(0, 12);
+  const resumen = [
+    `DIA PEDIDO: ${toDateString(targetDate)} (clave ${dayKey})`,
+    `CONFIRMADO: ${confirmado}`,
+    `TITULO AHORA: ${tituloAhora}`,
+    `BLOQUES DE CLASE: ${bloquesAhora}`,
+    `CLIC BLOQUEADO POR: ${motivoClicBloqueado || 'nada, el clic normal funcionó'}`,
+    `ONCLICK CELDA: ${resultadoOnclick}`,
+    `weekSelDay DIRECTO: ${resultadoWeekSelDay}`,
+    `ERRORES JS: ${JSON.stringify(erroresJs.slice(-4))}`,
+    `PETICIONES AL ABRIR: ${JSON.stringify(peticionesIniciales)}`,
+    `PETICIONES TRAS CLIC: ${JSON.stringify(peticionesTrasClic)}`,
+  ].join('\n');
+  console.log('[AimHarder] RESUMEN\n' + resumen);
+  await snap('RESUMEN TÉCNICO — copia este texto y pégalo en el chat', resumen);
   if (!confirmado) {
     await saveDebugSnapshot(page, '04d_dia_no_confirmado');
     const diagFinal = await page.evaluate((selector) => {
@@ -1859,13 +1897,18 @@ async function getClassReportContext(dateStr = null, centerId, userName = '', is
       expiry: Date.now() + SESSION_TTL_MS,
     });
 
-    const snap = async (label) => {
+    const snap = async (label, nota = null) => {
       if (!debug) return;
       try {
         const buffer = await page.screenshot({ fullPage: true });
-        debugSteps.push({ label, url: page.url(), image: `data:image/png;base64,${buffer.toString('base64')}` });
+        debugSteps.push({
+          label,
+          url: page.url(),
+          image: `data:image/png;base64,${buffer.toString('base64')}`,
+          ...(nota ? { error: nota } : {}),
+        });
       } catch (e) {
-        debugSteps.push({ label, url: page.url(), error: e.message });
+        debugSteps.push({ label, url: page.url(), error: nota ? `${nota}\n(${e.message})` : e.message });
       }
     };
 
