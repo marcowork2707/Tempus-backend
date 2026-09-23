@@ -139,13 +139,18 @@ async function isOnTargetDay(page, targetDate) {
         .replace(/[̀-ͯ]/g, '')
         .toLowerCase();
 
-      const activeCell = document.querySelector(`#weekDays .wds${dayKey}.active`);
-      if (activeCell) return true;
-
+      // OJO: NO vale fiarse de `.wds<dayKey>.active`. Esa clase se marca en cuanto
+      // se pulsa la celda, mientras el listado de clases sigue siendo el del día
+      // anterior hasta que responde el AJAX -> se leería el día equivocado.
+      // El título se repinta JUNTO con las clases, así que es la señal fiable.
       // Se parsea el título ("23 de Septiembre de 2026") y se comparan día, mes y
       // año EXACTOS. Buscar el número suelto daría falsos positivos: el día 20
       // "aparece" dentro del año 2026, y el día 2 dentro de cualquier fecha.
       const titulo = normalize(document.querySelector('#clasesDiaSel .titRvClass')?.textContent || '');
+      if (!titulo) {
+        // Solo si este layout no pinta título caemos a la celda activa.
+        return Boolean(document.querySelector(`#weekDays .wds${dayKey}.active`));
+      }
       const match = titulo.match(/(\d{1,2})\s+de\s+([a-z]+)\s+de\s+(\d{4})/);
       if (!match) return false;
       return (
@@ -826,6 +831,18 @@ async function openReservationsDay(page, targetDate, config) {
     await page.waitForLoadState('networkidle', { timeout: 8000 }).catch(() => {});
   };
 
+  // Sondea hasta `timeoutMs` en vez de comprobar una sola vez: si el clic funcionó
+  // pero AimHarder tarda en repintar, darlo por fallido llevaría a probar más
+  // estrategias (flechas incluidas) y acabar en otra semana.
+  const confirmarDia = async (timeoutMs = 6000) => {
+    const limite = Date.now() + timeoutMs;
+    for (;;) {
+      if (await isOnTargetDay(page, targetDate)) return true;
+      if (Date.now() >= limite) return false;
+      await page.waitForTimeout(500).catch(() => {});
+    }
+  };
+
   let found = false;
 
   // Estrategia 1: clic directo sobre la celda del día en la tira semanal.
@@ -835,7 +852,7 @@ async function openReservationsDay(page, targetDate, config) {
     console.log('[AimHarder] Estrategia 1: clic directo en', daySelector);
     await directButton.click({ force: true });
     await settle();
-    found = await isOnTargetDay(page, targetDate);
+    found = await confirmarDia();
   }
 
   // Estrategia 2: invocar directamente la función JS de AimHarder.
@@ -847,7 +864,7 @@ async function openReservationsDay(page, targetDate, config) {
       }
     }, dayKey);
     await settle();
-    found = await isOnTargetDay(page, targetDate);
+    found = await confirmarDia();
   }
 
   // Estrategia 3: usar el selector de fecha "Ir a día", útil para fechas de
@@ -879,7 +896,7 @@ async function openReservationsDay(page, targetDate, config) {
       input.dispatchEvent(new Event('change', { bubbles: true }));
     }, dateInputValue);
     await settle();
-    found = await isOnTargetDay(page, targetDate);
+    found = await confirmarDia();
   }
 
   // Estrategia 4: navegar semana a semana con las flechas del calendario hasta
@@ -956,7 +973,7 @@ async function openReservationsDay(page, targetDate, config) {
         console.log('[AimHarder] Estrategia 4: celda del día encontrada, clicando', daySelector);
         await page.locator(daySelector).first().click({ force: true });
         await settle();
-        found = await isOnTargetDay(page, targetDate);
+        found = await confirmarDia();
       }
     }
   }
@@ -992,6 +1009,50 @@ async function openReservationsDay(page, targetDate, config) {
   await dismissCookies(page);
   await dismissAimHarderPromos(page);
   await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
+
+  // Confirmación final ANTES de leer las clases: el listado debe pertenecer ya al
+  // día objetivo. Sin esto se puede parsear el día anterior mientras AimHarder
+  // repinta por AJAX (el usuario veía los avisos de hoy al pedir los de ayer).
+  const tieneTitulo = await page.evaluate(
+    () => Boolean(document.querySelector('#clasesDiaSel .titRvClass')?.textContent?.trim())
+  ).catch(() => false);
+
+  if (tieneTitulo) {
+    const confirmado = await page.waitForFunction(
+      ({ dayNumber, monthName, year }) => {
+        const normalize = (v) => String(v || '')
+          .normalize('NFD')
+          .replace(/[\u0300-\u036f]/g, '')
+          .toLowerCase();
+        const titulo = normalize(document.querySelector('#clasesDiaSel .titRvClass')?.textContent || '');
+        const match = titulo.match(/(\d{1,2})\s+de\s+([a-z]+)\s+de\s+(\d{4})/);
+        if (!match) return false;
+        return (
+          Number(match[1]) === dayNumber &&
+          match[2] === normalize(monthName) &&
+          Number(match[3]) === year
+        );
+      },
+      {
+        dayNumber: targetDate.getDate(),
+        monthName: SPANISH_MONTHS[targetDate.getMonth()],
+        year: targetDate.getFullYear(),
+      },
+      { timeout: 12000 }
+    ).then(() => true).catch(() => false);
+
+    if (!confirmado) {
+      await saveDebugSnapshot(page, '04d_dia_no_confirmado');
+      const tituloActual = await page
+        .evaluate(() => document.querySelector('#clasesDiaSel .titRvClass')?.textContent?.trim() || null)
+        .catch(() => null);
+      throw new Error(
+        `El horario no llegó a mostrar el día ${toDateString(targetDate)}: el listado sigue en "${tituloActual}". ` +
+        'Se aborta para no anotar avisos del día equivocado.'
+      );
+    }
+  }
+
   await page.waitForFunction(
     () => {
       const blocks = Array.from(document.querySelectorAll('.bloqueClase'));
