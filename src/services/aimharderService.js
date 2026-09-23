@@ -143,6 +143,125 @@ async function isOnTargetDay(page, targetDate) {
 // Aquí se recorren TODOS los `.titRvClass`, se parsea la fecha de cada uno y se
 // devuelve el contenedor cuyo título coincide exactamente con el día pedido.
 // Eso es una prueba real de que estamos leyendo ese día, no una suposición.
+function collapseSpaces(value = '') {
+  return String(value || '').replace(/\s+/g, ' ').trim();
+}
+
+function decodeBasicHtmlEntities(value = '') {
+  // /api/coachBookings devuelve "Run &amp; Sweat": los nombres vienen escapados.
+  return String(value || '')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#0?39;/g, "'");
+}
+
+// Hora de clase en formato "HH:MM". Acepta "07:00", "7:00" o "07:00 - 08:00"
+// (se queda con la hora de inicio). Las claves de clases guardadas se comparan
+// con esto, así que da igual con qué formato se guardaran en su día.
+function normalizeClassTime(value = '') {
+  const match = String(value || '').match(/(\d{1,2}):(\d{2})/);
+  if (!match) return String(value || '').trim();
+  return `${match[1].padStart(2, '0')}:${match[2]}`;
+}
+
+// AimHarder manda el color de los avisos como "r,g,b" (p. ej. "242,36,70").
+function alertColorFromRgb(value = '') {
+  const parts = String(value || '').split(',').map((v) => Number(v.trim()));
+  if (parts.length !== 3 || parts.some((v) => Number.isNaN(v))) return 'neutral';
+  const [r, g, b] = parts;
+  if (b > r && b > g) return 'blue';
+  if (r > 150 && g < 120) return 'red';
+  return 'neutral';
+}
+
+// Un atleta cuenta como apuntado si bookState=1 y NO tiene cancelDay.
+// Comprobado contra el propio `ocupationr` de AimHarder en las 90 clases de
+// dos días distintos: cuadra en todas. (bookState=1 con cancelDay = cancelación
+// que aún figura en la lista; bookState=0 = baja.)
+function isBookedAthlete(athlete) {
+  return Boolean(athlete) && Number(athlete.bookState) === 1 && !athlete.cancelDay;
+}
+
+// Clases del día, en el mismo formato que devolvía el parseo del HTML, pero a
+// partir del JSON de /api/coachBookings (la fuente real: es lo que AimHarder
+// pinta en pantalla). Se excluyen las clases "Open" (sin coach, no se anotan).
+function parseCoachBookingsJson(json) {
+  const bookings = Array.isArray(json && json.bookings) ? json.bookings : [];
+  const classes = [];
+
+  for (const booking of bookings) {
+    const className = decodeBasicHtmlEntities(collapseSpaces(booking.className || booking.classNameOrig));
+    const classTime = normalizeClassTime(booking.startTime || booking.time);
+    const instructorName = decodeBasicHtmlEntities(collapseSpaces(booking.coachName));
+    if (!className || !classTime || !instructorName) continue;
+    if (/open/i.test(className)) continue;
+
+    const members = [];
+    for (const athlete of Array.isArray(booking.athletes) ? booking.athletes : []) {
+      if (!isBookedAthlete(athlete)) continue;
+      const memberName = decodeBasicHtmlEntities(collapseSpaces(athlete.name || athlete.realName || athlete.nickname));
+      if (!memberName || members.some((m) => m.memberName === memberName)) continue;
+
+      const alerts = [];
+      for (const [msg, color] of [[athlete.alertmsg, athlete.alertcolor], [athlete.alertmsg2, athlete.alertcolor2]]) {
+        const text = decodeBasicHtmlEntities(collapseSpaces(msg));
+        if (!text || alerts.some((a) => a.text === text)) continue;
+        alerts.push({ text, color: alertColorFromRgb(color) });
+      }
+      members.push({ memberName, alerts });
+    }
+
+    classes.push({
+      className,
+      classTime,
+      instructorName,
+      period: getPeriodByTime(classTime),
+      members,
+    });
+  }
+
+  return classes.sort((a, b) => a.classTime.localeCompare(b.classTime));
+}
+
+// Ocupación del día a partir del mismo JSON, con la forma que ya consume
+// storeOccupancy. Aquí sí entran todas las clases (también las Open).
+function occupancyFromCoachBookings(json) {
+  const bookings = Array.isArray(json && json.bookings) ? json.bookings : [];
+  const classes = [];
+
+  for (const booking of bookings) {
+    const className = decodeBasicHtmlEntities(collapseSpaces(booking.className || booking.classNameOrig));
+    const classTime = normalizeClassTime(booking.startTime || booking.time);
+    if (!className && !classTime) continue;
+
+    const capacity = Number(booking.limit) || 0;
+    const bookedCount = Number(booking.ocupationr) || 0;
+    let attendanceCount = Number(booking.attendance) || 0;
+    if (attendanceCount > bookedCount && bookedCount > 0) attendanceCount = bookedCount;
+    const noShowCount = Math.max(bookedCount - attendanceCount, 0);
+    const waitlistCount = Math.max(Number(booking.waitlist) || 0, 0);
+
+    classes.push({
+      className,
+      classTime,
+      instructorName: decodeBasicHtmlEntities(collapseSpaces(booking.coachName)),
+      roomName: decodeBasicHtmlEntities(collapseSpaces(booking.salaname)),
+      bookedCount,
+      attendanceCount,
+      noShowCount,
+      waitlistCount,
+      waitlistMembers: [],
+      capacity,
+      occupancyRate: formatPercent(bookedCount, capacity),
+      attendanceRate: formatPercent(attendanceCount, capacity),
+    });
+  }
+
+  return classes.sort((a, b) => a.classTime.localeCompare(b.classTime));
+}
+
 // Pide el día directamente a la API que usa el propio AimHarder.
 //
 // Descubierto leyendo el código fuente de `window.weekSelDay` en producción:
@@ -186,13 +305,23 @@ async function pedirDiaAApiCoachBookings(page, targetDate) {
     return { ok: false, detalle: `status=${respuesta && respuesta.status} error=${respuesta && respuesta.error} url=${respuesta && respuesta.url}` };
   }
 
-  // La respuesta puede venir como HTML suelto o como JSON con el HTML dentro.
-  // En vez de suponer la forma, se busca el primer texto que contenga clases.
+  // Comprobado en producción: la respuesta es JSON con la forma
+  //   { resmsgs, birthdays, timetable, seminars, bookings[], day, dayYYYYMMDD }
+  // y cada booking trae coachName, className, startTime, limit, ocupationr,
+  // attendance y athletes[] (name, bookState, cancelDay, alertmsg, ...).
+  // `dayYYYYMMDD` es la prueba de que es el día pedido.
   const crudo = respuesta.body.trim();
   let html = null;
   if (crudo.startsWith('{') || crudo.startsWith('[')) {
     try {
       const datos = JSON.parse(crudo);
+      if (datos && Array.isArray(datos.bookings)) {
+        const diaDevuelto = String(datos.dayYYYYMMDD || '');
+        if (diaDevuelto !== String(dayKey)) {
+          return { ok: false, detalle: `La API devolvió el día ${diaDevuelto || '?'} en vez de ${dayKey}` };
+        }
+        return { ok: true, json: datos, url: respuesta.url };
+      }
       const buscarHtml = (valor, profundidad = 0) => {
         if (profundidad > 6 || valor == null) return null;
         if (typeof valor === 'string') return valor.includes('bloqueClase') ? valor : null;
@@ -459,7 +588,7 @@ function getPeriodByTime(time = '') {
 }
 
 function buildSavedClassKey(classTime = '', className = '') {
-  return `${String(classTime || '').trim()}::${normalizeName(className)}`;
+  return `${normalizeClassTime(classTime)}::${normalizeName(className)}`;
 }
 
 function toEnvKey(value = '') {
@@ -1067,6 +1196,13 @@ async function openReservationsDay(page, targetDate, config, snap = async () => 
   // Es lo que hace `weekSelDay`: GET /api/coachBookings?day=YYYYMMDD. Ningún
   // clic recarga la página, por eso todas las estrategias de clic fallaban.
   const viaApi = await pedirDiaAApiCoachBookings(page, targetDate);
+  if (viaApi.ok && viaApi.json) {
+    const n = viaApi.json.bookings.length;
+    apunta(`E0 /api/coachBookings?day=${dayKey} -> DÍA CARGADO (JSON, ${n} clases, dayYYYYMMDD=${viaApi.json.dayYYYYMMDD})`);
+    await snap(`3. Día ${targetDay} pedido a /api/coachBookings`, `INTENTOS:\n- ${bitacora.join('\n- ')}`);
+    quitarEscuchas();
+    return { bookings: viaApi.json };
+  }
   if (viaApi.ok) {
     const htmlDelDia = acotarHtmlAlDia(viaApi.html, targetDate);
     apunta(`E0 /api/coachBookings?day=${dayKey} -> DÍA CARGADO (${htmlDelDia.length} caracteres)`);
@@ -2095,7 +2231,9 @@ async function getClassReportContext(dateStr = null, centerId, userName = '', is
       if (debug) { e.debugSteps = debugSteps; }
       throw e;
     }
-    const reservationClasses = await parseReservationsHtmlForClassReports(page, navegacion && navegacion.scopeHtml);
+    const reservationClasses = navegacion && navegacion.bookings
+      ? parseCoachBookingsJson(navegacion.bookings)
+      : await parseReservationsHtmlForClassReports(page, navegacion && navegacion.scopeHtml);
     const userNameCandidates = Array.isArray(userName) ? userName : [userName];
     const normalizedUserNames = userNameCandidates
       .map((value) => normalizeName(value))
@@ -2179,7 +2317,7 @@ async function getClassReportContext(dateStr = null, centerId, userName = '', is
         const saved = savedMap.get(`${normalizeName(group.instructorName)}::${group.period}`);
         const savedItems = new Map(
           (saved?.items || []).map((item) => [
-            `${item.classTime}::${normalizeName(item.className)}::${normalizeName(item.memberName)}`,
+            `${normalizeClassTime(item.classTime)}::${normalizeName(item.className)}::${normalizeName(item.memberName)}`,
             item,
           ])
         );
@@ -2213,7 +2351,7 @@ async function getClassReportContext(dateStr = null, centerId, userName = '', is
               (hasLegacyWholeReportCompletion ? saved?.submittedAt || saved?.updatedAt || null : null),
             members: classItem.members.map((member) => {
               const savedItem = savedItems.get(
-                `${classItem.classTime}::${normalizeName(classItem.className)}::${normalizeName(member.memberName)}`
+                `${normalizeClassTime(classItem.classTime)}::${normalizeName(classItem.className)}::${normalizeName(member.memberName)}`
               );
               return {
                 memberName: member.memberName,
@@ -2447,7 +2585,7 @@ async function saveClassReport(data) {
 
   const existingItems = new Map(
     (existingReport?.items || []).map((item) => [
-      `${item.classTime}::${normalizeName(item.className)}::${normalizeName(item.memberName)}`,
+      `${normalizeClassTime(item.classTime)}::${normalizeName(item.className)}::${normalizeName(item.memberName)}`,
       item,
     ])
   );
@@ -2486,7 +2624,7 @@ async function saveClassReport(data) {
     .filter((item) => item.className && item.classTime && item.memberName && item.note)
     .map((item) => {
       const existingItem = existingItems.get(
-        `${item.classTime}::${normalizeName(item.className)}::${normalizeName(item.memberName)}`
+        `${normalizeClassTime(item.classTime)}::${normalizeName(item.className)}::${normalizeName(item.memberName)}`
       );
       const sameNote = existingItem && String(existingItem.note || '').trim() === item.note;
 
@@ -2947,7 +3085,9 @@ async function getOccupancy(dateStr = null, centerId) {
     });
 
     const navOcupacion = await openReservationsDay(page, targetDate, config);
-    const classes = await parseReservationsHtmlForOccupancy(page, navOcupacion && navOcupacion.scopeHtml);
+    const classes = navOcupacion && navOcupacion.bookings
+      ? occupancyFromCoachBookings(navOcupacion.bookings)
+      : await parseReservationsHtmlForOccupancy(page, navOcupacion && navOcupacion.scopeHtml);
     console.log(`[AimHarder] ${classes.length} clases encontradas para ocupación`);
     return { date: targetDateStr, classes };
   } finally {
@@ -5358,6 +5498,8 @@ module.exports = {
   seedAimHarderIntegrationsFromEnv,
   getClassReportContext,
   getClassReportStatus,
+  parseCoachBookingsJson,
+  occupancyFromCoachBookings,
   saveClassReport,
   getClassCommentsSummary,
   resetClassReportTask,
