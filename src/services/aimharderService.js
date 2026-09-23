@@ -901,12 +901,27 @@ async function openReservationsDay(page, targetDate, config) {
 
   let found = false;
 
-  // Estrategia 1: clic directo sobre la celda del día en la tira semanal.
-  // Es el camino habitual (día de hoy, misma semana) y debe seguir siendo rápido.
+  // Estrategia 1: pulsar la celda del día como lo haría una persona.
+  // IMPORTANTE: primero SIN `force`. Con `force` el navegador dispara el clic
+  // aunque haya algo encima (un banner), y entonces el clic se lo queda ese algo
+  // sin que nos enteremos. El clic normal falla con un mensaje que dice QUÉ lo
+  // está interceptando, y eso se guarda para el diagnóstico.
+  let motivoClicBloqueado = null;
   const directButton = page.locator(daySelector).first();
   if (await directButton.count()) {
-    console.log('[AimHarder] Estrategia 1: clic directo en', daySelector);
-    await directButton.click({ force: true });
+    await directButton.scrollIntoViewIfNeeded().catch(() => {});
+    console.log('[AimHarder] Estrategia 1: clic normal en', daySelector);
+    try {
+      await directButton.click({ timeout: 5000 });
+    } catch (e) {
+      motivoClicBloqueado = String(e.message).split('\n').slice(0, 3).join(' | ').slice(0, 300);
+      console.log('[AimHarder] Clic normal bloqueado ->', motivoClicBloqueado);
+      // Se reintenta cerrando banners y, ya como último recurso, forzando.
+      await dismissAimHarderPromos(page);
+      await directButton.click({ timeout: 5000 }).catch(async () => {
+        await directButton.click({ force: true }).catch(() => {});
+      });
+    }
     await settle();
     found = await confirmarDia();
   }
@@ -1162,7 +1177,7 @@ async function openReservationsDay(page, targetDate, config) {
       `ErroresJS=${JSON.stringify(erroresJs.slice(-5))}. ` +
       `PeticionesTrasClic=${JSON.stringify(peticionesTrasClic)}. ` +
       `Titulo="${diagFinal?.titulo}". HuellaCambio=${(await huellaListado()) !== huellaInicial}. ` +
-      `ESTRUCTURA=${JSON.stringify(estructura)}. FUENTE weekSelDay=${fuenteWeekSelDay}`
+      `ClicBloqueadoPor=${motivoClicBloqueado}. ESTRUCTURA=${JSON.stringify(estructura)}`
     );
   }
 
