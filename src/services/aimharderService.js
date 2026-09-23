@@ -127,40 +127,110 @@ const SPANISH_MONTHS = [
 // de verdad al día objetivo. Nunca nos fiamos de que un clic "haya funcionado":
 // mostrar/guardar el día equivocado es peor que fallar con un error explícito.
 async function isOnTargetDay(page, targetDate) {
-  const dayKey = toAimHarderDayKey(targetDate);
+  const info = await resolverListadoDelDia(page, targetDate);
+  return Boolean(info && info.encontrado);
+}
+
+// Devuelve el TROZO de HTML que corresponde de verdad al día pedido.
+//
+// Por qué existe: `document.querySelector('#clasesDiaSel .titRvClass')` devuelve
+// SIEMPRE el primer título del documento. Si AimHarder mantiene en el DOM el
+// listado de varios días (por eso el título "no se repintaba" y por eso cambiar
+// de día no dispara ninguna petición), mirar solo el primero hace dos cosas
+// malas a la vez: creer que seguimos en el día de hoy, y parsear `.bloqueClase`
+// de TODO el documento, o sea las clases del día equivocado.
+//
+// Aquí se recorren TODOS los `.titRvClass`, se parsea la fecha de cada uno y se
+// devuelve el contenedor cuyo título coincide exactamente con el día pedido.
+// Eso es una prueba real de que estamos leyendo ese día, no una suposición.
+async function resolverListadoDelDia(page, targetDate) {
   const dayNumber = targetDate.getDate();
   const monthName = SPANISH_MONTHS[targetDate.getMonth()];
   const year = targetDate.getFullYear();
+  const dayKey = toAimHarderDayKey(targetDate);
 
   return page.evaluate(
-    ({ dayKey, dayNumber, monthName, year }) => {
+    ({ dayNumber, monthName, year, dayKey }) => {
       const normalize = (v) => String(v || '')
         .normalize('NFD')
-        .replace(/[̀-ͯ]/g, '')
+        .replace(/[\u0300-\u036f]/g, '')
         .toLowerCase();
 
-      // OJO: NO vale fiarse de `.wds<dayKey>.active`. Esa clase se marca en cuanto
-      // se pulsa la celda, mientras el listado de clases sigue siendo el del día
-      // anterior hasta que responde el AJAX -> se leería el día equivocado.
-      // El título se repinta JUNTO con las clases, así que es la señal fiable.
-      // Se parsea el título ("23 de Septiembre de 2026") y se comparan día, mes y
-      // año EXACTOS. Buscar el número suelto daría falsos positivos: el día 20
-      // "aparece" dentro del año 2026, y el día 2 dentro de cualquier fecha.
-      // NO se usa `.wds<dayKey>.active` ni siquiera como respaldo: está comprobado
-      // que AimHarder marca la celda al pulsarla aunque el listado siga en otro
-      // día, y eso daba el día por bueno. Solo vale el título del listado.
-      const titulo = normalize(document.querySelector('#clasesDiaSel .titRvClass')?.textContent || '');
-      if (!titulo) return false;
-      const match = titulo.match(/(\d{1,2})\s+de\s+([a-z]+)\s+de\s+(\d{4})/);
-      if (!match) return false;
-      return (
-        Number(match[1]) === dayNumber &&
-        match[2] === normalize(monthName) &&
-        Number(match[3]) === year
-      );
+      const mesObjetivo = normalize(monthName);
+
+      const parseFecha = (txt) => {
+        const m = normalize(txt).match(/(\d{1,2})\s+de\s+([a-z]+)\s+de\s+(\d{4})/);
+        return m ? { dia: Number(m[1]), mes: m[2], anio: Number(m[3]) } : null;
+      };
+
+      const esVisible = (el) => {
+        if (!el) return false;
+        const rect = el.getBoundingClientRect();
+        if (rect.width === 0 && rect.height === 0) return false;
+        const st = window.getComputedStyle(el);
+        return st.display !== 'none' && st.visibility !== 'hidden';
+      };
+
+      // Contenedor del día = ancestro más cercano que agrupa las clases de ese
+      // título. Si el día no tiene clases, se usa el ancestro razonable más
+      // cercano (un día sin clases es un resultado válido, no un error).
+      const contenedorDe = (titulo) => {
+        let el = titulo.parentElement;
+        let ultimo = titulo.parentElement;
+        while (el && el !== document.body) {
+          if (el.querySelector('.bloqueClase')) return el;
+          ultimo = el;
+          el = el.parentElement;
+        }
+        return titulo.closest('#clasesDiaSel') || ultimo || titulo.parentElement;
+      };
+
+      const titulos = Array.from(document.querySelectorAll('.titRvClass'));
+      const info = titulos.map((t) => {
+        const cont = contenedorDe(t);
+        return {
+          texto: (t.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 60),
+          fecha: parseFecha(t.textContent || ''),
+          visible: esVisible(t) || esVisible(cont),
+          bloques: cont ? cont.querySelectorAll('.bloqueClase').length : 0,
+          cont,
+        };
+      });
+
+      // Vía secundaria: algún contenedor de clases identificado con la clave del
+      // día (id/clase/data-*), que es como AimHarder marca las celdas semanales.
+      // Se excluye la tira de días (#weekDays), que no contiene clases.
+      const porClave = (() => {
+        const clave = String(dayKey);
+        const candidatos = Array.from(document.querySelectorAll(
+          `[id*="${clave}"], [class*="${clave}"], [data-date*="${clave}"], [data-dia*="${clave}"]`
+        ));
+        return candidatos.find((el) => !el.closest('#weekDays') && el.querySelector('.bloqueClase')) || null;
+      })();
+
+      const coincide = info.find((i) => (
+        i.fecha &&
+        i.fecha.dia === dayNumber &&
+        i.fecha.mes === mesObjetivo &&
+        i.fecha.anio === year &&
+        i.cont
+      ));
+
+      const elegido = coincide ? coincide.cont : porClave;
+
+      return {
+        encontrado: Boolean(elegido),
+        via: coincide ? 'titulo' : (porClave ? 'clave-del-dia' : null),
+        bloques: elegido ? elegido.querySelectorAll('.bloqueClase').length : 0,
+        visible: coincide ? coincide.visible : Boolean(porClave && esVisible(porClave)),
+        html: elegido ? elegido.outerHTML : null,
+        totalBloques: document.querySelectorAll('.bloqueClase').length,
+        totalTitulos: titulos.length,
+        titulos: info.map(({ texto, visible, bloques }) => ({ texto, visible, bloques })),
+      };
     },
-    { dayKey, dayNumber, monthName, year }
-  );
+    { dayNumber, monthName, year, dayKey }
+  ).catch(() => null);
 }
 
 function getTermRenewalReportRange(referenceDateStr = null) {
@@ -876,8 +946,13 @@ async function openReservationsDay(page, targetDate, config, snap = async () => 
   const confirmarDia = async (timeoutMs = 6000) => {
     const limite = Date.now() + timeoutMs;
     for (;;) {
-      // Señal fuerte: el título del listado ya es el del día pedido.
-      if (await isOnTargetDay(page, targetDate)) return true;
+      // Señal fuerte: existe en el DOM el listado del día pedido Y tiene clases.
+      // Se exigen clases para no dar por bueno un contenedor vacío que AimHarder
+      // aún no ha rellenado. El caso legítimo de "ese día no hay clases" se
+      // acepta más abajo, en la comprobación final, cuando ya no quedan
+      // estrategias que probar.
+      const ambito = await resolverListadoDelDia(page, targetDate);
+      if (ambito && ambito.encontrado && (ambito.bloques > 0 || ambito.totalBloques === 0)) return true;
 
       // Señal secundaria: la celda del día objetivo está marcada Y el listado ha
       // cambiado respecto al que había al entrar. Cubre el caso de que AimHarder
@@ -1154,31 +1229,33 @@ async function openReservationsDay(page, targetDate, config, snap = async () => 
   // La prueba válida ya se hizo durante la navegación: el listado cambió de
   // verdad y la celda del día quedó marcada. Aquí solo se verifica que esa celda
   // siga marcada, que es condición necesaria para no leer otro día.
-  const celdaSigueMarcada = await page
-    .evaluate((sel) => Boolean(document.querySelector(`${sel}.active`)), daySelector)
-    .catch(() => true);
+  // Comprobación final ANTES de leer nada: se localiza el contenedor cuyo
+  // título es EXACTAMENTE el día pedido. Si no existe, se aborta: anotar avisos
+  // del día equivocado es peor que fallar. Y si existe, se devuelve su HTML para
+  // que el parseo lea SOLO ese día (no `.bloqueClase` de todo el documento, que
+  // era lo que colaba las clases de hoy al pedir las de ayer).
+  const ambitoFinal = await resolverListadoDelDia(page, targetDate);
 
-  if (!celdaSigueMarcada) {
+  if (!ambitoFinal || !ambitoFinal.encontrado) {
     await saveDebugSnapshot(page, '04d_dia_no_confirmado');
     quitarEscuchas();
+    const detalle = ambitoFinal
+      ? `Títulos encontrados en la página (${ambitoFinal.totalTitulos}): ` +
+        JSON.stringify(ambitoFinal.titulos) +
+        `. Bloques de clase en todo el documento: ${ambitoFinal.totalBloques}.`
+      : 'No se pudo inspeccionar el DOM del horario.';
     throw new Error(
-      `El horario dejó de mostrar el día ${toDateString(targetDate)} (la celda ya no está marcada). ` +
+      `El horario no muestra el día ${toDateString(targetDate)}. ${detalle} ` +
       'Se aborta para no anotar avisos del día equivocado.'
     );
   }
 
   // Resumen técnico en TEXTO, fácil de copiar y pegar.
-  const tituloAhora = await page
-    .evaluate(() => document.querySelector('#clasesDiaSel .titRvClass')?.textContent?.trim() || null)
-    .catch(() => null);
-  const bloquesAhora = await page
-    .evaluate(() => document.querySelectorAll('.bloqueClase').length)
-    .catch(() => -1);
   const resumen = [
     `DIA PEDIDO: ${toDateString(targetDate)} (clave ${dayKey})`,
-    `CELDA MARCADA: ${celdaSigueMarcada}`,
-    `TITULO (no fiable, no se repinta): ${tituloAhora}`,
-    `BLOQUES DE CLASE LEIDOS: ${bloquesAhora}`,
+    `LISTADO DEL DIA LOCALIZADO: si (via=${ambitoFinal.via}, visible=${ambitoFinal.visible})`,
+    `BLOQUES DE ESE DIA: ${ambitoFinal.bloques} (en todo el documento: ${ambitoFinal.totalBloques})`,
+    `TITULOS EN LA PAGINA (${ambitoFinal.totalTitulos}): ${JSON.stringify(ambitoFinal.titulos)}`,
     `CLIC BLOQUEADO POR: ${motivoClicBloqueado || 'nada'}`,
     `ONCLICK CELDA: ${resultadoOnclick}`,
     `weekSelDay DIRECTO: ${resultadoWeekSelDay}`,
@@ -1208,6 +1285,12 @@ async function openReservationsDay(page, targetDate, config, snap = async () => 
   quitarEscuchas();
   await snap(`5. Estado final antes de leer las clases (día ${targetDay})`);
   await saveDebugSnapshot(page, `05_schedule_day${targetDay}`);
+
+  // Se vuelve a resolver tras las esperas: el DOM puede haberse rellenado.
+  const ambitoListo = await resolverListadoDelDia(page, targetDate);
+  return {
+    scopeHtml: (ambitoListo && ambitoListo.encontrado ? ambitoListo.html : ambitoFinal.html) || null,
+  };
 }
 
 // ─────────────────────────────────────────────────────
@@ -1682,9 +1765,11 @@ async function parseReservationsHtmlForOccupancy(page) {
   return classes.sort((a, b) => a.classTime.localeCompare(b.classTime));
 }
 
-async function parseReservationsHtmlForClassReports(page) {
+async function parseReservationsHtmlForClassReports(page, scopeHtml = null) {
   const cheerio = require('cheerio');
-  const html = await page.content();
+  // `scopeHtml` es el listado del día pedido. Sin él se leería `.bloqueClase` de
+  // todo el documento, que puede contener también las clases de otros días.
+  const html = scopeHtml || (await page.content());
   const $ = cheerio.load(html);
   const classes = [];
 
@@ -1875,14 +1960,15 @@ async function getClassReportContext(dateStr = null, centerId, userName = '', is
       }
     };
 
+    let navegacion = null;
     try {
-      await openReservationsDay(page, targetDate, config, snap);
+      navegacion = await openReservationsDay(page, targetDate, config, snap);
     } catch (e) {
       // En depuración interesan las capturas aunque falle: se adjuntan al error.
       if (debug) { e.debugSteps = debugSteps; }
       throw e;
     }
-    const reservationClasses = await parseReservationsHtmlForClassReports(page);
+    const reservationClasses = await parseReservationsHtmlForClassReports(page, navegacion && navegacion.scopeHtml);
     const userNameCandidates = Array.isArray(userName) ? userName : [userName];
     const normalizedUserNames = userNameCandidates
       .map((value) => normalizeName(value))
@@ -1913,6 +1999,48 @@ async function getClassReportContext(dateStr = null, centerId, userName = '', is
       };
       existing.classes.push(classItem);
       grouped.set(key, existing);
+    }
+
+    // Suelo de seguridad: una clase que YA tiene avisos anotados nunca puede
+    // desaparecer porque el scrapeo no la devuelva. Se añade reconstruida a
+    // partir de lo guardado (clientes incluidos) y se reordena por hora.
+    for (const saved of savedReports) {
+      if (!isAdmin && !normalizedUserNames.some((candidate) => namesLikelyMatch(saved.instructorName, candidate))) {
+        continue;
+      }
+      const key = `${normalizeName(saved.instructorName)}::${saved.period}`;
+      const group = grouped.get(key) || {
+        instructorName: saved.instructorName,
+        period: saved.period,
+        classes: [],
+      };
+      const presentes = new Set(group.classes.map((c) => buildSavedClassKey(c.classTime, c.className)));
+
+      const guardadas = new Map();
+      for (const guardada of saved.savedClasses || []) {
+        guardadas.set(buildSavedClassKey(guardada.classTime, guardada.className), guardada);
+      }
+      for (const item of saved.items || []) {
+        const clave = buildSavedClassKey(item.classTime, item.className);
+        if (!guardadas.has(clave)) guardadas.set(clave, item);
+      }
+
+      for (const [clave, clase] of guardadas) {
+        if (!clase.classTime || !clase.className || presentes.has(clave)) continue;
+        const miembros = (saved.items || [])
+          .filter((item) => buildSavedClassKey(item.classTime, item.className) === clave && item.memberName)
+          .map((item) => ({ memberName: item.memberName, alerts: [] }));
+        group.classes.push({
+          className: clase.className,
+          classTime: clase.classTime,
+          instructorName: saved.instructorName,
+          period: saved.period,
+          members: miembros,
+        });
+      }
+
+      group.classes.sort((a, b) => toMinutes(a.classTime) - toMinutes(b.classTime));
+      grouped.set(key, group);
     }
 
     return {
@@ -1978,8 +2106,36 @@ async function getClassReportContext(dateStr = null, centerId, userName = '', is
   }
 }
 
+// Clases ya anotadas ese día, leídas de ClassReport. Sirven de suelo del
+// seguimiento: lo que ya tiene avisos escritos no puede desaparecer del listado
+// por un scrapeo que devuelva menos clases.
+async function clasesYaAnotadas(centerId, date) {
+  const informes = await ClassReport.find({ center: centerId, date }).lean();
+  const filas = [];
+  for (const informe of informes) {
+    const clases = new Map();
+    for (const guardada of informe.savedClasses || []) {
+      clases.set(buildSavedClassKey(guardada.classTime, guardada.className), guardada);
+    }
+    for (const item of informe.items || []) {
+      const clave = buildSavedClassKey(item.classTime, item.className);
+      if (!clases.has(clave)) clases.set(clave, item);
+    }
+    for (const clase of clases.values()) {
+      if (!clase.classTime || !clase.className) continue;
+      filas.push({
+        instructorName: informe.instructorName,
+        period: informe.period,
+        className: clase.className,
+        classTime: clase.classTime,
+      });
+    }
+  }
+  return filas;
+}
+
 async function upsertClassReportRoster(centerId, date, reports = []) {
-  const instructors = reports.flatMap((report) =>
+  const scrapeadas = reports.flatMap((report) =>
     (report.classes || []).map((classItem) => ({
       instructorName: report.instructorName,
       period: report.period,
@@ -1987,6 +2143,21 @@ async function upsertClassReportRoster(centerId, date, reports = []) {
       classTime: classItem.classTime,
     }))
   );
+
+  // Unión con lo ya anotado. Sin esto, refrescar el seguimiento de un día
+  // pasado borraba instructores que SÍ tenían avisos guardados (era el caso de
+  // "me he puesto como instructor en una clase de ayer y me los ha quitado
+  // todos"). El scrapeo puede añadir, nunca quitar trabajo ya hecho.
+  const yaAnotadas = await clasesYaAnotadas(centerId, date);
+  const porClave = new Map();
+  for (const fila of [...scrapeadas, ...yaAnotadas]) {
+    if (!fila.instructorName || !fila.classTime || !fila.className) continue;
+    porClave.set(
+      `${normalizeName(fila.instructorName)}::${fila.period}::${buildSavedClassKey(fila.classTime, fila.className)}`,
+      fila
+    );
+  }
+  const instructors = Array.from(porClave.values());
 
   return ClassReportRoster.findOneAndUpdate(
     { center: centerId, date },
