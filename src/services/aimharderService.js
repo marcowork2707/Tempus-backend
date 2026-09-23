@@ -831,13 +831,45 @@ async function openReservationsDay(page, targetDate, config) {
     await page.waitForLoadState('networkidle', { timeout: 8000 }).catch(() => {});
   };
 
+  // Huella del listado visible (título + primeras clases). Permite detectar que
+  // AimHarder ha recargado el día aunque no repinte el título.
+  const huellaListado = () => page.evaluate(() => {
+    const titulo = document.querySelector('#clasesDiaSel .titRvClass')?.textContent?.trim() || '';
+    const clases = Array.from(document.querySelectorAll('.bloqueClase')).slice(0, 8).map((bloque) => {
+      const hora = bloque.querySelector('.rvHora')?.textContent?.trim() || '';
+      const nombre = bloque.querySelector('.rvNombreCl')?.textContent?.trim() || '';
+      const ocupacion = ((bloque.textContent || '').match(/Plazas ocupadas\s*\d+\s*\/\s*\d+/i) || [''])[0];
+      return `${hora}|${nombre}|${ocupacion}`;
+    });
+    return `${titulo}##${clases.join('~')}`;
+  }).catch(() => '');
+
+  const huellaInicial = await huellaListado();
+
   // Sondea hasta `timeoutMs` en vez de comprobar una sola vez: si el clic funcionó
   // pero AimHarder tarda en repintar, darlo por fallido llevaría a probar más
   // estrategias (flechas incluidas) y acabar en otra semana.
   const confirmarDia = async (timeoutMs = 6000) => {
     const limite = Date.now() + timeoutMs;
     for (;;) {
+      // Señal fuerte: el título del listado ya es el del día pedido.
       if (await isOnTargetDay(page, targetDate)) return true;
+
+      // Señal secundaria: la celda del día objetivo está marcada Y el listado ha
+      // cambiado respecto al que había al entrar. Cubre el caso de que AimHarder
+      // recargue las clases sin repintar el título. Exigir el cambio evita el
+      // falso positivo de la versión anterior, que se fiaba solo de la marca.
+      const huellaActual = await huellaListado();
+      if (huellaActual && huellaActual !== huellaInicial) {
+        const marcada = await page
+          .evaluate((sel) => Boolean(document.querySelector(`${sel}.active`)), daySelector)
+          .catch(() => false);
+        if (marcada) {
+          console.log('[AimHarder] Día confirmado por cambio de listado + celda marcada');
+          return true;
+        }
+      }
+
       if (Date.now() >= limite) return false;
       await page.waitForTimeout(500).catch(() => {});
     }
@@ -1035,56 +1067,27 @@ async function openReservationsDay(page, targetDate, config) {
   // Confirmación final ANTES de leer las clases: el listado debe pertenecer ya al
   // día objetivo. Sin esto se puede parsear el día anterior mientras AimHarder
   // repinta por AJAX (el usuario veía los avisos de hoy al pedir los de ayer).
-  const tieneTitulo = await page.evaluate(
-    () => Boolean(document.querySelector('#clasesDiaSel .titRvClass')?.textContent?.trim())
-  ).catch(() => false);
-
-  if (tieneTitulo) {
-    const confirmado = await page.waitForFunction(
-      ({ dayNumber, monthName, year }) => {
-        const normalize = (v) => String(v || '')
-          .normalize('NFD')
-          .replace(/[\u0300-\u036f]/g, '')
-          .toLowerCase();
-        const titulo = normalize(document.querySelector('#clasesDiaSel .titRvClass')?.textContent || '');
-        const match = titulo.match(/(\d{1,2})\s+de\s+([a-z]+)\s+de\s+(\d{4})/);
-        if (!match) return false;
-        return (
-          Number(match[1]) === dayNumber &&
-          match[2] === normalize(monthName) &&
-          Number(match[3]) === year
-        );
-      },
-      {
-        dayNumber: targetDate.getDate(),
-        monthName: SPANISH_MONTHS[targetDate.getMonth()],
-        year: targetDate.getFullYear(),
-      },
-      { timeout: 12000 }
-    ).then(() => true).catch(() => false);
-
-    if (!confirmado) {
-      await saveDebugSnapshot(page, '04d_dia_no_confirmado');
-      const diagFinal = await page.evaluate((selector) => {
-        const cell = document.querySelector(selector);
-        return {
-          titulo: document.querySelector('#clasesDiaSel .titRvClass')?.textContent?.trim() || null,
-          celdaExiste: Boolean(cell),
-          celdaOnclick: cell ? (cell.getAttribute('onclick') || null) : null,
-          celdaHtml: cell ? cell.outerHTML.slice(0, 220) : null,
-          diasEnTira: Array.from(document.querySelectorAll('#weekDays [class*="wds"]'))
-            .flatMap((el) => Array.from(el.classList).filter((c) => /^wds\d{8}$/.test(c))),
-          funcionesWindow: Object.keys(window)
-            .filter((k) => /week|dia|day|sel|cal|reserva/i.test(k) && typeof window[k] === 'function')
-            .slice(0, 40),
-        };
-      }, daySelector).catch(() => null);
-      throw new Error(
-        `El horario no llegó a mostrar el día ${toDateString(targetDate)}: el listado sigue en ` +
-        `"${diagFinal?.titulo}". Se aborta para no anotar avisos del día equivocado. ` +
-        `Diagnóstico: ${JSON.stringify(diagFinal)}`
-      );
-    }
+  // Confirmación final antes de leer nada: o el título ya es el del día pedido,
+  // o el listado ha cambiado con la celda de ese día marcada. Si no, se aborta:
+  // anotar avisos sobre el día equivocado es peor que fallar.
+  const confirmado = await confirmarDia(12000);
+  if (!confirmado) {
+    await saveDebugSnapshot(page, '04d_dia_no_confirmado');
+    const diagFinal = await page.evaluate((selector) => {
+      const cell = document.querySelector(selector);
+      return {
+        onclickCelda: cell ? (cell.getAttribute('onclick') || '(sin onclick)') : '(celda no existe)',
+        htmlCelda: cell ? cell.outerHTML.slice(0, 200) : null,
+        titulo: document.querySelector('#clasesDiaSel .titRvClass')?.textContent?.trim() || null,
+        diasEnTira: Array.from(document.querySelectorAll('#weekDays [class*="wds"]'))
+          .flatMap((el) => Array.from(el.classList).filter((c) => /^wds\d{8}$/.test(c))),
+      };
+    }, daySelector).catch(() => null);
+    throw new Error(
+      `No se pudo abrir el día ${toDateString(targetDate)} en el horario. ` +
+      `onclick de la celda: ${diagFinal?.onclickCelda}. Título actual: "${diagFinal?.titulo}". ` +
+      `Días en la tira: ${JSON.stringify(diagFinal?.diasEnTira)}. HTML: ${diagFinal?.htmlCelda}`
+    );
   }
 
   await page.waitForFunction(
