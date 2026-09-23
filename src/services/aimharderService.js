@@ -933,6 +933,26 @@ async function openReservationsDay(page, targetDate, config) {
     }
   }
 
+  // Estrategia 1c: cargar el día directamente por URL. Está comprobado que
+  // weekSelDay() no dispara NINGUNA petición en el navegador automático (solo se
+  // ven llamadas de notificaciones y de Stripe), así que su JS no sirve aquí.
+  // Se prueban los parámetros habituales y se valida el resultado: si ninguno
+  // carga el día pedido, se sigue con el resto de estrategias.
+  if (!found) {
+    for (const parametro of ['date', 'dia', 'fecha', 'day']) {
+      if (found) break;
+      const url = `${config.baseUrl}/schedule?adm&${parametro}=${dayKey}`;
+      console.log('[AimHarder] Estrategia 1c: probando URL', url);
+      await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
+      await page.waitForTimeout(800).catch(() => {});
+      await dismissCookies(page);
+      await dismissAimHarderPromos(page);
+      await page.waitForLoadState('networkidle', { timeout: 8000 }).catch(() => {});
+      found = await confirmarDia(4000);
+      if (found) console.log('[AimHarder] Día cargado por URL con parámetro', parametro);
+    }
+  }
+
   // Estrategia 2: invocar directamente la función JS de AimHarder.
   if (!found) {
     console.log('[AimHarder] Estrategia 2: window.weekSelDay(', dayKey, ')');
@@ -1110,6 +1130,9 @@ async function openReservationsDay(page, targetDate, config) {
     const tipoWeekSelDay = await page
       .evaluate(() => typeof window.weekSelDay)
       .catch(() => 'desconocido');
+    const fuenteWeekSelDay = await page
+      .evaluate(() => (typeof window.weekSelDay === 'function' ? String(window.weekSelDay).slice(0, 700) : null))
+      .catch(() => null);
     const funcionesCarga = await page
       .evaluate(() => Object.keys(window)
         .filter((k) => /carga|reserva|dia|day|week|sel/i.test(k) && typeof window[k] === 'function'))
@@ -1122,7 +1145,7 @@ async function openReservationsDay(page, targetDate, config) {
       `ErroresJS=${JSON.stringify(erroresJs.slice(-5))}. ` +
       `PeticionesTrasClic=${JSON.stringify(peticionesTrasClic)}. ` +
       `Titulo="${diagFinal?.titulo}". HuellaCambio=${(await huellaListado()) !== huellaInicial}. ` +
-      `Funciones=${JSON.stringify(funcionesCarga.slice(0, 30))}`
+      `FUENTE weekSelDay=${fuenteWeekSelDay}`
     );
   }
 
