@@ -2717,20 +2717,25 @@ async function resetClassReportTask(data) {
 async function setClassReportHandoffStatus(data) {
   const { centerId, date, period, instructorName, className, classTime, memberName, done, updatedBy } = data;
   const targetDate = date || toDateString(new Date());
-  const report = await ClassReport.findOne({
-    center: centerId,
-    date: targetDate,
-    instructorName: String(instructorName || '').trim(),
-    period,
-  });
+  // Las clases ahora llegan del JSON de AimHarder (hora "07:00", nombres con
+  // espacios normalizados) y los avisos guardados pueden tener otro formato de
+  // hora o de espacios. Comparar con igualdad estricta devolvía null y el
+  // usuario veía "No se encontró el reporte a marcar" al pulsar la casilla.
+  const nombreBuscado = normalizeName(instructorName);
+  const candidatos = await ClassReport.find({ center: centerId, date: targetDate, period });
+  const report = candidatos.find((doc) => normalizeName(doc.instructorName) === nombreBuscado);
 
   if (!report) return null;
 
+  const claveBuscada = [
+    normalizeClassTime(classTime),
+    normalizeName(className),
+    normalizeName(memberName),
+  ].join('::');
   const targetItem = report.items.find(
     (item) =>
-      item.className === String(className || '').trim() &&
-      item.classTime === String(classTime || '').trim() &&
-      item.memberName === String(memberName || '').trim()
+      [normalizeClassTime(item.classTime), normalizeName(item.className), normalizeName(item.memberName)].join('::') ===
+      claveBuscada
   );
 
   if (!targetItem) return null;
