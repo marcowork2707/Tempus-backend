@@ -262,6 +262,38 @@ function occupancyFromCoachBookings(json) {
   return classes.sort((a, b) => a.classTime.localeCompare(b.classTime));
 }
 
+// Faltas de asistencia del día desde el JSON de /api/coachBookings, con la
+// misma forma que devolvía el parseo del HTML (icono delete2.svg). Falta =
+// apuntado (bookState 1 sin cancelDay) con `assist` = 0. Comprobado con datos
+// reales: la asistencia de la clase es exactamente ocupationr - faltas.
+function absencesFromCoachBookings(json, targetDate) {
+  const bookings = Array.isArray(json && json.bookings) ? json.bookings : [];
+  const dateStr = toDateString(targetDate);
+  const absences = [];
+
+  for (const booking of bookings) {
+    const className = decodeBasicHtmlEntities(collapseSpaces(booking.className || booking.classNameOrig));
+    const classTime = normalizeClassTime(booking.startTime || booking.time);
+
+    for (const athlete of Array.isArray(booking.athletes) ? booking.athletes : []) {
+      if (!isBookedAthlete(athlete) || Number(athlete.assist) !== 0) continue;
+      const memberName = decodeBasicHtmlEntities(collapseSpaces(athlete.name || athlete.realName || athlete.nickname));
+      if (!memberName) continue;
+
+      absences.push({
+        memberName,
+        classTime,
+        className,
+        date: dateStr,
+        phone: collapseSpaces(athlete.mobile || athlete.tel || ''),
+        email: collapseSpaces(athlete.mail || ''),
+      });
+    }
+  }
+
+  return absences;
+}
+
 // Pide el día directamente a la API que usa el propio AimHarder.
 //
 // Descubierto leyendo el código fuente de `window.weekSelDay` en producción:
@@ -3010,7 +3042,9 @@ async function getAbsences(dateStr = null, centerId) {
     const navAusencias = await openReservationsDay(page, targetDate, config);
     await saveDebugSnapshot(page, '06_final_schedule');
 
-    const reservationAbsences = await parseReservationsHtml(page, targetDate, navAusencias && navAusencias.scopeHtml);
+    const reservationAbsences = navAusencias && navAusencias.bookings
+      ? absencesFromCoachBookings(navAusencias.bookings, targetDate)
+      : await parseReservationsHtml(page, targetDate, navAusencias && navAusencias.scopeHtml);
     if (reservationAbsences.length > 0) {
       console.log(`[AimHarder] ${reservationAbsences.length} ausencias encontradas en Reservas`);
       return enrichAbsencesFromDb(reservationAbsences, config.centerId);
@@ -5504,6 +5538,7 @@ module.exports = {
   getClassReportContext,
   getClassReportStatus,
   parseCoachBookingsJson,
+  absencesFromCoachBookings,
   occupancyFromCoachBookings,
   saveClassReport,
   getClassCommentsSummary,
