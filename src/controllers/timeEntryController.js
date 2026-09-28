@@ -17,7 +17,8 @@ const getUserRoleForCenter = async (userId, centerId) => {
   return assignment?.role?.name || null;
 };
 
-const canReviewCenterEntries = (roleName) => roleName === 'admin' || roleName === 'encargado';
+// El encargado ficha como un trabajador más y no revisa los fichajes de otros
+const canReviewCenterEntries = (roleName) => roleName === 'admin';
 
 const CENTER_TIME_ZONE = 'Europe/Madrid';
 
@@ -322,10 +323,6 @@ exports.checkIn = catchAsyncErrors(async (req, res, next) => {
     return next(new ErrorHandler('Unauthorized for this center', 403));
   }
 
-  if (userRoleInCenter === 'encargado') {
-    return next(new ErrorHandler('Managers do not use check-in/check-out', 403));
-  }
-
   // Check if user already has an active entry for today
   const today = new Date();
   const dateOnly = new Date(today.getFullYear(), today.getMonth(), today.getDate());
@@ -371,10 +368,6 @@ exports.checkOut = catchAsyncErrors(async (req, res, next) => {
 
   if (entry.user.toString() !== req.user.id && !canManageEntry) {
     return next(new ErrorHandler('Unauthorized', 403));
-  }
-
-  if (entry.user.toString() === req.user.id && userRoleInCenter === 'encargado') {
-    return next(new ErrorHandler('Managers do not use check-in/check-out', 403));
   }
 
   if (entry.status !== 'active') {
