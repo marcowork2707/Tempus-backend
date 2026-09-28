@@ -20,6 +20,19 @@ const getUserRoleForCenter = async (userId, centerId) => {
 // El encargado ficha como un trabajador más y no revisa los fichajes de otros
 const canReviewCenterEntries = (roleName) => roleName === 'admin';
 
+// Quien ficha solo puede consultar sus fichajes de los últimos 7 días. Se
+// aplica en el servidor para que no baste con cambiar la fecha en la web.
+const WORKER_HISTORY_DAYS = 7;
+const limitFilterToRecentDays = (filter) => {
+  const minDate = new Date();
+  minDate.setHours(0, 0, 0, 0);
+  minDate.setDate(minDate.getDate() - WORKER_HISTORY_DAYS);
+  filter.date = filter.date || {};
+  if (!(filter.date.$gte instanceof Date) || Number.isNaN(filter.date.$gte.getTime()) || filter.date.$gte < minDate) {
+    filter.date.$gte = minDate;
+  }
+};
+
 const CENTER_TIME_ZONE = 'Europe/Madrid';
 
 const startOfDay = (date) => {
@@ -421,6 +434,7 @@ exports.getTimeEntries = catchAsyncErrors(async (req, res, next) => {
   // Workers see only their entries unless they can review the selected center.
   if (user.role !== 'admin' && !canReviewCenterEntries(userRoleInCenter)) {
     filter.user = user.id;
+    limitFilterToRecentDays(filter);
   }
 
   const entries = await TimeEntry.find(filter)
@@ -578,6 +592,7 @@ exports.exportToExcel = catchAsyncErrors(async (req, res, next) => {
 
   if (user.role !== 'admin' && !canReviewCenterEntries(userRoleInCenter)) {
     filter.user = user.id;
+    limitFilterToRecentDays(filter);
   }
 
   const entries = await TimeEntry.find(filter)
