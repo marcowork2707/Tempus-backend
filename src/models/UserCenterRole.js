@@ -69,6 +69,10 @@ const userCenterRoleSchema = new mongoose.Schema(
       match: [/^\d{4}-(0[1-9]|1[0-2])$/, 'overtimeBankUpdatedMonth must be YYYY-MM'],
       default: null,
     },
+    // Centro principal del trabajador: donde viven contrato, nómina y horas extra.
+    // Solo tiene sentido en quien trabaja en varios centros; con un único centro
+    // se considera principal implícitamente.
+    isPrimaryCenter: { type: Boolean, default: false },
   },
   { timestamps: true }
 );

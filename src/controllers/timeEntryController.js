@@ -322,6 +322,37 @@ const getPlannedOccurrencesMap = async (centerId, from, to, userId) => {
   };
 };
 
+// Si el trabajador tiene varios centros activos y centerId es su centro principal,
+// devuelve los ids de todos sus centros (para ver sus fichajes juntos); si no, null.
+const getPrimaryCenterScope = async (userId, centerId) => {
+  if (!userId || !centerId) return null;
+  const roles = await UserCenterRole.find({ user: userId, active: true }).select('center isPrimaryCenter').lean();
+  const centerIds = Array.from(new Set(roles.map((r) => String(r.center))));
+  if (centerIds.length <= 1) return null;
+  const isPrimary = roles.some((r) => String(r.center) === String(centerId) && r.isPrimaryCenter === true);
+  return isPrimary ? centerIds : null;
+};
+
+// Planificación de varios centros: un Map por centro fusionado en uno solo.
+// Las claves `centerId|userId|date` permiten casar cada fichaje con el turno de su
+// propio centro; `userId|date` queda como respaldo (prevalece el centro principal).
+const getPlannedOccurrencesMapForCenters = async (centerIds, primaryCenterId, from, to, userId) => {
+  const ordered = [String(primaryCenterId), ...centerIds.map(String).filter((id) => id !== String(primaryCenterId))];
+  const results = await Promise.all(ordered.map((id) => getPlannedOccurrencesMap(id, from, to, userId)));
+  const occurrenceMap = new Map();
+  const offDayCreditsByUserDate = new Map();
+  results.forEach((result, index) => {
+    for (const [key, occ] of result.occurrenceMap) {
+      occurrenceMap.set(`${ordered[index]}|${key}`, occ);
+      if (!occurrenceMap.has(key)) occurrenceMap.set(key, occ);
+    }
+    for (const [key, minutes] of result.offDayCreditsByUserDate) {
+      offDayCreditsByUserDate.set(key, Math.max(offDayCreditsByUserDate.get(key) || 0, Number(minutes || 0)));
+    }
+  });
+  return { occurrenceMap, offDayCreditsByUserDate };
+};
+
 // Check-in
 exports.checkIn = catchAsyncErrors(async (req, res, next) => {
   const { centerId } = req.body;
@@ -440,6 +471,12 @@ exports.getTimeEntries = catchAsyncErrors(async (req, res, next) => {
     limitFilterToRecentDays(filter);
   }
 
+  // Centro principal de un trabajador con varios centros: se ven los fichajes de todos.
+  const multiCenterIds = req.query.centerId && filter.user
+    ? await getPrimaryCenterScope(filter.user, req.query.centerId)
+    : null;
+  if (multiCenterIds) filter.center = { $in: multiCenterIds };
+
   const entries = await TimeEntry.find(filter)
     .populate('user', 'name email')
     .populate('center', 'name type')
@@ -460,14 +497,18 @@ exports.getTimeEntries = catchAsyncErrors(async (req, res, next) => {
       : validEntries.length > 0
         ? validEntries[0].date
         : new Date();
-    const plannedResult = await getPlannedOccurrencesMap(filter.center, rangeStart, rangeEnd, req.query.userId);
+    const plannedResult = multiCenterIds
+      ? await getPlannedOccurrencesMapForCenters(multiCenterIds, req.query.centerId, rangeStart, rangeEnd, req.query.userId)
+      : await getPlannedOccurrencesMap(filter.center, rangeStart, rangeEnd, req.query.userId);
     plannedMap = plannedResult.occurrenceMap;
     offDayCreditsByUserDate = plannedResult.offDayCreditsByUserDate;
   }
 
   const enrichedEntries = validEntries.map((entry) => {
     const dateKey = formatLocalDate(entry.date);
-    const planned = plannedMap.get(`${entry.user._id.toString()}|${dateKey}`);
+    const userDateKey = `${entry.user._id.toString()}|${dateKey}`;
+    const planned = (multiCenterIds && plannedMap.get(`${entry.center._id.toString()}|${userDateKey}`))
+      || plannedMap.get(userDateKey);
     const plannedMinutes = planned?.isOff
       ? 0
       : planned?.timeSegments?.length
@@ -531,7 +572,7 @@ exports.getTimeEntries = catchAsyncErrors(async (req, res, next) => {
 
   if (filter.center && req.query.userId) {
     const assignment = await UserCenterRole.findOne({
-      center: filter.center,
+      center: req.query.centerId,
       user: req.query.userId,
       active: true,
     }).lean();
@@ -598,6 +639,15 @@ exports.exportToExcel = catchAsyncErrors(async (req, res, next) => {
     limitFilterToRecentDays(filter);
   }
 
+  // Centro principal de un trabajador con varios centros: se exportan los fichajes de todos.
+  // Solo se activa si se pide un trabajador concreto (el export no filtra por userId si no).
+  const exportUserId = filter.user || req.query.userId;
+  const multiCenterIds = await getPrimaryCenterScope(exportUserId, req.query.centerId);
+  if (multiCenterIds) {
+    filter.center = { $in: multiCenterIds };
+    filter.user = exportUserId;
+  }
+
   const entries = await TimeEntry.find(filter)
     .populate('user', 'name email')
     .populate('center', 'name')
@@ -607,12 +657,12 @@ exports.exportToExcel = catchAsyncErrors(async (req, res, next) => {
 
   let plannedMap = new Map();
   if (filter.center && validEntries.length > 0) {
-    plannedMap = await getPlannedOccurrencesMap(
-      filter.center,
-      req.query.startDate ? new Date(req.query.startDate) : validEntries[0].date,
-      req.query.endDate ? new Date(req.query.endDate) : validEntries[validEntries.length - 1].date,
-      req.query.userId
-    );
+    const plannedFrom = req.query.startDate ? new Date(req.query.startDate) : validEntries[0].date;
+    const plannedTo = req.query.endDate ? new Date(req.query.endDate) : validEntries[validEntries.length - 1].date;
+    const plannedResult = multiCenterIds
+      ? await getPlannedOccurrencesMapForCenters(multiCenterIds, req.query.centerId, plannedFrom, plannedTo, req.query.userId)
+      : await getPlannedOccurrencesMap(filter.center, plannedFrom, plannedTo, req.query.userId);
+    plannedMap = plannedResult.occurrenceMap;
   }
 
   // Generate CSV
@@ -620,7 +670,9 @@ exports.exportToExcel = catchAsyncErrors(async (req, res, next) => {
 
   validEntries.forEach((entry) => {
     const date = entry.date.toLocaleDateString('es-ES');
-    const planned = plannedMap.get(`${entry.user._id.toString()}|${formatLocalDate(entry.date)}`);
+    const userDateKey = `${entry.user._id.toString()}|${formatLocalDate(entry.date)}`;
+    const planned = (multiCenterIds && plannedMap.get(`${entry.center._id.toString()}|${userDateKey}`))
+      || plannedMap.get(userDateKey);
     const plannedMinutes = planned?.isOff
       ? 0
       : planned?.timeSegments?.length

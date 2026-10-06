@@ -36,6 +36,37 @@ const normalizeWaitlistTariffName = (value = '') => String(value)
   .toLowerCase();
 
 const hasResolvedUser = (record) => Boolean(record?.user && record.user._id);
+
+// Para cada usuario: sus asignaciones activas, cuál es la principal y los centros a sumar.
+// Regla: un solo centro → ese es el principal; varios → el marcado isPrimaryCenter
+// (si ninguno está marcado, ninguno computa y se avisa en el resumen).
+const _buildUserCenterScopes = async (userIds) => {
+  const scopes = new Map();
+  if (!userIds || userIds.length === 0) return scopes;
+  const roles = await UserCenterRole.find({ user: { $in: userIds }, active: true })
+    .populate('center', 'name');
+  const seen = new Map();
+  for (const r of roles) {
+    if (!r.center?._id) continue;
+    const key = String(r.user);
+    if (!seen.has(key)) seen.set(key, new Map());
+    const byCenter = seen.get(key);
+    const cid = String(r.center._id);
+    const prev = byCenter.get(cid);
+    byCenter.set(cid, { id: cid, name: r.center.name, isPrimary: Boolean(r.isPrimaryCenter) || Boolean(prev?.isPrimary) });
+  }
+  for (const [key, byCenter] of seen) {
+    const list = Array.from(byCenter.values());
+    const primary = list.length === 1 ? list[0] : list.find((c) => c.isPrimary) || null;
+    scopes.set(key, {
+      centerIds: list.map((c) => c.id),
+      primaryCenterId: primary ? primary.id : null,
+      primaryCenterName: primary ? primary.name : null,
+      allCenters: list.map((c) => ({ id: c.id, name: c.name })),
+    });
+  }
+  return scopes;
+};
 const OVERTIME_AGGREGATION_MODES = ['net', 'positive_only'];
 const DASHBOARD_REVIEW_ALLOWED_STATUSES = ['pending', 'ok', 'fail'];
 const DASHBOARD_REVIEW_MONTH_RESTRICTIONS = {
@@ -1105,12 +1136,43 @@ const gatherMonthlyOvertimeSummaries = async ({ centerId, month, userId }) => {
     .populate('user', 'name email active')
     .populate('role', 'name');
 
-  const validAssignments = assignments.filter((assignment) => Boolean(assignment.user?._id));
+  const resolvedAssignments = assignments.filter((assignment) => Boolean(assignment.user?._id));
+  const scopes = await _buildUserCenterScopes(resolvedAssignments.map((a) => a.user._id));
+  const thisCenterId = String(centerId);
+
+  // Si el trabajador tiene varios centros y este no es el principal, no computa aquí.
+  const validAssignments = [];
+  const externalSummaries = [];
+  for (const assignment of resolvedAssignments) {
+    const scope = scopes.get(String(assignment.user._id));
+    if (scope && scope.centerIds.length > 1 && scope.primaryCenterId !== thisCenterId) {
+      externalSummaries.push({
+        user: { _id: assignment.user._id, name: assignment.user.name, email: assignment.user.email },
+        computedInCenter: scope.primaryCenterId
+          ? { id: scope.primaryCenterId, name: scope.primaryCenterName }
+          : null,
+      });
+    } else {
+      validAssignments.push(assignment);
+    }
+  }
+
   const userIds = validAssignments.map((assignment) => assignment.user._id);
-  const entries = userIds.length === 0
+  const allCenterIdsInvolved = Array.from(new Set(
+    userIds.flatMap((id) => scopes.get(String(id))?.centerIds || [thisCenterId])
+  ));
+  // Un registro cuenta solo si su centro está entre los centros del usuario.
+  const belongsToUserScope = (record) => {
+    const uid = String(record.user?._id || record.user);
+    const scope = scopes.get(uid);
+    const cids = scope ? scope.centerIds : [thisCenterId];
+    return cids.includes(String(record.center?._id || record.center));
+  };
+
+  const entriesRaw = userIds.length === 0
     ? []
     : await TimeEntry.find({
-        center: centerId,
+        center: { $in: allCenterIdsInvolved },
         user: { $in: userIds },
         date: {
           $gte: queryStart,
@@ -1120,15 +1182,16 @@ const gatherMonthlyOvertimeSummaries = async ({ centerId, month, userId }) => {
       })
         .populate('user', 'name email')
         .sort({ date: 1, entryTime: 1 });
+  const entries = entriesRaw.filter(belongsToUserScope);
 
-  const [patterns, vacationOverrides] = userIds.length === 0
+  const [patternsRaw, vacationOverridesRaw] = userIds.length === 0
     ? [[], []]
     : await Promise.all([
-        ShiftPattern.find({ center: centerId, user: { $in: userIds }, active: true })
+        ShiftPattern.find({ center: { $in: allCenterIdsInvolved }, user: { $in: userIds }, active: true })
           .populate('user', 'name email')
           .populate('shift', 'name startTime endTime'),
         ShiftOverride.find({
-          center: centerId,
+          center: { $in: allCenterIdsInvolved },
           user: { $in: userIds },
           date: {
             $gte: queryStart,
@@ -1136,6 +1199,8 @@ const gatherMonthlyOvertimeSummaries = async ({ centerId, month, userId }) => {
           },
         }).populate('user', 'name email'),
       ]);
+  const patterns = patternsRaw.filter(belongsToUserScope);
+  const vacationOverrides = vacationOverridesRaw.filter(belongsToUserScope);
 
   // Días de trabajo BASE del trabajador = ocurrencias de sus PATRONES sin aplicar
   // ausencias. Es la jornada que le tocaría esa semana y el denominador del
@@ -1166,7 +1231,12 @@ const gatherMonthlyOvertimeSummaries = async ({ centerId, month, userId }) => {
     todayCutoff: startOfDayLocal(new Date()),
   });
 
-  return { center, coachRole, aggregationMode, summaries };
+  for (const summary of summaries) {
+    const scope = scopes.get(String(summary.user?._id || summary.user?.id));
+    if (scope && scope.centerIds.length > 1) summary.includedCenters = scope.allCenters;
+  }
+
+  return { center, coachRole, aggregationMode, summaries, externalSummaries };
 };
 
 // Public centers list for registration flow
@@ -1400,7 +1470,21 @@ exports.getCenterUsers = catchAsyncErrors(async (req, res, next) => {
     .populate('user', 'name email active')
     .populate('role', 'name');
 
-  res.status(200).json({ success: true, assignments });
+  const scopes = await _buildUserCenterScopes(
+    assignments.filter((a) => a.user?._id).map((a) => a.user._id)
+  );
+  const assignmentsWithCenters = assignments.map((a) => {
+    const obj = a.toObject();
+    const scope = a.user?._id ? scopes.get(String(a.user._id)) : null;
+    obj.otherCenters = scope
+      ? scope.allCenters
+          .filter((c) => c.id !== String(req.params.id))
+          .map((c) => ({ ...c, isPrimaryCenter: c.id === scope.primaryCenterId }))
+      : [];
+    return obj;
+  });
+
+  res.status(200).json({ success: true, assignments: assignmentsWithCenters });
 });
 
 // Assign a user to a center with a role
@@ -1472,9 +1556,9 @@ exports.addUserToCenter = catchAsyncErrors(async (req, res, next) => {
 
 // Update user's role in a center
 exports.updateUserCenterRole = catchAsyncErrors(async (req, res, next) => {
-  const { roleName, weeklyContractHours, weeklyContractHoursEffectiveMonth } = req.body;
-  if (roleName === undefined && weeklyContractHours === undefined) {
-    return next(new ErrorHandler('Provide roleName or weeklyContractHours', 400));
+  const { roleName, weeklyContractHours, weeklyContractHoursEffectiveMonth, isPrimaryCenter } = req.body;
+  if (roleName === undefined && weeklyContractHours === undefined && isPrimaryCenter === undefined) {
+    return next(new ErrorHandler('Provide roleName, weeklyContractHours or isPrimaryCenter', 400));
   }
 
   const assignment = await UserCenterRole.findOne({ user: req.params.userId, center: req.params.id });
@@ -1534,6 +1618,17 @@ exports.updateUserCenterRole = catchAsyncErrors(async (req, res, next) => {
     assignment.weeklyContractHours = effectiveCurrentHours === undefined ? null : effectiveCurrentHours;
   }
 
+  if (isPrimaryCenter !== undefined) {
+    assignment.isPrimaryCenter = Boolean(isPrimaryCenter);
+    if (assignment.isPrimaryCenter) {
+      // Solo un centro principal por trabajador.
+      await UserCenterRole.updateMany(
+        { user: assignment.user, center: { $ne: assignment.center }, active: true },
+        { $set: { isPrimaryCenter: false } }
+      );
+    }
+  }
+
   await assignment.save();
 
   const populatedAssignment = await UserCenterRole.findById(assignment._id)
@@ -1549,7 +1644,7 @@ exports.getCenterMonthlyOvertimeSummary = catchAsyncErrors(async (req, res, next
     return next(new ErrorHandler('month query param is required', 400));
   }
 
-  const { aggregationMode, summaries } = await gatherMonthlyOvertimeSummaries({
+  const { aggregationMode, summaries, externalSummaries } = await gatherMonthlyOvertimeSummaries({
     centerId: req.params.id,
     month,
     userId,
@@ -1560,6 +1655,7 @@ exports.getCenterMonthlyOvertimeSummary = catchAsyncErrors(async (req, res, next
     month,
     aggregationMode,
     summaries,
+    externalSummaries,
   });
 });
 
@@ -3018,6 +3114,11 @@ exports.getCenterOvertimeBank = catchAsyncErrors(async (req, res, next) => {
   const assignment = await findCoachAssignment(req.params.id, userId);
   if (!assignment) return next(new ErrorHandler('User is not assigned to this center as coach', 400));
 
+  const bankScope = (await _buildUserCenterScopes([userId])).get(String(userId));
+  if (bankScope && bankScope.centerIds.length > 1 && bankScope.primaryCenterId !== String(req.params.id)) {
+    return next(new ErrorHandler('Las horas extra de este trabajador se gestionan en su centro principal', 400));
+  }
+
   const balanceMinutes = Math.round(Number(assignment.overtimeBankMinutes || 0));
   const lastSettledMonth = assignment.overtimeBankUpdatedMonth || null;
 
@@ -3087,6 +3188,11 @@ exports.settleCenterOvertimeMonth = catchAsyncErrors(async (req, res, next) => {
 
   const assignment = await findCoachAssignment(req.params.id, userId);
   if (!assignment) return next(new ErrorHandler('User is not assigned to this center as coach', 400));
+
+  const bankScope = (await _buildUserCenterScopes([userId])).get(String(userId));
+  if (bankScope && bankScope.centerIds.length > 1 && bankScope.primaryCenterId !== String(req.params.id)) {
+    return next(new ErrorHandler('Las horas extra de este trabajador se gestionan en su centro principal', 400));
+  }
 
   const existing = await OvertimeSettlement.findOne({ center: req.params.id, user: userId, month });
   if (existing) return next(new ErrorHandler('Este mes ya está liquidado', 409));
