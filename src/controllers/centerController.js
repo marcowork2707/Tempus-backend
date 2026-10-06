@@ -5540,9 +5540,51 @@ exports.swapShiftDay = catchAsyncErrors(async (req, res, next) => {
   res.status(200).json({ success: true, message: 'Turnos intercambiados' });
 });
 
+// Calcula las ocurrencias de turnos de un centro (patrones + overrides) y las etiqueta con su centro
+const _computeOccurrencesForCenter = async ({
+  centerId,
+  patternFilter,
+  overrideFilter,
+  fromDate,
+  toDate,
+  ignoreVacationRequestId,
+}) => {
+  const patterns = await ShiftPattern.find(patternFilter)
+    .populate('user', 'name email')
+    .populate('shift', 'name startTime endTime');
+
+  let overrides = await ShiftOverride.find(overrideFilter).populate('user', 'name email');
+
+  if (ignoreVacationRequestId) {
+    overrides = overrides.filter((override) => {
+      if (override.reasonType !== 'vacation') return true;
+      return String(override.vacationRequest || '') !== String(ignoreVacationRequestId);
+    });
+  }
+
+  const occurrences = applyOverrides(
+    computeOccurrences(patterns.filter(hasResolvedUser), fromDate, toDate),
+    overrides.filter(hasResolvedUser)
+  );
+
+  return occurrences.map((occurrence) => {
+    const matchedOverride = overrides.find((override) => (
+      String(override.user?._id || '') === String(occurrence.userId)
+      && _formatLocalDate(override.date) === occurrence.date
+      && occurrence.isOverride
+    ));
+
+    return {
+      ...occurrence,
+      vacationRequestId: matchedOverride?.vacationRequest ? String(matchedOverride.vacationRequest) : undefined,
+      centerId: String(centerId),
+    };
+  });
+};
+
 // Get computed shift calendar for a center (admin: all workers; others: own only)
 exports.getShiftCalendar = catchAsyncErrors(async (req, res, next) => {
-  const { from, to, ignoreVacationRequestId } = req.query;
+  const { from, to, ignoreVacationRequestId, includeOtherCenters } = req.query;
   if (!from || !to) {
     return next(new ErrorHandler('from and to query params (YYYY-MM-DD) are required', 400));
   }
@@ -5560,46 +5602,69 @@ exports.getShiftCalendar = catchAsyncErrors(async (req, res, next) => {
   const canReviewCenterCalendar = roleName === 'admin' || roleName === 'encargado';
   if (!canReviewCenterCalendar) filter.user = req.user.id;
 
-  const patterns = await ShiftPattern.find(filter)
-    .populate('user', 'name email')
-    .populate('shift', 'name startTime endTime');
-
   const overrideFilter = {
     center: req.params.id,
     date: { $gte: _startOfDay(fromDate), $lte: _startOfDay(toDate) },
   };
   if (roleName !== 'coach' && !canReviewCenterCalendar) overrideFilter.user = req.user.id;
 
-  let overrides = await ShiftOverride.find(overrideFilter).populate('user', 'name email');
-
-  if (ignoreVacationRequestId) {
-    overrides = overrides.filter((override) => {
-      if (override.reasonType !== 'vacation') return true;
-      return String(override.vacationRequest || '') !== String(ignoreVacationRequestId);
-    });
-  }
-
-  let occurrences = applyOverrides(
-    computeOccurrences(patterns.filter(hasResolvedUser), fromDate, toDate),
-    overrides.filter(hasResolvedUser)
-  );
-
-  occurrences = occurrences.map((occurrence) => {
-    const matchedOverride = overrides.find((override) => (
-      String(override.user?._id || '') === String(occurrence.userId)
-      && _formatLocalDate(override.date) === occurrence.date
-      && occurrence.isOverride
-    ));
-
-    return {
-      ...occurrence,
-      vacationRequestId: matchedOverride?.vacationRequest ? String(matchedOverride.vacationRequest) : undefined,
-    };
+  let occurrences = await _computeOccurrencesForCenter({
+    centerId: req.params.id,
+    patternFilter: filter,
+    overrideFilter,
+    fromDate,
+    toDate,
+    ignoreVacationRequestId,
   });
 
   if (roleName === 'coach') {
     occurrences = occurrences.filter((occ) => occ.userId === req.user.id || occ.reasonType === 'vacation');
   }
+
+  if (includeOtherCenters === 'true') {
+    // Usuarios cuyas ocurrencias se devuelven para este centro
+    let userIds;
+    if (canReviewCenterCalendar) {
+      const centerAssignments = await UserCenterRole.find({ center: req.params.id, active: true }).select('user');
+      userIds = centerAssignments.map((a) => a.user);
+    } else {
+      userIds = [req.user.id];
+    }
+
+    const otherAssignments = await UserCenterRole.find({
+      user: { $in: userIds },
+      center: { $ne: req.params.id },
+      active: true,
+    }).populate('center', 'name');
+
+    // Agrupar por centro: { centerId -> { center, users } }
+    const byCenter = new Map();
+    otherAssignments.forEach((assignment) => {
+      if (!assignment.center) return;
+      const key = String(assignment.center._id);
+      if (!byCenter.has(key)) byCenter.set(key, { center: assignment.center, users: [] });
+      byCenter.get(key).users.push(assignment.user);
+    });
+
+    for (const [otherCenterId, { center, users }] of byCenter) {
+      const otherOccurrences = await _computeOccurrencesForCenter({
+        centerId: otherCenterId,
+        patternFilter: { center: otherCenterId, user: { $in: users }, active: true },
+        overrideFilter: {
+          center: otherCenterId,
+          user: { $in: users },
+          date: { $gte: _startOfDay(fromDate), $lte: _startOfDay(toDate) },
+        },
+        fromDate,
+        toDate,
+        ignoreVacationRequestId,
+      });
+      otherOccurrences.forEach((occ) => {
+        occurrences.push({ ...occ, otherCenter: { id: String(otherCenterId), name: center.name } });
+      });
+    }
+  }
+
   res.status(200).json({ success: true, occurrences });
 });
 

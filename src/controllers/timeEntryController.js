@@ -342,16 +342,19 @@ exports.checkIn = catchAsyncErrors(async (req, res, next) => {
   const dateNext = new Date(dateOnly);
   dateNext.setDate(dateNext.getDate() + 1);
 
+  // Una persona que trabaja en dos centros no puede estar fichada en los dos a la vez
   const existingEntry = await TimeEntry.findOne({
     user: req.user.id,
-    center: centerId,
     date: { $gte: dateOnly, $lt: dateNext },
     status: 'active',
-  });
+  }).populate('center', 'name');
 
   if (existingEntry) {
     return next(
-      new ErrorHandler('You already have an active check-in for today', 400)
+      new ErrorHandler(
+        `Ya tienes un fichaje activo en ${existingEntry.center?.name || 'otro centro'}. Cierra ese fichaje antes de abrir otro.`,
+        400
+      )
     );
   }
 
