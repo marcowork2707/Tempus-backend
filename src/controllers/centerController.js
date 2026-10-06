@@ -1461,6 +1461,66 @@ const seedLegacyWeeklyContractHistory = (assignment) => {
   ];
 };
 
+// Traspasa al centro principal la jornada de contrato y la bolsa de horas extra
+// de las demás asignaciones del trabajador. Idempotente: re-ejecutarla no duplica nada
+// (las bolsas de origen quedan a 0 y el mes liquidado se iguala).
+const _consolidateWorkerIntoPrimary = async (userId, primaryCenterId) => {
+  const assignments = await UserCenterRole.find({ user: userId, active: true });
+  const primary = assignments.find((a) => String(a.center) === String(primaryCenterId));
+  if (!primary) return { mergedHistoryEntries: 0, movedBankMinutes: 0 };
+  const others = assignments.filter((a) => String(a._id) !== String(primary._id));
+  if (others.length === 0) return { mergedHistoryEntries: 0, movedBankMinutes: 0 };
+
+  // Historial de jornada: unión por mes; si el mes ya existe en el principal, gana el del principal.
+  const primaryHistory = Array.isArray(primary.weeklyContractHoursHistory) ? primary.weeklyContractHoursHistory : [];
+  const knownMonths = new Set(primaryHistory.map((e) => e.effectiveMonth));
+  const merged = primaryHistory.map((e) => (e.toObject ? e.toObject() : e));
+  let mergedHistoryEntries = 0;
+  for (const other of others) {
+    const history = Array.isArray(other.weeklyContractHoursHistory) ? other.weeklyContractHoursHistory : [];
+    for (const entry of history) {
+      if (!entry.effectiveMonth || knownMonths.has(entry.effectiveMonth)) continue;
+      knownMonths.add(entry.effectiveMonth);
+      merged.push(entry.toObject ? entry.toObject() : { ...entry });
+      mergedHistoryEntries += 1;
+    }
+  }
+  if (mergedHistoryEntries > 0) {
+    primary.weeklyContractHoursHistory = merged.sort((l, r) => l.effectiveMonth.localeCompare(r.effectiveMonth));
+  }
+  if (primary.weeklyContractHours === null || primary.weeklyContractHours === undefined || mergedHistoryEntries > 0) {
+    const effective = getEffectiveWeeklyContractHours(primary, toYearMonth(new Date()));
+    if (effective !== undefined && effective !== null) primary.weeklyContractHours = effective;
+  }
+
+  // Bolsa de horas extra: todo al principal.
+  let movedBankMinutes = 0;
+  for (const other of others) {
+    movedBankMinutes += Number(other.overtimeBankMinutes || 0);
+    other.overtimeBankMinutes = 0;
+  }
+  primary.overtimeBankMinutes = Number(primary.overtimeBankMinutes || 0) + movedBankMinutes;
+
+  const latestMonth = [primary, ...others]
+    .map((a) => a.overtimeBankUpdatedMonth)
+    .filter(Boolean)
+    .sort()
+    .pop() || null;
+  if (latestMonth) {
+    for (const a of [primary, ...others]) a.overtimeBankUpdatedMonth = latestMonth;
+  }
+
+  await Promise.all([primary, ...others].map((a) => a.save()));
+  return { mergedHistoryEntries, movedBankMinutes };
+};
+
+// Si el trabajador tiene varios centros, devuelve su ámbito (centros y principal); si no, null.
+const _getMultiCenterScope = async (userId) => {
+  if (!userId) return null;
+  const scope = (await _buildUserCenterScopes([userId])).get(String(userId));
+  return scope && scope.centerIds.length > 1 ? scope : null;
+};
+
 // Get all users assigned to a center
 exports.getCenterUsers = catchAsyncErrors(async (req, res, next) => {
   const center = await Center.findById(req.params.id);
@@ -1631,11 +1691,16 @@ exports.updateUserCenterRole = catchAsyncErrors(async (req, res, next) => {
 
   await assignment.save();
 
+  let consolidation;
+  if (isPrimaryCenter !== undefined && assignment.isPrimaryCenter) {
+    consolidation = await _consolidateWorkerIntoPrimary(assignment.user, assignment.center);
+  }
+
   const populatedAssignment = await UserCenterRole.findById(assignment._id)
     .populate('user', 'name email active')
     .populate('role', 'name');
 
-  res.status(200).json({ success: true, assignment: populatedAssignment });
+  res.status(200).json({ success: true, assignment: populatedAssignment, consolidation });
 });
 
 exports.getCenterMonthlyOvertimeSummary = catchAsyncErrors(async (req, res, next) => {
@@ -2034,6 +2099,8 @@ exports.getCenterExtraIncentives = catchAsyncErrors(async (req, res, next) => {
   const userId = typeof req.query.userId === 'string' ? req.query.userId : '';
 
   const filter = { center: req.params.id };
+  const listScope = await _getMultiCenterScope(userId);
+  if (listScope) filter.center = { $in: listScope.centerIds };
   if (month) {
     if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(month)) {
       return next(new ErrorHandler('month must be in format YYYY-MM', 400));
@@ -2053,11 +2120,14 @@ exports.getCenterExtraIncentives = catchAsyncErrors(async (req, res, next) => {
   const incentives = await ExtraIncentive.find(filter)
     .populate('user', 'name email active')
     .populate('createdBy', 'name email')
+    .populate('center', 'name')
     .sort({ month: -1, createdAt: -1 });
 
   res.status(200).json({
     success: true,
-    incentives: incentives.filter((incentive) => Boolean(incentive.user)),
+    incentives: incentives
+      .filter((incentive) => Boolean(incentive.user))
+      .map((incentive) => ({ ...incentive.toObject(), center: incentive.center?._id ?? incentive.center, centerName: incentive.center?.name })),
   });
 });
 
@@ -2090,8 +2160,11 @@ exports.createCenterExtraIncentive = catchAsyncErrors(async (req, res, next) => 
     return next(new ErrorHandler('User is not assigned to this center', 400));
   }
 
+  const createScope = await _getMultiCenterScope(userId);
+  const targetCenterId = createScope?.primaryCenterId || req.params.id;
+
   const incentive = await ExtraIncentive.create({
-    center: req.params.id,
+    center: targetCenterId,
     user: userId,
     month,
     concept: String(concept).trim(),
@@ -2106,13 +2179,22 @@ exports.createCenterExtraIncentive = catchAsyncErrors(async (req, res, next) => 
   res.status(201).json({ success: true, incentive: populated });
 });
 
-exports.deleteCenterExtraIncentive = catchAsyncErrors(async (req, res, next) => {
-  const incentive = await ExtraIncentive.findOneAndDelete({
-    _id: req.params.incentiveId,
-    center: req.params.id,
-  });
+// Un registro de nómina/incentivo de una persona con varios centros se puede
+// borrar desde cualquiera de sus centros (se leen consolidados, así que el
+// admin lo ve y debe poder actuar aunque el documento viva en el otro centro).
+const _findDeletableByPerson = async (Model, docId, centerId) => {
+  const doc = await Model.findById(docId);
+  if (!doc) return null;
+  if (String(doc.center) === String(centerId)) return doc;
+  const scope = await _getMultiCenterScope(doc.user);
+  if (scope && scope.centerIds.includes(String(centerId)) && scope.centerIds.includes(String(doc.center))) return doc;
+  return null;
+};
 
+exports.deleteCenterExtraIncentive = catchAsyncErrors(async (req, res, next) => {
+  const incentive = await _findDeletableByPerson(ExtraIncentive, req.params.incentiveId, req.params.id);
   if (!incentive) return next(new ErrorHandler('Extra incentive not found', 404));
+  await ExtraIncentive.deleteOne({ _id: incentive._id });
 
   res.status(200).json({ success: true, message: 'Extra incentive deleted' });
 });
@@ -2163,8 +2245,11 @@ exports.createCenterRecurringIncentiveRule = catchAsyncErrors(async (req, res, n
     return next(new ErrorHandler('User is not assigned to this center', 400));
   }
 
+  const ruleScope = await _getMultiCenterScope(userId);
+  const ruleTargetCenterId = ruleScope?.primaryCenterId || req.params.id;
+
   const rule = await RecurringIncentiveRule.create({
-    center: req.params.id,
+    center: ruleTargetCenterId,
     user: userId,
     concept: String(concept).trim(),
     amount: Number(parsedAmount.toFixed(2)),
@@ -2981,7 +3066,11 @@ exports.getCenterPayroll = catchAsyncErrors(async (req, res, next) => {
   if (!center) return next(new ErrorHandler('Center not found', 404));
 
   const filter = { center: req.params.id };
-  if (typeof req.query.userId === 'string' && req.query.userId) filter.user = req.query.userId;
+  if (typeof req.query.userId === 'string' && req.query.userId) {
+    filter.user = req.query.userId;
+    const payrollScope = await _getMultiCenterScope(req.query.userId);
+    if (payrollScope) filter.center = { $in: payrollScope.centerIds };
+  }
   if (typeof req.query.year === 'string' && /^\d{4}$/.test(req.query.year)) {
     filter.month = new RegExp(`^${req.query.year}-`);
   }
@@ -2989,9 +3078,12 @@ exports.getCenterPayroll = catchAsyncErrors(async (req, res, next) => {
   const entries = await PayrollEntry.find(filter)
     .populate('user', 'name email active')
     .populate('createdBy', 'name email')
+    .populate('center', 'name')
     .sort({ month: 1, createdAt: -1 });
 
-  const safeEntries = entries.filter((entry) => Boolean(entry.user));
+  const safeEntries = entries
+    .filter((entry) => Boolean(entry.user))
+    .map((entry) => ({ ...entry.toObject(), center: entry.center?._id ?? entry.center, centerName: entry.center?.name }));
   const totalsByUser = {};
   for (const entry of safeEntries) {
     const userId = entry.user._id.toString();
@@ -3042,10 +3134,27 @@ exports.upsertCenterPayrollEntry = catchAsyncErrors(async (req, res, next) => {
     return next(new ErrorHandler('User is not assigned to this center', 400));
   }
 
+  // Con varios centros la nómina vive en el principal y nunca se duplica el mes:
+  // si ya existe en cualquiera de sus centros se actualiza ese documento.
+  const payrollScope = await _getMultiCenterScope(userId);
+  let payrollTargetCenterId = req.params.id;
+  let payrollQuery = { center: req.params.id, user: userId, month };
+  if (payrollScope) {
+    if (payrollScope.primaryCenterId) payrollTargetCenterId = payrollScope.primaryCenterId;
+    const existingEntry = await PayrollEntry.findOne({ user: userId, month, center: { $in: payrollScope.centerIds } })
+      .select('_id center');
+    if (existingEntry) {
+      payrollQuery = { _id: existingEntry._id };
+      payrollTargetCenterId = existingEntry.center;
+    } else {
+      payrollQuery = { center: payrollTargetCenterId, user: userId, month };
+    }
+  }
+
   const entry = await PayrollEntry.findOneAndUpdate(
-    { center: req.params.id, user: userId, month },
+    payrollQuery,
     {
-      center: req.params.id,
+      center: payrollTargetCenterId,
       user: userId,
       month,
       grossSalary: Number(parsedGross.toFixed(2)),
@@ -3065,12 +3174,9 @@ exports.upsertCenterPayrollEntry = catchAsyncErrors(async (req, res, next) => {
 });
 
 exports.deleteCenterPayrollEntry = catchAsyncErrors(async (req, res, next) => {
-  const deleted = await PayrollEntry.findOneAndDelete({
-    _id: req.params.entryId,
-    center: req.params.id,
-  });
-
+  const deleted = await _findDeletableByPerson(PayrollEntry, req.params.entryId, req.params.id);
   if (!deleted) return next(new ErrorHandler('Payroll entry not found', 404));
+  await PayrollEntry.deleteOne({ _id: deleted._id });
 
   res.status(200).json({ success: true, message: 'Payroll entry deleted' });
 });
@@ -3128,9 +3234,12 @@ exports.getCenterOvertimeBank = catchAsyncErrors(async (req, res, next) => {
   const generatedMinutes = summary ? Math.round(Number(summary.totalDeltaMinutes || 0)) : 0;
 
   const existing = await OvertimeSettlement.findOne({ center: req.params.id, user: userId, month });
-  const history = await OvertimeSettlement.find({ center: req.params.id, user: userId })
+  const historyCenters = bankScope && bankScope.centerIds.length > 1 ? bankScope.centerIds : [req.params.id];
+  const historyDocs = await OvertimeSettlement.find({ center: { $in: historyCenters }, user: userId })
     .populate('createdBy', 'name email')
+    .populate('center', 'name')
     .sort({ month: 1 });
+  const history = historyDocs.map((h) => ({ ...h.toObject(), center: h.center?._id ?? h.center, centerName: h.center?.name }));
 
   let status;
   let canSettle = false;
