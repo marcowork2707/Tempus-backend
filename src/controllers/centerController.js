@@ -4219,6 +4219,10 @@ async function _assertVacationPolicyRules(
     skipNoticeOutsideSeasonRule = false,
     skipSummerLengthRules = false,
     skipShortPeriodLimitRule = false,
+    // Fecha desde la que se mide la antelación. Al revisar una solicitud debe
+    // ser la fecha en que se pidió: si no, aprobarla tarde la convertía en
+    // "sin antelación" y el botón Aprobar fallaba aunque se pidiera meses antes.
+    noticeReferenceDate = null,
   } = options;
   const violations = [];
   const days = Math.floor((_startOfDay(end).getTime() - _startOfDay(start).getTime()) / (24 * 60 * 60 * 1000)) + 1;
@@ -4231,7 +4235,7 @@ async function _assertVacationPolicyRules(
   const entirelyInChristmas = _rangeEveryDayPasses(start, end, _isInsideChristmasPeriod);
 
   if (!skipNoticeOutsideSeasonRule && !entirelyInSummer && !entirelyInChristmas) {
-    const today = _startOfDay(new Date());
+    const today = _startOfDay(noticeReferenceDate ? new Date(noticeReferenceDate) : new Date());
     const minAllowedStart = _startOfDay(today);
     minAllowedStart.setDate(minAllowedStart.getDate() + VACATION_POLICY.MIN_NOTICE_DAYS_OUTSIDE_SEASON);
     if (_startOfDay(start) < minAllowedStart) {
@@ -4786,7 +4790,8 @@ exports.reviewVacationRequest = catchAsyncErrors(async (req, res, next) => {
     nextStartDate,
     nextEndDate,
     nextAttributedYear,
-    request._id
+    request._id,
+    { noticeReferenceDate: request.createdAt }
   );
 
   request.startDate = nextStartDate;
