@@ -722,7 +722,21 @@ exports.updateTimeEntry = catchAsyncErrors(async (req, res, next) => {
     return next(new ErrorHandler('Unauthorized', 403));
   }
 
-  const { date, entryTime, exitTime, notes } = req.body;
+  const { date, entryTime, exitTime, notes, centerId } = req.body;
+
+  // Cambio de centro del fichaje: solo admin y solo a un centro en el que el
+  // trabajador esté dado de alta (quien trabaja en varios centros puede haber
+  // fichado en el equivocado).
+  if (centerId && String(centerId) !== String(entry.center._id)) {
+    if (req.user.role !== 'admin') {
+      return next(new ErrorHandler('Solo un administrador puede cambiar el centro de un fichaje', 403));
+    }
+    const belongs = await UserCenterRole.findOne({ user: entry.user, center: centerId, active: true });
+    if (!belongs) {
+      return next(new ErrorHandler('El trabajador no pertenece a ese centro', 400));
+    }
+    entry.center = centerId;
+  }
 
   const entryDate = date ? startOfDay(date) : startOfDay(entry.date);
   const currentEntryTime = entryTime
