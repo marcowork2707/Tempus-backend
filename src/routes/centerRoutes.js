@@ -1,4 +1,5 @@
 const express = require('express');
+const multer = require('multer');
 const router = express.Router();
 
 const {
@@ -96,7 +97,49 @@ const {
   deleteAllCenterIncomesByMonth,
 } = require('../controllers/centerController');
 
+const {
+  listStaffDocuments,
+  uploadStaffDocument,
+  downloadStaffDocument,
+  deleteStaffDocument,
+} = require('../controllers/staffDocumentController');
+const ErrorHandler = require('../utils/errorHandler');
+
 const { isAuthenticatedUser, authorizeRoles } = require('../middleware/auth');
+
+// Documentos de personal: memoryStorage (filesystem efimero en Railway), se persisten en Mongo.
+const STAFF_DOC_MIME_TYPES = [
+  'application/pdf',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  'text/plain',
+];
+const STAFF_DOC_EXTENSIONS = /\.(pdf|docx|txt)$/i;
+const STAFF_DOC_TYPE_ERROR = 'Solo se admiten PDF, DOCX o TXT';
+
+const staffDocUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 10 * 1024 * 1024, files: 1 },
+  fileFilter: (req, file, cb) => {
+    // Algunos navegadores envian un mimetype generico: aceptamos tambien por extension.
+    const name = Buffer.from(file.originalname || '', 'latin1').toString('utf8');
+    const okMime = STAFF_DOC_MIME_TYPES.includes(file.mimetype);
+    const genericMime = !file.mimetype || file.mimetype === 'application/octet-stream';
+    if (okMime || (genericMime && STAFF_DOC_EXTENSIONS.test(name))) return cb(null, true);
+    return cb(new ErrorHandler(STAFF_DOC_TYPE_ERROR, 400));
+  },
+}).single('file');
+
+// Traduce los errores de multer a 400 con mensaje en espanol.
+const handleStaffDocUpload = (req, res, next) => {
+  staffDocUpload(req, res, (err) => {
+    if (!err) return next();
+    if (err instanceof multer.MulterError) {
+      const message = err.code === 'LIMIT_FILE_SIZE' ? 'El archivo supera los 10 MB' : STAFF_DOC_TYPE_ERROR;
+      return next(new ErrorHandler(message, 400));
+    }
+    return next(err);
+  });
+};
 
 // Public route used by register form
 router.get('/public', getPublicCenters);
@@ -127,6 +170,10 @@ router.get('/:id/users', authorizeRoles('admin'), getCenterUsers);
 router.post('/:id/users', authorizeRoles('admin'), addUserToCenter);
 router.put('/:id/users/:userId', authorizeRoles('admin'), updateUserCenterRole);
 router.delete('/:id/users/:userId', authorizeRoles('admin'), removeUserFromCenter);
+router.get('/:id/users/:userId/documents', authorizeRoles('admin'), listStaffDocuments);
+router.post('/:id/users/:userId/documents', authorizeRoles('admin'), handleStaffDocUpload, uploadStaffDocument);
+router.get('/:id/users/:userId/documents/:docId/download', authorizeRoles('admin'), downloadStaffDocument);
+router.delete('/:id/users/:userId/documents/:docId', authorizeRoles('admin'), deleteStaffDocument);
 router.get('/:id/waitlist/tariff-types', authorizeRoles('admin', 'encargado'), getWaitlistTariffTypes);
 router.post('/:id/waitlist/tariff-types', authorizeRoles('admin', 'encargado'), createWaitlistTariffType);
 router.delete('/:id/waitlist/tariff-types/:typeId', authorizeRoles('admin', 'encargado'), deleteWaitlistTariffType);
