@@ -22,6 +22,8 @@ const {
   setClientMonthlyMetricsManual,
   resetActiveClientsReport,
   getOccupancyReport,
+  getCapacityReport,
+  refreshCapacityReport,
 } = require('../controllers/aimharderController');
 const { isAuthenticatedUser, authorizeRoles } = require('../middleware/auth');
 
@@ -54,5 +56,7 @@ router.get('/tariff-cancellation-renewals', isAuthenticatedUser, getTariffCancel
 router.get('/tariff-changes', isAuthenticatedUser, getTariffChanges);
 router.put('/monthly-metrics-manual', isAuthenticatedUser, setClientMonthlyMetricsManual);
 router.get('/occupancy-report', isAuthenticatedUser, authorizeRoles('admin'), getOccupancyReport);
+router.get('/capacity-report', isAuthenticatedUser, authorizeRoles('admin'), getCapacityReport);
+router.post('/capacity-report/refresh', isAuthenticatedUser, authorizeRoles('admin'), refreshCapacityReport);
 
 module.exports = router;

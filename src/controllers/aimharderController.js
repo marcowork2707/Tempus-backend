@@ -7,6 +7,7 @@ const {
   getStoredOccupancy,
   refreshAndStoreOccupancy,
   refreshAndStoreOccupancyRange,
+  refreshAndStoreBookingsRange,
   getStoredAimHarderIntegration,
   upsertAimHarderIntegration,
   getClassReportContext,
@@ -23,6 +24,7 @@ const {
   getTariffCancellationRenewals,
   getTariffChangeReport,
 } = require('../services/aimharderService');
+const { buildCapacityReport, getCapacityRange } = require('../services/capacityReportService');
 const UserCenterRole = require('../models/UserCenterRole');
 const User = require('../models/User');
 const ActiveClient = require('../models/ActiveClient');
@@ -995,6 +997,53 @@ exports.getOccupancyReport = async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Error al generar el informe de ocupación.',
+      detail: process.env.NODE_ENV === 'development' ? err.message : undefined,
+    });
+  }
+};
+
+// Refresca las reservas por cliente de las últimas N semanas completas (Informes › Capacidad)
+exports.refreshCapacityReport = async (req, res) => {
+  try {
+    const { centerId } = req.body || {};
+    if (!centerId) {
+      return res.status(400).json({ success: false, message: 'centerId es obligatorio' });
+    }
+    const range = getCapacityRange(req.body?.weeks ?? 4);
+    const result = await refreshAndStoreBookingsRange(range.start, range.end, centerId);
+    res.status(200).json({ success: true, range, ...result });
+  } catch (err) {
+    console.error('[AimHarder Controller] Error refreshCapacityReport:', err.message);
+    res.status(500).json({
+      success: false,
+      message: 'Error al actualizar los datos de capacidad.',
+      detail: process.env.NODE_ENV === 'development' ? err.message : undefined,
+    });
+  }
+};
+
+exports.getCapacityReport = async (req, res) => {
+  try {
+    const { centerId } = req.query;
+    if (!centerId) {
+      return res.status(400).json({ success: false, message: 'centerId es obligatorio' });
+    }
+    const num = (value, fallback) => {
+      const n = Number(value);
+      return value !== undefined && value !== '' && Number.isFinite(n) ? n : fallback;
+    };
+    const report = await buildCapacityReport(centerId, {
+      weeks: num(req.query.weeks, 4),
+      dispersionFactor: num(req.query.dispersionFactor, 0.8),
+      unlimitedClassesPerWeek: num(req.query.unlimitedClassesPerWeek, 6),
+      includeNoCoach: String(req.query.includeNoCoach) === 'true',
+    });
+    res.status(200).json({ success: true, ...report });
+  } catch (err) {
+    console.error('[AimHarder Controller] Error getCapacityReport:', err.message);
+    res.status(500).json({
+      success: false,
+      message: 'Error al generar el informe de capacidad.',
       detail: process.env.NODE_ENV === 'development' ? err.message : undefined,
     });
   }

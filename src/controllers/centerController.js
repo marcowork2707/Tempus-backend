@@ -6407,6 +6407,27 @@ exports.deleteCenterTariffGroup = catchAsyncErrors(async (req, res, next) => {
   res.status(200).json({ success: true, message: 'Group deleted' });
 });
 
+// Valida los campos de capacidad de una tarifa. Devuelve { error } o { values }.
+function parseTariffCapacityFields(body = {}) {
+  const values = {};
+  if (body.classesPerWeek !== undefined) {
+    if (body.classesPerWeek === null || body.classesPerWeek === '') {
+      values.classesPerWeek = null;
+    } else {
+      const n = Number(body.classesPerWeek);
+      if (!Number.isInteger(n) || n < 0) return { error: 'classesPerWeek debe ser un entero >= 0 o null' };
+      values.classesPerWeek = n;
+    }
+  }
+  for (const key of ['unlimited', 'excludeFromCapacity']) {
+    if (body[key] !== undefined) {
+      if (typeof body[key] !== 'boolean') return { error: `${key} debe ser booleano` };
+      values[key] = body[key];
+    }
+  }
+  return { values };
+}
+
 exports.addCenterTariffItem = catchAsyncErrors(async (req, res, next) => {
   const group = await CenterTariffGroup.findOne({ _id: req.params.groupId, center: req.params.id });
   if (!group) return next(new ErrorHandler('Tariff group not found', 404));
@@ -6420,7 +6441,16 @@ exports.addCenterTariffItem = catchAsyncErrors(async (req, res, next) => {
     .map((a) => String(a).trim())
     .filter(Boolean);
 
-  group.items.push({ name, price: price !== null && Number.isFinite(price) ? price : null, aliases, active: true });
+  const capacity = parseTariffCapacityFields(req.body);
+  if (capacity.error) return next(new ErrorHandler(capacity.error, 400));
+
+  group.items.push({
+    name,
+    price: price !== null && Number.isFinite(price) ? price : null,
+    aliases,
+    active: true,
+    ...capacity.values,
+  });
   await group.save();
   res.status(200).json({ success: true, group });
 });
@@ -6447,6 +6477,10 @@ exports.updateCenterTariffItem = catchAsyncErrors(async (req, res, next) => {
       : [];
   }
   if (req.body?.active !== undefined) item.active = Boolean(req.body.active);
+
+  const capacity = parseTariffCapacityFields(req.body);
+  if (capacity.error) return next(new ErrorHandler(capacity.error, 400));
+  Object.assign(item, capacity.values);
 
   await group.save();
   res.status(200).json({ success: true, group });

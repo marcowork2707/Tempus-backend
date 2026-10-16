@@ -21,6 +21,7 @@ const ActiveClient = require('../models/ActiveClient');
 const AimHarderClientMonthlySnapshot = require('../models/AimHarderClientMonthlySnapshot');
 const AttendanceAbsenceSnapshot = require('../models/AttendanceAbsenceSnapshot');
 const CenterOccupancySnapshot = require('../models/CenterOccupancySnapshot');
+const CenterBookingSnapshot = require('../models/CenterBookingSnapshot');
 const ClassReport = require('../models/ClassReport');
 const ClassReportRoster = require('../models/ClassReportRoster');
 
@@ -3166,6 +3167,116 @@ async function refreshAndStoreOccupancyRange(startDateStr, endDateStr, centerId)
   return snapshots;
 }
 
+// Reservas por cliente de un rango de días, en UNA sola sesión de navegador.
+// Guarda CenterBookingSnapshot (solo apuntados reales) y, de paso, la ocupación.
+const MAX_BOOKINGS_RANGE_DAYS = 62;
+
+function bookingSnapshotClassesFromJson(json) {
+  const bookings = Array.isArray(json && json.bookings) ? json.bookings : [];
+  return bookings.map((booking) => {
+    const athletes = [];
+    for (const athlete of Array.isArray(booking.athletes) ? booking.athletes : []) {
+      if (!isBookedAthlete(athlete)) continue;
+      athletes.push({
+        aimharderUserId: athlete.idus != null ? String(athlete.idus) : '',
+        name: decodeBasicHtmlEntities(collapseSpaces(athlete.name || athlete.realName || athlete.nickname)),
+        membership: decodeBasicHtmlEntities(collapseSpaces(athlete.membership)),
+      });
+    }
+    return {
+      className: decodeBasicHtmlEntities(collapseSpaces(booking.className || booking.classNameOrig)),
+      classTime: normalizeClassTime(booking.startTime || booking.time),
+      coachName: decodeBasicHtmlEntities(collapseSpaces(booking.coachName)),
+      capacity: Number(booking.limit) || 0,
+      bookedCount: Number(booking.ocupationr) || 0,
+      athletes,
+    };
+  });
+}
+
+async function refreshAndStoreBookingsRange(startDateStr, endDateStr, centerId) {
+  if (!startDateStr || !endDateStr) {
+    throw new Error('Se requieren startDate y endDate para refrescar las reservas');
+  }
+  const start = new Date(`${startDateStr}T12:00:00`);
+  const end = new Date(`${endDateStr}T12:00:00`);
+  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime()) || start > end) {
+    throw new Error('Rango de fechas inválido para refrescar las reservas');
+  }
+
+  const dates = [];
+  for (let cursor = new Date(start); cursor <= end && dates.length < MAX_BOOKINGS_RANGE_DAYS; cursor = addDays(cursor, 1)) {
+    dates.push(toDateString(cursor));
+  }
+
+  const config = await getCenterAimHarderConfig(centerId);
+  if (!config.username || !config.password) {
+    throw new Error(
+      `Faltan credenciales de AimHarder para ${config.centerName}. Configura ${config.envPrefix}USERNAME y ${config.envPrefix}PASSWORD en el .env`
+    );
+  }
+
+  const browser = await chromium.launch({ headless: true, slowMo: 0 });
+  const failed = [];
+  let days = 0;
+
+  try {
+    const context = await browser.newContext({
+      userAgent:
+        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+    });
+
+    const sessionCache = await getSessionCache(config);
+    if (sessionCache.cookies && sessionCache.expiry && Date.now() < sessionCache.expiry) {
+      await context.addCookies(sessionCache.cookies);
+    }
+
+    const page = await context.newPage();
+    await ensureAuthenticatedSession(page, config);
+    await setSessionCache(config, {
+      cookies: await context.cookies(),
+      expiry: Date.now() + SESSION_TTL_MS,
+    });
+
+    await page.goto(`${config.baseUrl}/schedule?adm`, { waitUntil: 'domcontentloaded', timeout: 45000 });
+    await page.waitForTimeout(1200).catch(() => {});
+    await dismissCookies(page);
+    await dismissAimHarderPromos(page);
+    await page.waitForLoadState('networkidle', { timeout: 20000 }).catch(() => {});
+    await page.waitForSelector('#weekDays, #clasesDiaSel', { timeout: 20000 });
+
+    for (const dateStr of dates) {
+      try {
+        const result = await pedirDiaAApiCoachBookings(page, new Date(`${dateStr}T12:00:00`));
+        if (!result.ok || !result.json) {
+          failed.push({ date: dateStr, error: result.detalle || 'Respuesta vacía de AimHarder' });
+          continue;
+        }
+        await CenterBookingSnapshot.findOneAndUpdate(
+          { center: centerId, date: dateStr },
+          {
+            $set: {
+              center: centerId,
+              date: dateStr,
+              classes: bookingSnapshotClassesFromJson(result.json),
+              refreshedAt: new Date(),
+            },
+          },
+          { upsert: true, new: true }
+        );
+        await storeOccupancy(dateStr, occupancyFromCoachBookings(result.json), centerId);
+        days += 1;
+      } catch (err) {
+        failed.push({ date: dateStr, error: err.message });
+      }
+    }
+  } finally {
+    await browser.close();
+  }
+
+  return { days, failed };
+}
+
 async function syncActiveClients(dateStr = null, centerId) {
   const reportDate = dateStr || toDateString(new Date());
   const config = await getCenterAimHarderConfig(centerId);
@@ -5530,6 +5641,8 @@ module.exports = {
   getStoredOccupancy,
   refreshAndStoreOccupancy,
   refreshAndStoreOccupancyRange,
+  refreshAndStoreBookingsRange,
+  normalizeName,
   syncActiveClients,
   clearSessionCache,
   getStoredAimHarderIntegration,

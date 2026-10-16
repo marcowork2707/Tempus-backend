@@ -21,6 +21,21 @@ const tariffItemSchema = new mongoose.Schema(
       type: Boolean,
       default: true,
     },
+    // Clases por semana que da la tarifa (informe de Capacidad)
+    classesPerWeek: {
+      type: Number,
+      min: 0,
+      default: null,
+    },
+    unlimited: {
+      type: Boolean,
+      default: false,
+    },
+    // Bonos / productos que no son cuota semanal: no entran en la media de capacidad
+    excludeFromCapacity: {
+      type: Boolean,
+      default: false,
+    },
   },
   { _id: true }
 );
