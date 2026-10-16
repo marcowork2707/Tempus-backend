@@ -136,7 +136,10 @@ async function buildCapacityReport(centerId, options = {}) {
 
     const item = tariffLookup.get(normalizeName(membership));
     if (item && !item.excludeFromCapacity) {
-      const perWeek = item.unlimited ? Number(unlimitedClassesPerWeek) : item.classesPerWeek;
+      // Las tarifas se configuran en clases/mes; a semana: x12 meses / 52 semanas.
+      const perWeek = item.unlimited
+        ? Number(unlimitedClassesPerWeek)
+        : (item.classesPerMonth !== null && item.classesPerMonth !== undefined ? (item.classesPerMonth * 12) / 52 : null);
       if (perWeek !== null && perWeek !== undefined && Number.isFinite(perWeek)) {
         tariffSum += perWeek;
         tariffClients += 1;
@@ -153,7 +156,8 @@ async function buildCapacityReport(centerId, options = {}) {
       membership,
       tariffName: item ? item.name : null,
       clients: entry.clients,
-      classesPerWeek: item && item.classesPerWeek !== undefined ? item.classesPerWeek : null,
+      classesPerMonth: item && item.classesPerMonth !== undefined ? item.classesPerMonth : null,
+      classesPerWeek: item && item.classesPerMonth !== null && item.classesPerMonth !== undefined ? round1((item.classesPerMonth * 12) / 52) : null,
       unlimited: Boolean(item && item.unlimited),
       excluded: Boolean(item && item.excludeFromCapacity),
       realAvg: round1(entry.bookings / entry.clients / effectiveWeeks),

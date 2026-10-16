@@ -22,7 +22,9 @@ const tariffItemSchema = new mongoose.Schema(
       default: true,
     },
     // Clases por semana que da la tarifa (informe de Capacidad)
-    classesPerWeek: {
+    // Clases que incluye la tarifa AL MES (así se venden). El informe de
+    // capacidad las convierte a semana (x12/52).
+    classesPerMonth: {
       type: Number,
       min: 0,
       default: null,

@@ -6410,13 +6410,13 @@ exports.deleteCenterTariffGroup = catchAsyncErrors(async (req, res, next) => {
 // Valida los campos de capacidad de una tarifa. Devuelve { error } o { values }.
 function parseTariffCapacityFields(body = {}) {
   const values = {};
-  if (body.classesPerWeek !== undefined) {
-    if (body.classesPerWeek === null || body.classesPerWeek === '') {
-      values.classesPerWeek = null;
+  if (body.classesPerMonth !== undefined) {
+    if (body.classesPerMonth === null || body.classesPerMonth === '') {
+      values.classesPerMonth = null;
     } else {
-      const n = Number(body.classesPerWeek);
-      if (!Number.isInteger(n) || n < 0) return { error: 'classesPerWeek debe ser un entero >= 0 o null' };
-      values.classesPerWeek = n;
+      const n = Number(body.classesPerMonth);
+      if (!Number.isInteger(n) || n < 0) return { error: 'classesPerMonth debe ser un entero >= 0 o null' };
+      values.classesPerMonth = n;
     }
   }
   for (const key of ['unlimited', 'excludeFromCapacity']) {
