@@ -33,6 +33,21 @@ const tariffItemSchema = new mongoose.Schema(
       type: Boolean,
       default: false,
     },
+    // Reparto por bolsas de clase (CrossFit, Open…). Si el centro no tiene bolsas se usan
+    // classesPerMonth/unlimited de arriba como única bolsa implícita.
+    allowances: {
+      type: [
+        new mongoose.Schema(
+          {
+            pools: [{ type: mongoose.Schema.Types.ObjectId, ref: 'CenterClassPool' }],
+            classesPerMonth: { type: Number, min: 0, default: null },
+            unlimited: { type: Boolean, default: false },
+          },
+          { _id: false }
+        ),
+      ],
+      default: [],
+    },
     // Bonos / productos que no son cuota semanal: no entran en la media de capacidad
     excludeFromCapacity: {
       type: Boolean,

@@ -6425,6 +6425,26 @@ function parseTariffCapacityFields(body = {}) {
       values[key] = body[key];
     }
   }
+  if (body.allowances !== undefined) {
+    if (!Array.isArray(body.allowances)) return { error: 'allowances debe ser una lista' };
+    const allowances = [];
+    for (const raw of body.allowances) {
+      const pools = Array.isArray(raw?.pools) ? [...new Set(raw.pools.map(String))] : [];
+      if (pools.length === 0) return { error: 'Cada reparto necesita al menos una bolsa' };
+      if (!pools.every((id) => mongoose.Types.ObjectId.isValid(id))) return { error: 'Bolsa no válida en un reparto' };
+      const unlimited = raw.unlimited === true;
+      let classesPerMonth = null;
+      if (!unlimited) {
+        const n = Number(raw.classesPerMonth);
+        if (raw.classesPerMonth === null || raw.classesPerMonth === '' || raw.classesPerMonth === undefined || !Number.isInteger(n) || n < 0) {
+          return { error: 'Cada reparto necesita clases/mes (entero >= 0) o ilimitada' };
+        }
+        classesPerMonth = n;
+      }
+      allowances.push({ pools, classesPerMonth, unlimited });
+    }
+    values.allowances = allowances;
+  }
   return { values };
 }
 
