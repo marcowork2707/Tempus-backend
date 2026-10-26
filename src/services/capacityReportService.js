@@ -42,6 +42,63 @@ function mostFrequent(counter) {
 
 const IMPLICIT_POOL_ID = 'all';
 
+// Franjas de demanda por hora de inicio (HH:MM)
+const BANDS = [
+  { key: 'manana', label: 'Mañana (hasta 12:00)' },
+  { key: 'mediodia', label: 'Mediodía (12:00–16:00)' },
+  { key: 'tarde', label: 'Tarde (desde 16:00)' },
+];
+
+function bandKeyOf(classTime) {
+  const hour = parseInt(String(classTime || '').split(':')[0], 10);
+  if (!Number.isFinite(hour) || hour < 12) return 'manana';
+  if (hour < 16) return 'mediodia';
+  return 'tarde';
+}
+
+const newBandAcc = () => new Map(BANDS.map((b) => [b.key, { capacity: 0, booked: 0, free: 0 }]));
+
+// Margen ponderado por demanda: los clientes nuevos reparten sus clases como la demanda actual
+// y el margen se agota en la franja más llena. `acc` = Map(bandKey → { capacity, booked, free }).
+function buildBandHeadroom(acc, { weeks, realAvg, dispersion, activeBookers }) {
+  const totalBooked = [...acc.values()].reduce((s, b) => s + b.booked, 0);
+  const rows = BANDS.map(({ key, label }) => {
+    const b = acc.get(key);
+    const demandShare = totalBooked > 0 ? b.booked / totalBooked : 0;
+    const freeSlotsPerWeek = b.free / weeks;
+    const fitsClients = realAvg && demandShare > 0 ? freeSlotsPerWeek / (realAvg * demandShare) : null;
+    const fitsClientsRealistic = fitsClients !== null ? fitsClients * dispersion : null;
+    return {
+      key,
+      label,
+      capacityPerWeek: round1(b.capacity / weeks),
+      bookedPerWeek: round1(b.booked / weeks),
+      freeSlotsPerWeek: round1(freeSlotsPerWeek),
+      occupancyPct: round1(b.capacity > 0 ? (b.booked / b.capacity) * 100 : 0),
+      demandShare: Math.round(demandShare * 1000) / 1000,
+      demandSharePct: round1(demandShare * 100),
+      fitsClients: round1(fitsClients),
+      fitsClientsRealistic: round1(fitsClientsRealistic),
+      _raw: fitsClientsRealistic,
+    };
+  });
+  let limiting = null;
+  for (const r of rows) {
+    if (r._raw !== null && (!limiting || r._raw < limiting._raw)) limiting = r;
+  }
+  const headroom = limiting ? limiting._raw : null;
+  const capacity = headroom !== null ? activeBookers + headroom : null;
+  return {
+    bands: rows.map(({ _raw, ...r }) => r),
+    effective: {
+      headroom: round1(headroom),
+      limitingBand: limiting ? limiting.label : null,
+      capacity: round1(capacity),
+      loadPct: capacity ? round1((activeBookers / capacity) * 100) : null,
+    },
+  };
+}
+
 async function buildCapacityReport(centerId, options = {}) {
   const {
     weeks: rawWeeks = 4,
@@ -105,8 +162,10 @@ async function buildCapacityReport(centerId, options = {}) {
       clients: new Map(), // clientKey → reservas en la bolsa
       slotMap: new Map(),
       weekdayMap: new Map(),
+      bands: newBandAcc(),
     });
   }
+  const totalBands = newBandAcc();
   const ignored = new Map(); // className → count
   const clientMap = new Map(); // key → { bookings, memberships, byPool: Map }
   let totalCapacity = 0;
@@ -130,6 +189,14 @@ async function buildCapacityReport(centerId, options = {}) {
       totalClasses += 1;
       st.capacity += capacity;
       st.classes += 1;
+
+      const bandKey = bandKeyOf(c.classTime);
+      for (const acc of [st.bands, totalBands]) {
+        const band = acc.get(bandKey);
+        band.capacity += capacity;
+        band.booked += booked;
+        band.free += Math.max(0, capacity - booked); // una clase sobrereservada no resta huecos
+      }
 
       const slot = st.slotMap.get(c.classTime) || { capacity: 0, booked: 0 };
       slot.capacity += capacity;
@@ -282,6 +349,13 @@ async function buildCapacityReport(centerId, options = {}) {
         };
       });
 
+    const bandHeadroom = buildBandHeadroom(st.bands, {
+      weeks: effectiveWeeks,
+      realAvg: poolRealAvg,
+      dispersion,
+      activeBookers: poolActive,
+    });
+
     return {
       id: pool.id,
       name: pool.name,
@@ -302,6 +376,8 @@ async function buildCapacityReport(centerId, options = {}) {
       headroomClients: realisticByReal !== null ? round1(realisticByReal - poolActive) : null,
       currentLoadPctByTariff: realisticByTariff ? round1((poolActive / realisticByTariff) * 100) : null,
       headroomClientsByTariff: realisticByTariff !== null ? round1(realisticByTariff - poolActive) : null,
+      bands: bandHeadroom.bands,
+      effective: bandHeadroom.effective,
       bySlot,
       byWeekday,
     };
@@ -392,6 +468,13 @@ async function buildCapacityReport(centerId, options = {}) {
   const bySlot = mergeRows('bySlot', 'classTime').sort((a, b) => a.classTime.localeCompare(b.classTime));
   const byWeekday = mergeRows('byWeekday', 'weekday').sort((a, b) => a.weekday - b.weekday);
 
+  const overallBandHeadroom = buildBandHeadroom(totalBands, {
+    weeks: effectiveWeeks,
+    realAvg,
+    dispersion,
+    activeBookers,
+  });
+
   return {
     range,
     daysWithData,
@@ -422,6 +505,8 @@ async function buildCapacityReport(centerId, options = {}) {
       currentLoadPctByTariff: realisticByTariff ? round1((activeBookers / realisticByTariff) * 100) : null,
       headroomClientsByTariff: realisticByTariff !== null ? round1(realisticByTariff - activeBookers) : null,
     },
+    bands: overallBandHeadroom.bands,
+    effective: overallBandHeadroom.effective,
     bySlot,
     byWeekday,
   };
