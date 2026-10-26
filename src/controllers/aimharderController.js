@@ -855,10 +855,18 @@ exports.getOccupancyReport = async (req, res) => {
       .replace(/\s+/g, ' ')
       .trim();
 
-    const [snapshots, absenceSnaps] = await Promise.all([
+    const [allSnapshots, absenceSnaps] = await Promise.all([
       getStoredOccupancy(startDate, endDate, centerId),
       getAbsenceSnapshotsRange(startDate, endDate, centerId),
     ]);
+
+    // Un día sin ninguna reserva es un día cerrado (domingos, festivos) o sin
+    // datos reales: no es un 0 % de ocupación. Antes entraba en la media diaria,
+    // en el "peor día" y en la gráfica como 0 % y hundía el mes entero.
+    const snapshots = allSnapshots.filter((snap) =>
+      (snap.classes || []).some((c) => Number(c.bookedCount || 0) > 0)
+    );
+    const closedDays = allSnapshots.length - snapshots.length;
 
     const absenceByDate = new Map(absenceSnaps.map((s) => [s.date, s.absences.length]));
 
@@ -979,6 +987,7 @@ exports.getOccupancyReport = async (req, res) => {
 
     const summary = {
       totalDays: snapshots.length,
+      closedDays,
       totalClasses: allValid.length,
       avgOccupancy: Math.round(avg(allValid.map((c) => c.occupancyRate))),
       avgAttendance: Math.round(avg(allValid.map((c) => c.attendanceRate))),

@@ -30,6 +30,40 @@ exports.createClassPool = catchAsyncErrors(async (req, res, next) => {
   res.status(200).json({ success: true, pool });
 });
 
+// Bolsas estándar de un box de CrossFit. Idempotente: solo crea las que falten
+// (por nombre). "CrossFit" es la bolsa por defecto: recoge todo lo que no sea
+// Open, Iniciación o Funcional (Halterofilia, T-Hybrid, Run & Sweat...).
+const CROSSFIT_PRESET = [
+  { name: 'Open', patterns: ['open'], isDefault: false, order: 0 },
+  { name: 'Iniciación', patterns: ['iniciaci'], isDefault: false, order: 1 },
+  { name: 'Funcional', patterns: ['funcional'], isDefault: false, order: 2 },
+  { name: 'CrossFit', patterns: [], isDefault: true, order: 3 },
+];
+
+exports.createClassPoolPreset = catchAsyncErrors(async (req, res, next) => {
+  const preset = String(req.body?.preset || 'crossfit');
+  if (preset !== 'crossfit') return next(new ErrorHandler('Preset desconocido', 400));
+
+  const existing = await CenterClassPool.find({ center: req.params.id });
+  const existingNames = new Set(existing.map((p) => p.name.trim().toLowerCase()));
+  const hasDefault = existing.some((p) => p.isDefault);
+  const created = [];
+  for (const def of CROSSFIT_PRESET) {
+    if (existingNames.has(def.name.toLowerCase())) continue;
+    const pool = await CenterClassPool.create({
+      center: req.params.id,
+      name: def.name,
+      patterns: def.patterns,
+      // No se pisa una bolsa por defecto que ya exista
+      isDefault: def.isDefault && !hasDefault,
+      order: def.order,
+    });
+    created.push(pool);
+  }
+  const pools = await CenterClassPool.find({ center: req.params.id }).sort({ order: 1, createdAt: 1 });
+  res.status(200).json({ success: true, created: created.length, pools });
+});
+
 exports.updateClassPool = catchAsyncErrors(async (req, res, next) => {
   const pool = await CenterClassPool.findOne({ _id: req.params.poolId, center: req.params.id });
   if (!pool) return next(new ErrorHandler('Class pool not found', 404));

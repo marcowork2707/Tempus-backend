@@ -270,9 +270,10 @@ router.put('/:id/tariff-groups/:groupId/items/:itemId', authorizeRoles('admin'),
 router.delete('/:id/tariff-groups/:groupId/items/:itemId', authorizeRoles('admin'), deleteCenterTariffItem);
 
 // ─── Bolsas de clase (capacidad) ──────────────────────────────────────────────
-const { getClassPools, createClassPool, updateClassPool, deleteClassPool } = require('../controllers/classPoolController');
+const { getClassPools, createClassPool, createClassPoolPreset, updateClassPool, deleteClassPool } = require('../controllers/classPoolController');
 router.get('/:id/class-pools', authorizeRoles('admin'), getClassPools);
 router.post('/:id/class-pools', authorizeRoles('admin'), createClassPool);
+router.post('/:id/class-pools/preset', authorizeRoles('admin'), createClassPoolPreset);
 router.put('/:id/class-pools/:poolId', authorizeRoles('admin'), updateClassPool);
 router.delete('/:id/class-pools/:poolId', authorizeRoles('admin'), deleteClassPool);
 
