@@ -110,6 +110,51 @@ function buildBandHeadroom(acc, { weeks, realAvg, dispersion, activeBookers }) {
   };
 }
 
+// Plan de clientes nuevos por hora: los H clientes que caben reservan como los actuales
+// (f clases/semana, repartidas según el peso de cada hora en las reservas) y se ve qué horas se llenan.
+// `bySlot` = filas por hora (ya sin días cerrados); `effective.headroom` = margen real de clientes.
+function buildNewClientsPlan(bySlot, effective, f) {
+  const H = effective && effective.headroom > 0 ? Math.floor(effective.headroom) : 0;
+  const avg = Number.isFinite(f) && f > 0 ? f : 0;
+  const totalBooked = bySlot.reduce((s, r) => s + (r.avgBookedPerWeek || 0), 0);
+  const rows = bySlot.map((r) => {
+    const capacityPerWeek = r.avgCapacityPerWeek || 0;
+    const bookedPerWeek = r.avgBookedPerWeek || 0;
+    const freeSlotsPerWeek = Math.max(0, capacityPerWeek - bookedPerWeek);
+    const demandShare = totalBooked > 0 ? bookedPerWeek / totalBooked : 0;
+    const newBookingsPerWeek = Math.min(freeSlotsPerWeek, H * avg * demandShare);
+    const resultingBookedPerWeek = bookedPerWeek + newBookingsPerWeek;
+    const resultingOccupancyPct = capacityPerWeek > 0 ? (resultingBookedPerWeek / capacityPerWeek) * 100 : 0;
+    const status = resultingOccupancyPct >= 95 ? 'llena' : resultingOccupancyPct >= 85 ? 'casi' : 'sitio';
+    const absorbClients = demandShare > 0 && avg > 0 ? freeSlotsPerWeek / (avg * demandShare) : null;
+    return {
+      classTime: r.classTime,
+      classNames: r.classNames || [],
+      capacityPerWeek: round1(capacityPerWeek),
+      bookedPerWeek: round1(bookedPerWeek),
+      occupancyPct: round1(capacityPerWeek > 0 ? (bookedPerWeek / capacityPerWeek) * 100 : 0),
+      freeSlotsPerWeek: round1(freeSlotsPerWeek),
+      demandShare: Math.round(demandShare * 1000) / 1000,
+      newBookingsPerWeek: round1(newBookingsPerWeek),
+      resultingBookedPerWeek: round1(resultingBookedPerWeek),
+      resultingOccupancyPct: round1(resultingOccupancyPct),
+      status,
+      absorbClients: round1(absorbClients),
+      _freeAfter: Math.max(0, capacityPerWeek - resultingBookedPerWeek),
+    };
+  }).sort((a, b) => String(a.classTime).localeCompare(String(b.classTime)));
+  const roomFreeSlotsPerWeek = rows.filter((r) => r.status === 'sitio').reduce((s, r) => s + r._freeAfter, 0);
+  return {
+    newClients: H,
+    avgClassesPerWeek: round1(avg || null),
+    rows: rows.map(({ _freeAfter, ...r }) => r),
+    fullHours: rows.filter((r) => r.status !== 'sitio').map((r) => r.classTime),
+    roomHours: rows.filter((r) => r.status === 'sitio').map((r) => r.classTime),
+    roomFreeSlotsPerWeek: round1(roomFreeSlotsPerWeek),
+    extraClientsIfDirected: avg > 0 ? Math.floor(roomFreeSlotsPerWeek / avg) : 0,
+  };
+}
+
 async function buildCapacityReport(centerId, options = {}) {
   const {
     weeks: rawWeeks = 4,
@@ -465,6 +510,7 @@ async function buildCapacityReport(centerId, options = {}) {
       summary: bandHeadroom.summary,
       bySlot,
       byWeekday,
+      newClientsPlan: buildNewClientsPlan(bySlot, bandHeadroom.effective, poolRealAvg),
     };
   });
 
@@ -602,6 +648,7 @@ async function buildCapacityReport(centerId, options = {}) {
     closedDates,
     bySlot,
     byWeekday,
+    newClientsPlan: buildNewClientsPlan(bySlot, overallBandHeadroom.effective, realAvg),
   };
 }
 
