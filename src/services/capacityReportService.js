@@ -46,17 +46,19 @@ const IMPLICIT_POOL_ID = 'all';
 const BANDS = [
   { key: 'manana', label: 'Mañana (hasta 12:00)' },
   { key: 'mediodia', label: 'Mediodía (12:00–16:00)' },
-  { key: 'tarde', label: 'Tarde (desde 16:00)' },
+  { key: 'tarde', label: 'Tarde (16:00–18:00)' },
+  { key: 'noche', label: 'Tarde-noche (desde 18:00)' },
 ];
 
 function bandKeyOf(classTime) {
   const hour = parseInt(String(classTime || '').split(':')[0], 10);
   if (!Number.isFinite(hour) || hour < 12) return 'manana';
   if (hour < 16) return 'mediodia';
-  return 'tarde';
+  if (hour < 18) return 'tarde';
+  return 'noche';
 }
 
-const newBandAcc = () => new Map(BANDS.map((b) => [b.key, { capacity: 0, booked: 0, free: 0 }]));
+const newBandAcc = () => new Map(BANDS.map((b) => [b.key, { capacity: 0, booked: 0, free: 0, classNames: new Set() }]));
 
 // Margen ponderado por demanda: los clientes nuevos reparten sus clases como la demanda actual
 // y el margen se agota en la franja más llena. `acc` = Map(bandKey → { capacity, booked, free }).
@@ -71,6 +73,7 @@ function buildBandHeadroom(acc, { weeks, realAvg, dispersion, activeBookers }) {
     return {
       key,
       label,
+      classNames: [...b.classNames].sort((x, y) => x.localeCompare(y, 'es')),
       capacityPerWeek: round1(b.capacity / weeks),
       bookedPerWeek: round1(b.booked / weeks),
       freeSlotsPerWeek: round1(freeSlotsPerWeek),
@@ -95,6 +98,14 @@ function buildBandHeadroom(acc, { weeks, realAvg, dispersion, activeBookers }) {
       limitingBand: limiting ? limiting.label : null,
       capacity: round1(capacity),
       loadPct: capacity ? round1((activeBookers / capacity) * 100) : null,
+    },
+    summary: {
+      currentClients: activeBookers,
+      capacityClients: round1(capacity),
+      extraClients: round1(headroom),
+      limitingBand: limiting ? limiting.label : null,
+      limitingBandFreeSlotsPerWeek: limiting ? limiting.freeSlotsPerWeek : null,
+      limitingBandOccupancyPct: limiting ? limiting.occupancyPct : null,
     },
   };
 }
@@ -172,7 +183,22 @@ async function buildCapacityReport(centerId, options = {}) {
   let totalClasses = 0;
   let totalBookings = 0;
 
+  // Día cerrado: tras el filtro de clases no suma ninguna reserva (p. ej. clases publicadas en fin de semana
+  // sin nadie apuntado). No cuenta en ninguna suma, pero sí en el calendario (effectiveWeeks).
+  const closedDates = [];
+  const openSnapshots = [];
   for (const snap of snapshots) {
+    let dayBookings = 0;
+    for (const c of snap.classes || []) {
+      if (!hasPools && !includeLegacyClass(c)) continue;
+      if (!poolForClass(c.className)) continue;
+      dayBookings += Number(c.bookedCount) || (c.athletes || []).length || 0;
+    }
+    if (dayBookings === 0) closedDates.push(snap.date);
+    else openSnapshots.push(snap);
+  }
+
+  for (const snap of openSnapshots) {
     const wd = weekdayIndex(snap.date);
     for (const c of snap.classes || []) {
       if (!hasPools && !includeLegacyClass(c)) continue;
@@ -190,15 +216,18 @@ async function buildCapacityReport(centerId, options = {}) {
       st.capacity += capacity;
       st.classes += 1;
 
+      const className = String(c.className || '').trim();
       const bandKey = bandKeyOf(c.classTime);
       for (const acc of [st.bands, totalBands]) {
         const band = acc.get(bandKey);
+        if (className) band.classNames.add(className);
         band.capacity += capacity;
         band.booked += booked;
         band.free += Math.max(0, capacity - booked); // una clase sobrereservada no resta huecos
       }
 
-      const slot = st.slotMap.get(c.classTime) || { capacity: 0, booked: 0 };
+      const slot = st.slotMap.get(c.classTime) || { capacity: 0, booked: 0, classNames: new Set() };
+      if (className) slot.classNames.add(className);
       slot.capacity += capacity;
       slot.booked += booked;
       st.slotMap.set(c.classTime, slot);
@@ -240,6 +269,60 @@ async function buildCapacityReport(centerId, options = {}) {
       }
     }
   }
+
+  // Tarifa de un cliente = la membresía más frecuente en sus reservas
+  const membershipOfClient = (client) => mostFrequent(client.memberships);
+  const membershipNames = new Set([...clientMap.values()].map(membershipOfClient));
+
+  const parseClassesPerMonth = (name) => {
+    const m = String(name || '').match(/(\d+)\s*clases?\s*(?:\/|al|por)?\s*mes/i);
+    return m ? Number(m[1]) : null;
+  };
+  const baseOfName = (name) => normalizeName(String(name || '').split(' - ')[0]);
+  const PERIOD_PREFIX = /^(trimestral|semestral|anual)\s+/;
+  const inferredItem = (name, classesPerMonth, excludeFromCapacity = false) => ({
+    name, classesPerMonth, unlimited: false, excludeFromCapacity, aliases: [],
+  });
+
+  // Devuelve { source: 'configured' | 'inferred' | 'unmapped', item, inferredClassesPerMonth }.
+  // Las tarifas deducidas se comportan como una única asignación sobre todas las bolsas.
+  const resolveCache = new Map();
+  const resolveMembership = (membership) => {
+    if (resolveCache.has(membership)) return resolveCache.get(membership);
+    const resolve = () => {
+      const norm = normalizeName(membership || '');
+      const configured = tariffLookup.get(norm);
+      if (configured) return { source: 'configured', item: configured, inferredClassesPerMonth: null };
+      if (!norm || norm === '(sin tarifa)') return { source: 'unmapped', item: null, inferredClassesPerMonth: null };
+
+      const own = parseClassesPerMonth(membership);
+      if (own !== null) return { source: 'inferred', item: inferredItem(membership, own), inferredClassesPerMonth: own };
+
+      if (/bono/i.test(membership)) {
+        return { source: 'inferred', item: inferredItem(membership, null, true), inferredClassesPerMonth: null };
+      }
+
+      const stripped = norm.replace(PERIOD_PREFIX, '');
+      if (stripped !== norm && stripped) {
+        const viaConfigured = tariffLookup.get(stripped);
+        if (viaConfigured) {
+          const cpm = viaConfigured.classesPerMonth ?? null;
+          return { source: 'inferred', item: viaConfigured, inferredClassesPerMonth: cpm };
+        }
+        for (const other of membershipNames) {
+          if (other === membership) continue;
+          const n = parseClassesPerMonth(other);
+          if (n !== null && baseOfName(other) === stripped) {
+            return { source: 'inferred', item: inferredItem(membership, n), inferredClassesPerMonth: n };
+          }
+        }
+      }
+      return { source: 'unmapped', item: null, inferredClassesPerMonth: null };
+    };
+    const out = resolve();
+    resolveCache.set(membership, out);
+    return out;
+  };
   const poolNameById = new Map(pools.map((p) => [p.id, p.name]));
   const allPoolIds = pools.map((p) => p.id);
 
@@ -284,7 +367,7 @@ async function buildCapacityReport(centerId, options = {}) {
     }
     byMembership.set(membership, entry);
 
-    const item = tariffLookup.get(normalizeName(membership));
+    const { item } = resolveMembership(membership);
     if (!item || item.excludeFromCapacity) continue;
     const allowances = effectiveAllowances(item);
     if (allowances.length === 0) continue;
@@ -328,6 +411,7 @@ async function buildCapacityReport(centerId, options = {}) {
       .sort((a, b) => a[0].localeCompare(b[0]))
       .map(([classTime, sl]) => ({
         classTime,
+        classNames: [...sl.classNames].sort((x, y) => x.localeCompare(y, 'es')),
         avgCapacityPerWeek: round1(sl.capacity / effectiveWeeks),
         avgBookedPerWeek: round1(sl.booked / effectiveWeeks),
         occupancyPct: round1(pct(sl.booked, sl.capacity)),
@@ -378,6 +462,7 @@ async function buildCapacityReport(centerId, options = {}) {
       headroomClientsByTariff: realisticByTariff !== null ? round1(realisticByTariff - poolActive) : null,
       bands: bandHeadroom.bands,
       effective: bandHeadroom.effective,
+      summary: bandHeadroom.summary,
       bySlot,
       byWeekday,
     };
@@ -397,11 +482,13 @@ async function buildCapacityReport(centerId, options = {}) {
   const tariffs = [];
   const unmappedMemberships = [];
   for (const [membership, entry] of byMembership) {
-    const item = tariffLookup.get(normalizeName(membership));
+    const { source, item, inferredClassesPerMonth } = resolveMembership(membership);
     const realAvgMembership = round1(entry.bookings / entry.clients / effectiveWeeks);
     byTariff.push({
       membership,
-      tariffName: item ? item.name : null,
+      tariffName: item && source === 'configured' ? item.name : null,
+      source,
+      inferredClassesPerMonth,
       clients: entry.clients,
       classesPerMonth: item && item.classesPerMonth !== undefined ? item.classesPerMonth : null,
       classesPerWeek: item && item.classesPerMonth !== null && item.classesPerMonth !== undefined ? round1((item.classesPerMonth * 12) / 52) : null,
@@ -417,7 +504,9 @@ async function buildCapacityReport(centerId, options = {}) {
     }
     tariffs.push({
       membership,
-      tariffName: item ? item.name : null,
+      tariffName: item && source === 'configured' ? item.name : null,
+      source,
+      inferredClassesPerMonth,
       clients: entry.clients,
       excluded: Boolean(item && item.excludeFromCapacity),
       allowances: item
@@ -429,7 +518,7 @@ async function buildCapacityReport(centerId, options = {}) {
         : [],
       realByPool,
     });
-    if (!item) unmappedMemberships.push({ membership, clients: entry.clients });
+    if (source === 'unmapped') unmappedMemberships.push({ membership, clients: entry.clients });
   }
   byTariff.sort((a, b) => b.clients - a.clients);
   tariffs.sort((a, b) => b.clients - a.clients);
@@ -447,6 +536,7 @@ async function buildCapacityReport(centerId, options = {}) {
       for (const r of b[key]) {
         const k = r[label];
         const cur = merged.get(k) || { ...r, avgCapacityPerWeek: 0, avgBookedPerWeek: 0 };
+        if (r.classNames) cur.classNames = [...new Set([...(cur.classNames || []), ...r.classNames])].sort((x, y) => x.localeCompare(y, 'es'));
         if (merged.has(k)) {
           cur.avgCapacityPerWeek += r.avgCapacityPerWeek || 0;
           cur.avgBookedPerWeek += r.avgBookedPerWeek || 0;
@@ -507,6 +597,9 @@ async function buildCapacityReport(centerId, options = {}) {
     },
     bands: overallBandHeadroom.bands,
     effective: overallBandHeadroom.effective,
+    summary: overallBandHeadroom.summary,
+    closedDays: closedDates.length,
+    closedDates,
     bySlot,
     byWeekday,
   };
