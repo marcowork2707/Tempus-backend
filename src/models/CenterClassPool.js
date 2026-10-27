@@ -10,6 +10,9 @@ const centerClassPoolSchema = new mongoose.Schema(
     // Recoge las clases que no encajan en ninguna otra bolsa
     isDefault: { type: Boolean, default: false },
     order: { type: Number, default: 0 },
+    // Complemento de las tarifas (p. ej. Open): no limita la capacidad ni cuenta en los totales del informe.
+    // Sin definir se deduce del nombre (ver isComplementaryPool en capacityReportService).
+    complementary: { type: Boolean, default: undefined },
   },
   { timestamps: true }
 );

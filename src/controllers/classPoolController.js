@@ -23,6 +23,7 @@ exports.createClassPool = catchAsyncErrors(async (req, res, next) => {
     name,
     patterns: parsePatterns(req.body?.patterns),
     isDefault,
+    ...(req.body?.complementary !== undefined ? { complementary: Boolean(req.body.complementary) } : {}),
     order: req.body?.order !== undefined && Number.isFinite(Number(req.body.order)) ? Number(req.body.order) : count,
   });
   // Solo una bolsa por defecto por centro
@@ -34,7 +35,7 @@ exports.createClassPool = catchAsyncErrors(async (req, res, next) => {
 // (por nombre). "CrossFit" es la bolsa por defecto: recoge todo lo que no sea
 // Open, Iniciación o Funcional (Halterofilia, T-Hybrid, Run & Sweat...).
 const CROSSFIT_PRESET = [
-  { name: 'Open', patterns: ['open'], isDefault: false, order: 0 },
+  { name: 'Open', patterns: ['open'], isDefault: false, complementary: true, order: 0 },
   { name: 'Iniciación', patterns: ['iniciaci'], isDefault: false, order: 1 },
   { name: 'Funcional', patterns: ['funcional'], isDefault: false, order: 2 },
   { name: 'CrossFit', patterns: [], isDefault: true, order: 3 },
@@ -56,6 +57,7 @@ exports.createClassPoolPreset = catchAsyncErrors(async (req, res, next) => {
       patterns: def.patterns,
       // No se pisa una bolsa por defecto que ya exista
       isDefault: def.isDefault && !hasDefault,
+      ...(def.complementary ? { complementary: true } : {}),
       order: def.order,
     });
     created.push(pool);
@@ -108,7 +110,7 @@ exports.createTariffPreset = catchAsyncErrors(async (req, res, next) => {
   const missingPools = CROSSFIT_PRESET.filter((def) => !poolByName().has(def.name.toLowerCase()));
   for (const def of missingPools) {
     const hasDefault = pools.some((p) => p.isDefault);
-    pools.push(await CenterClassPool.create({ center: req.params.id, name: def.name, patterns: def.patterns, isDefault: def.isDefault && !hasDefault, order: def.order }));
+    pools.push(await CenterClassPool.create({ center: req.params.id, name: def.name, patterns: def.patterns, isDefault: def.isDefault && !hasDefault, ...(def.complementary ? { complementary: true } : {}), order: def.order }));
   }
   const byName = poolByName();
 
@@ -156,6 +158,7 @@ exports.updateClassPool = catchAsyncErrors(async (req, res, next) => {
   if (req.body?.patterns !== undefined) pool.patterns = parsePatterns(req.body.patterns);
   if (req.body?.order !== undefined && Number.isFinite(Number(req.body.order))) pool.order = Number(req.body.order);
   if (req.body?.isDefault !== undefined) pool.isDefault = Boolean(req.body.isDefault);
+  if (req.body?.complementary !== undefined) pool.complementary = Boolean(req.body.complementary);
   await pool.save();
   if (pool.isDefault) await CenterClassPool.updateMany({ center: req.params.id, _id: { $ne: pool._id } }, { isDefault: false });
   res.status(200).json({ success: true, pool });

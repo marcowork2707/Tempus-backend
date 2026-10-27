@@ -42,6 +42,13 @@ function mostFrequent(counter) {
 
 const IMPLICIT_POOL_ID = 'all';
 
+// Bolsa complementaria (p. ej. Open): complemento de las tarifas que nunca es la razón de que un box se llene.
+// Si el admin no lo ha fijado, se deduce del nombre ("Open").
+function isComplementaryPool(pool) {
+  if (typeof pool.complementary === 'boolean') return pool.complementary;
+  return /\bopen\b/i.test(normalizeName(pool.name || ''));
+}
+
 // Franjas de demanda por hora de inicio (HH:MM)
 const BANDS = [
   { key: 'manana', label: 'Mañana (hasta 12:00)' },
@@ -185,10 +192,11 @@ async function buildCapacityReport(centerId, options = {}) {
         id: String(p._id),
         name: p.name,
         isDefault: Boolean(p.isDefault),
+        complementary: isComplementaryPool(p),
         patterns: p.patterns || [],
         normPatterns: (p.patterns || []).map((x) => normalizeName(x)).filter(Boolean),
       }))
-    : [{ id: IMPLICIT_POOL_ID, name: 'Todas las clases', isDefault: true, patterns: [], normPatterns: [] }];
+    : [{ id: IMPLICIT_POOL_ID, name: 'Todas las clases', isDefault: true, complementary: false, patterns: [], normPatterns: [] }];
   const defaultPool = pools.find((p) => p.isDefault) || null;
 
   // Sin bolsas: se excluyen clases sin coach y "Open". Con bolsas Open es una bolsa más.
@@ -236,7 +244,8 @@ async function buildCapacityReport(centerId, options = {}) {
     let dayBookings = 0;
     for (const c of snap.classes || []) {
       if (!hasPools && !includeLegacyClass(c)) continue;
-      if (!poolForClass(c.className)) continue;
+      const pool = poolForClass(c.className);
+      if (!pool || pool.complementary) continue; // las bolsas complementarias no cuentan para abrir/cerrar el día
       dayBookings += Number(c.bookedCount) || (c.athletes || []).length || 0;
     }
     if (dayBookings === 0) closedDates.push(snap.date);
@@ -256,14 +265,17 @@ async function buildCapacityReport(centerId, options = {}) {
       const st = state.get(pool.id);
       const capacity = Number(c.capacity) || 0;
       const booked = Number(c.bookedCount) || 0;
-      totalCapacity += capacity;
-      totalClasses += 1;
       st.capacity += capacity;
       st.classes += 1;
+      const inScope = !pool.complementary; // los totales del centro solo suman bolsas no complementarias
+      if (inScope) {
+        totalCapacity += capacity;
+        totalClasses += 1;
+      }
 
       const className = String(c.className || '').trim();
       const bandKey = bandKeyOf(c.classTime);
-      for (const acc of [st.bands, totalBands]) {
+      for (const acc of inScope ? [st.bands, totalBands] : [st.bands]) {
         const band = acc.get(bandKey);
         if (className) band.classNames.add(className);
         band.capacity += capacity;
@@ -286,22 +298,25 @@ async function buildCapacityReport(centerId, options = {}) {
       for (const a of c.athletes || []) {
         const key = a.aimharderUserId || normalizeName(a.name || '');
         if (!key) continue;
-        const client = clientMap.get(key) || { bookings: 0, memberships: new Map(), byPool: new Map() };
+        const client = clientMap.get(key) || { bookings: 0, scopeBookings: 0, memberships: new Map(), byPool: new Map() };
         client.bookings += 1;
+        if (inScope) client.scopeBookings += 1;
         const m = a.membership || '';
         client.memberships.set(m, (client.memberships.get(m) || 0) + 1);
         client.byPool.set(pool.id, (client.byPool.get(pool.id) || 0) + 1);
         clientMap.set(key, client);
         st.clients.set(key, (st.clients.get(key) || 0) + 1);
         st.bookings += 1;
-        totalBookings += 1;
+        if (inScope) totalBookings += 1;
       }
     }
   }
 
   const weeklySlots = totalCapacity / effectiveWeeks;
   const weeklyClasses = totalClasses / effectiveWeeks;
-  const activeBookers = clientMap.size;
+  // Cliente activo del centro = al menos una reserva en una bolsa no complementaria
+  const scopeClients = [...clientMap.values()].filter((c) => c.scopeBookings > 0);
+  const activeBookers = scopeClients.length;
   const realAvg = activeBookers > 0 ? totalBookings / activeBookers / effectiveWeeks : null;
 
   // Tarifas: nombre normalizado o alias → item
@@ -370,6 +385,7 @@ async function buildCapacityReport(centerId, options = {}) {
   };
   const poolNameById = new Map(pools.map((p) => [p.id, p.name]));
   const allPoolIds = pools.map((p) => p.id);
+  const poolComplementaryById = new Map(pools.map((p) => [p.id, p.complementary]));
 
   // Repartos efectivos de una tarifa: [{ poolIds, weekly, classesPerMonth, unlimited }]
   // Las clases/mes se pasan a semana: x12 meses / 52 semanas.
@@ -402,8 +418,9 @@ async function buildCapacityReport(centerId, options = {}) {
   for (const client of clientMap.values()) {
     const membership = mostFrequent(client.memberships);
     const entry = byMembership.get(membership) || { clients: 0, bookings: 0, byPool: new Map() };
-    entry.clients += 1;
-    entry.bookings += client.bookings;
+    const inScopeClient = client.scopeBookings > 0;
+    if (inScopeClient) entry.clients += 1;
+    entry.bookings += client.scopeBookings;
     for (const [poolId, n] of client.byPool) {
       const pe = entry.byPool.get(poolId) || { clients: 0, bookings: 0 };
       pe.clients += 1;
@@ -417,10 +434,8 @@ async function buildCapacityReport(centerId, options = {}) {
     const allowances = effectiveAllowances(item);
     if (allowances.length === 0) continue;
 
-    tariffClients += 1;
     const contribution = new Map(); // poolId → clases/semana de este cliente en la bolsa
     for (const a of allowances) {
-      tariffSum += a.weekly;
       // Reparto entre bolsas proporcional a las reservas reales del cliente; sin reservas, a partes iguales.
       const weights = a.poolIds.map((id) => client.byPool.get(id) || 0);
       const total = weights.reduce((x, y) => x + y, 0);
@@ -433,6 +448,13 @@ async function buildCapacityReport(centerId, options = {}) {
       const t = tariffSumByPool.get(id);
       t.sum += v;
       t.clients += 1;
+    }
+    // Tarifa media del centro: solo clientes activos y solo la parte repartida a bolsas no complementarias
+    if (inScopeClient) {
+      tariffClients += 1;
+      for (const [id, v] of contribution) {
+        if (!poolComplementaryById.get(id)) tariffSum += v;
+      }
     }
   }
   const tariffAvg = tariffClients > 0 ? tariffSum / tariffClients : null;
@@ -489,6 +511,7 @@ async function buildCapacityReport(centerId, options = {}) {
       id: pool.id,
       name: pool.name,
       isDefault: pool.isDefault,
+      complementary: pool.complementary,
       patterns: pool.patterns,
       weeklySlots: round1(poolWeeklySlots),
       weeklyClasses: round1(st.classes / effectiveWeeks),
@@ -517,7 +540,7 @@ async function buildCapacityReport(centerId, options = {}) {
   // Bolsa que limita: la de menor capacidad realista (por reservas reales)
   let bindingBlock = null;
   for (const b of poolBlocks) {
-    if (b.realisticByReal === null) continue;
+    if (b.complementary || b.realisticByReal === null) continue;
     if (!bindingBlock || b.realisticByReal < bindingBlock.realisticByReal) bindingBlock = b;
   }
   const bindingPool = bindingBlock
@@ -528,6 +551,7 @@ async function buildCapacityReport(centerId, options = {}) {
   const tariffs = [];
   const unmappedMemberships = [];
   for (const [membership, entry] of byMembership) {
+    if (entry.clients === 0) continue; // solo clientes de bolsas complementarias
     const { source, item, inferredClassesPerMonth } = resolveMembership(membership);
     const realAvgMembership = round1(entry.bookings / entry.clients / effectiveWeeks);
     byTariff.push({
@@ -579,6 +603,7 @@ async function buildCapacityReport(centerId, options = {}) {
   const mergeRows = (key, label) => {
     const merged = new Map();
     for (const b of poolBlocks) {
+      if (b.complementary) continue;
       for (const r of b[key]) {
         const k = r[label];
         const cur = merged.get(k) || { ...r, avgCapacityPerWeek: 0, avgBookedPerWeek: 0 };
@@ -604,6 +629,33 @@ async function buildCapacityReport(centerId, options = {}) {
   const bySlot = mergeRows('bySlot', 'classTime').sort((a, b) => a.classTime.localeCompare(b.classTime));
   const byWeekday = mergeRows('byWeekday', 'weekday').sort((a, b) => a.weekday - b.weekday);
 
+  const complementaryPools = poolBlocks
+    .filter((b) => b.complementary)
+    .map((b) => {
+      const bands = [...state.get(b.id).bands.values()];
+      const capacity = bands.reduce((x, y) => x + y.capacity, 0);
+      const booked = bands.reduce((x, y) => x + y.booked, 0);
+      const free = bands.reduce((x, y) => x + y.free, 0);
+      return {
+        name: b.name,
+        weeklySlots: b.weeklySlots,
+        freeSlotsPerWeek: hasPools ? round1(free / effectiveWeeks) : null,
+        occupancyPct: round1(pct(booked, capacity)),
+      };
+    });
+
+  const poolSummaries = hasPools
+    ? poolBlocks.map((b) => ({
+        id: b.id,
+        name: b.name,
+        complementary: b.complementary,
+        currentClients: b.activeBookers,
+        extraClients: b.effective.headroom !== null && b.effective.headroom !== undefined ? Math.floor(b.effective.headroom) : null,
+        limitingBand: b.effective.limitingBand,
+        limitingBandOccupancyPct: b.summary.limitingBandOccupancyPct,
+      }))
+    : [];
+
   const overallBandHeadroom = buildBandHeadroom(totalBands, {
     weeks: effectiveWeeks,
     realAvg,
@@ -625,6 +677,8 @@ async function buildCapacityReport(centerId, options = {}) {
     tariffMappedClients: tariffClients,
     pools: poolBlocks,
     bindingPool,
+    complementaryPools,
+    poolSummaries,
     tariffs,
     ignoredClasses: [...ignored.entries()].map(([className, count]) => ({ className, count })).sort((a, b) => b.count - a.count),
     byTariff,
