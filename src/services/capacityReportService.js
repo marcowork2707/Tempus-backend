@@ -65,44 +65,145 @@ function bandKeyOf(classTime) {
   return 'noche';
 }
 
-const newBandAcc = () => new Map(BANDS.map((b) => [b.key, { capacity: 0, booked: 0, free: 0, classNames: new Set() }]));
+const bandLabelOf = (key) => (BANDS.find((b) => b.key === key) || {}).label || key;
 
-// Margen ponderado por demanda: los clientes nuevos reparten sus clases como la demanda actual
-// y el margen se agota en la franja más llena. `acc` = Map(bandKey → { capacity, booked, free }).
-function buildBandHeadroom(acc, { weeks, realAvg, dispersion, activeBookers }) {
-  const totalBooked = [...acc.values()].reduce((s, b) => s + b.booked, 0);
-  const rows = BANDS.map(({ key, label }) => {
-    const b = acc.get(key);
-    const demandShare = totalBooked > 0 ? b.booked / totalBooked : 0;
-    const freeSlotsPerWeek = b.free / weeks;
-    const fitsClients = realAvg && demandShare > 0 ? freeSlotsPerWeek / (realAvg * demandShare) : null;
+// Una clase (tipo × franja) solo marca el límite si pesa al menos esto en las reservas:
+// si se llena una clase minoritaria (p. ej. una sesión semanal de Halterofilia), la gente cambia de clase o se abre otra.
+const MIN_LIMITING_SHARE = 0.05;
+
+// Clase de público propio (p. ej. "+65"): casi todas sus reservas son de clientes que apenas van a otra clase.
+// Un cliente nuevo "como los actuales" no reserva ahí, así que no limita al resto; se informa aparte.
+// `clientClasses` = iterable de Map(clase → reservas) por cliente del ámbito. La clase con más reservas
+// del ámbito nunca es de público propio (es la principal: lo normal es que sus clientes solo vayan a ella).
+const SEGMENT_CLIENT_SHARE = 0.75; // un cliente "es" de la clase si al menos este % de sus reservas son en ella
+const SEGMENT_MIN_SHARE = 0.9; // la clase es de público propio si al menos este % de sus reservas son de esos clientes
+const SEGMENT_MIN_CLIENTS = 3;
+function detectSegments(clientClasses) {
+  const stats = new Map(); // clase → { bookings, clients, exclusiveBookings }
+  const maps = [...clientClasses];
+  for (const m of maps) {
+    let total = 0;
+    for (const n of m.values()) total += n;
+    for (const [cls, n] of m) {
+      const e = stats.get(cls) || { bookings: 0, clients: 0, exclusiveBookings: 0 };
+      e.bookings += n;
+      e.clients += 1;
+      if (total > 0 && n / total >= SEGMENT_CLIENT_SHARE) e.exclusiveBookings += n;
+      stats.set(cls, e);
+    }
+  }
+  let top = null;
+  for (const [cls, e] of stats) if (!top || e.bookings > stats.get(top).bookings) top = cls;
+  const segments = new Map(); // clase → { clients }
+  for (const [cls, e] of stats) {
+    if (cls === top || e.clients < SEGMENT_MIN_CLIENTS || e.bookings === 0) continue;
+    if (e.exclusiveBookings / e.bookings >= SEGMENT_MIN_SHARE) segments.set(cls, { clients: e.clients });
+  }
+  // Clientes "generales": los que reservan alguna clase que no es de público propio
+  const generalClients = maps.filter((m) => [...m.entries()].some(([cls, n]) => n > 0 && !segments.has(cls))).length;
+  return { segments, generalClients };
+}
+
+// Celda = tipo de clase en una franja (o en una hora). Acumula plazas, reservas y huecos de todas sus sesiones.
+const newCell = (extra) => ({ capacity: 0, booked: 0, free: 0, ...extra });
+function addToCell(map, key, extra, capacity, booked) {
+  const cell = map.get(key) || newCell(extra);
+  cell.capacity += capacity;
+  cell.booked += booked;
+  cell.free += Math.max(0, capacity - booked); // una clase sobrerreservada no resta huecos
+  map.set(key, cell);
+}
+
+// Margen ponderado por demanda real de cada TIPO DE CLASE en cada franja: los clientes nuevos reservan
+// como los actuales (mismo reparto entre CrossFit, Endurance, Halterofilia… y entre franjas), así que una
+// clase que nadie reserva no aporta margen y lo que limita es la clase con peso que antes se llena.
+// Con N clientes generales, una celda con R reservas y L huecos admite N·L/R clientes nuevos (× dispersión).
+// `cells` = iterable de { bandKey, className, capacity, booked, free } (totales del periodo).
+// `segments` = clases de público propio (detectSegments): no limitan y se calculan con sus propios clientes.
+// `limitShareBase` = reservas generales con las que se mide el 5 % mínimo para limitar (las del centro, para
+// que una clase limite o no igual en su bolsa que en el total); por defecto, las del propio ámbito.
+function buildBandHeadroom(cells, { weeks, dispersion, activeBookers, generalClients, segments = new Map(), limitShareBase = null }) {
+  const list = [...cells].map((c) => ({ ...c, segment: segments.has(c.className) }));
+  const generalBooked = list.filter((c) => !c.segment).reduce((s, c) => s + c.booked, 0);
+  const shareBase = limitShareBase > 0 ? limitShareBase : generalBooked;
+  const totalBooked = list.reduce((s, c) => s + c.booked, 0);
+  const cellRows = list.map((c) => {
+    const demandShare = !c.segment && generalBooked > 0 ? c.booked / generalBooked : null;
+    const freeSlotsPerWeek = c.free / weeks;
+    const ownClients = c.segment ? segments.get(c.className).clients : generalClients;
+    const fitsClients = c.booked > 0 && ownClients > 0 ? (ownClients * c.free) / c.booked : null;
     const fitsClientsRealistic = fitsClients !== null ? fitsClients * dispersion : null;
     return {
-      key,
-      label,
-      classNames: [...b.classNames].sort((x, y) => x.localeCompare(y, 'es')),
-      capacityPerWeek: round1(b.capacity / weeks),
-      bookedPerWeek: round1(b.booked / weeks),
+      bandKey: c.bandKey,
+      bandLabel: bandLabelOf(c.bandKey),
+      className: c.className,
+      capacityPerWeek: round1(c.capacity / weeks),
+      bookedPerWeek: round1(c.booked / weeks),
       freeSlotsPerWeek: round1(freeSlotsPerWeek),
-      occupancyPct: round1(b.capacity > 0 ? (b.booked / b.capacity) * 100 : 0),
-      demandShare: Math.round(demandShare * 1000) / 1000,
-      demandSharePct: round1(demandShare * 100),
-      fitsClients: round1(fitsClients),
+      occupancyPct: round1(c.capacity > 0 ? (c.booked / c.capacity) * 100 : 0),
+      demandSharePct: demandShare === null ? null : round1(demandShare * 100),
       fitsClientsRealistic: round1(fitsClientsRealistic),
+      noDemand: c.booked === 0,
+      segment: c.segment,
+      segmentClients: c.segment ? ownClients : null,
+      canLimit: !c.segment && shareBase > 0 && c.booked / shareBase >= MIN_LIMITING_SHARE,
       _raw: fitsClientsRealistic,
     };
   });
-  let limiting = null;
-  for (const r of rows) {
-    if (r._raw !== null && (!limiting || r._raw < limiting._raw)) limiting = r;
-  }
+  const pickMin = (rows) => rows.reduce((best, r) => (r._raw !== null && (!best || r._raw < best._raw) ? r : best), null);
+  const eligible = cellRows.filter((r) => r.canLimit && r._raw !== null);
+  const limiting = pickMin(eligible.length > 0 ? eligible : cellRows.filter((r) => !r.segment));
+
+  const bandRows = BANDS.map(({ key, label }) => {
+    const inBand = cellRows.filter((r) => r.bandKey === key);
+    const src = list.filter((c) => c.bandKey === key);
+    const capacity = src.reduce((s, c) => s + c.capacity, 0);
+    const booked = src.reduce((s, c) => s + c.booked, 0);
+    const free = src.reduce((s, c) => s + c.free, 0);
+    const bandLimit = pickMin(inBand.filter((r) => r.canLimit)) || pickMin(inBand.filter((r) => !r.segment));
+    return {
+      key,
+      label,
+      classNames: [...new Set(inBand.map((r) => r.className).filter(Boolean))].sort((x, y) => x.localeCompare(y, 'es')),
+      unusedClassNames: [...new Set(inBand.filter((r) => r.noDemand).map((r) => r.className).filter(Boolean))].sort((x, y) => x.localeCompare(y, 'es')),
+      segmentClassNames: [...new Set(inBand.filter((r) => r.segment).map((r) => r.className).filter(Boolean))].sort((x, y) => x.localeCompare(y, 'es')),
+      capacityPerWeek: round1(capacity / weeks),
+      bookedPerWeek: round1(booked / weeks),
+      freeSlotsPerWeek: round1(free / weeks),
+      occupancyPct: round1(capacity > 0 ? (booked / capacity) * 100 : 0),
+      demandSharePct: round1(totalBooked > 0 ? (booked / totalBooked) * 100 : 0),
+      usableFreeSlotsPerWeek: round1(src.filter((c) => c.booked > 0 && !c.segment).reduce((s, c) => s + c.free, 0) / weeks),
+      fitsClientsRealistic: bandLimit ? bandLimit.fitsClientsRealistic : null,
+      limitingClass: bandLimit ? bandLimit.className : null,
+    };
+  });
+  const limitingBandRow = limiting ? bandRows.find((b) => b.key === limiting.bandKey) : null;
   const headroom = limiting ? limiting._raw : null;
   const capacity = headroom !== null ? activeBookers + headroom : null;
+  const bandOrder = new Map(BANDS.map((b, i) => [b.key, i]));
   return {
-    bands: rows.map(({ _raw, ...r }) => r),
+    bands: bandRows,
+    cells: cellRows
+      .map(({ _raw, ...r }) => ({ ...r, limiting: Boolean(limiting) && r.bandKey === limiting.bandKey && r.className === limiting.className }))
+      .sort((a, b) => (bandOrder.get(a.bandKey) - bandOrder.get(b.bandKey)) || (b.demandSharePct - a.demandSharePct)),
+    segments: [...segments.keys()].map((className) => {
+      const rows = cellRows.filter((r) => r.className === className);
+      const cap = list.filter((c) => c.className === className).reduce((s, c) => s + c.capacity, 0);
+      const bk = list.filter((c) => c.className === className).reduce((s, c) => s + c.booked, 0);
+      const fr = list.filter((c) => c.className === className).reduce((s, c) => s + c.free, 0);
+      if (rows.length === 0) return null;
+      return {
+        className,
+        clients: segments.get(className).clients,
+        occupancyPct: round1(cap > 0 ? (bk / cap) * 100 : 0),
+        freeSlotsPerWeek: round1(fr / weeks),
+        fitsClientsRealistic: round1(bk > 0 ? ((segments.get(className).clients * fr) / bk) * dispersion : null),
+      };
+    }).filter(Boolean),
     effective: {
       headroom: round1(headroom),
-      limitingBand: limiting ? limiting.label : null,
+      limitingBand: limiting ? limiting.bandLabel : null,
+      limitingClass: limiting ? limiting.className : null,
       capacity: round1(capacity),
       loadPct: capacity ? round1((activeBookers / capacity) * 100) : null,
     },
@@ -110,38 +211,82 @@ function buildBandHeadroom(acc, { weeks, realAvg, dispersion, activeBookers }) {
       currentClients: activeBookers,
       capacityClients: round1(capacity),
       extraClients: round1(headroom),
-      limitingBand: limiting ? limiting.label : null,
-      limitingBandFreeSlotsPerWeek: limiting ? limiting.freeSlotsPerWeek : null,
-      limitingBandOccupancyPct: limiting ? limiting.occupancyPct : null,
+      limitingBand: limiting ? limiting.bandLabel : null,
+      limitingBandFreeSlotsPerWeek: limitingBandRow ? limitingBandRow.freeSlotsPerWeek : null,
+      limitingBandOccupancyPct: limitingBandRow ? limitingBandRow.occupancyPct : null,
+      limitingClass: limiting ? limiting.className : null,
+      limitingClassFreeSlotsPerWeek: limiting ? limiting.freeSlotsPerWeek : null,
+      limitingClassOccupancyPct: limiting ? limiting.occupancyPct : null,
+      minLimitingSharePct: MIN_LIMITING_SHARE * 100,
     },
   };
 }
 
-// Plan de clientes nuevos por hora: los H clientes que caben reservan como los actuales
-// (f clases/semana, repartidas según el peso de cada hora en las reservas) y se ve qué horas se llenan.
-// `bySlot` = filas por hora (ya sin días cerrados); `effective.headroom` = margen real de clientes.
-function buildNewClientsPlan(bySlot, effective, f) {
+// Plan de clientes nuevos por hora: los H clientes que caben reservan como los clientes generales actuales
+// (mismo reparto real entre tipos de clase y horas) y se ve qué horas se llenan. Cada tipo de clase recibe
+// H·R/N reservas nuevas a la semana (R = sus reservas/semana, N = clientes generales).
+// `slotCells` = iterable de { classTime, className, capacity, booked, free } (totales del periodo, sin días cerrados).
+// No reciben clientes nuevos ni aportan huecos: las clases que nadie reserva y las de público propio (+65).
+function buildNewClientsPlan(slotCells, effective, { generalClients, weeks, segments = new Map() }) {
   const H = effective && effective.headroom > 0 ? Math.floor(effective.headroom) : 0;
-  const avg = Number.isFinite(f) && f > 0 ? f : 0;
-  const totalBooked = bySlot.reduce((s, r) => s + (r.avgBookedPerWeek || 0), 0);
-  const rows = bySlot.map((r) => {
-    const capacityPerWeek = r.avgCapacityPerWeek || 0;
-    const bookedPerWeek = r.avgBookedPerWeek || 0;
-    const freeSlotsPerWeek = Math.max(0, capacityPerWeek - bookedPerWeek);
-    const demandShare = totalBooked > 0 ? bookedPerWeek / totalBooked : 0;
-    const newBookingsPerWeek = Math.min(freeSlotsPerWeek, H * avg * demandShare);
+  const N = generalClients > 0 ? generalClients : 0;
+  const list = [...slotCells];
+  const generalBookedPerWeek = list.filter((c) => !segments.has(c.className)).reduce((s, c) => s + c.booked, 0) / weeks;
+  const avg = N > 0 ? generalBookedPerWeek / N : 0;
+  const byTime = new Map();
+  for (const c of list) {
+    const arr = byTime.get(c.classTime) || [];
+    arr.push(c);
+    byTime.set(c.classTime, arr);
+  }
+  const rows = [...byTime.entries()].map(([classTime, types]) => {
+    let capacityPerWeek = 0;
+    let bookedPerWeek = 0;
+    let freeSlotsPerWeek = 0;
+    let newBookingsPerWeek = 0;
+    let absorbClients = null;
+    const fullClassNames = [];
+    const unusedClassNames = [];
+    const segmentClassNames = [];
+    for (const t of types) {
+      const tCap = t.capacity / weeks;
+      const tBooked = t.booked / weeks;
+      const tFree = t.free / weeks;
+      if (segments.has(t.className)) {
+        segmentClassNames.push(t.className);
+        continue;
+      }
+      if (t.booked === 0) {
+        if (t.className) unusedClassNames.push(t.className);
+        continue;
+      }
+      const share = generalBookedPerWeek > 0 ? tBooked / generalBookedPerWeek : 0;
+      const tNew = Math.min(tFree, N > 0 ? (H * tBooked) / N : 0);
+      capacityPerWeek += tCap;
+      bookedPerWeek += tBooked;
+      freeSlotsPerWeek += tFree;
+      newBookingsPerWeek += tNew;
+      if (tCap > 0 && ((tBooked + tNew) / tCap) * 100 >= 95 && t.className) fullClassNames.push(t.className);
+      if (share > 0 && N > 0) {
+        const absorb = (N * tFree) / tBooked;
+        if (absorbClients === null || absorb < absorbClients) absorbClients = absorb;
+      }
+    }
     const resultingBookedPerWeek = bookedPerWeek + newBookingsPerWeek;
     const resultingOccupancyPct = capacityPerWeek > 0 ? (resultingBookedPerWeek / capacityPerWeek) * 100 : 0;
     const status = resultingOccupancyPct >= 95 ? 'llena' : resultingOccupancyPct >= 85 ? 'casi' : 'sitio';
-    const absorbClients = demandShare > 0 && avg > 0 ? freeSlotsPerWeek / (avg * demandShare) : null;
+    const sortNames = (a) => [...new Set(a)].sort((x, y) => x.localeCompare(y, 'es'));
     return {
-      classTime: r.classTime,
-      classNames: r.classNames || [],
+      classTime,
+      classNames: sortNames(types.map((t) => t.className).filter(Boolean)),
+      unusedClassNames: sortNames(unusedClassNames),
+      segmentClassNames: sortNames(segmentClassNames),
+      fullClassNames: sortNames(fullClassNames),
       capacityPerWeek: round1(capacityPerWeek),
       bookedPerWeek: round1(bookedPerWeek),
       occupancyPct: round1(capacityPerWeek > 0 ? (bookedPerWeek / capacityPerWeek) * 100 : 0),
       freeSlotsPerWeek: round1(freeSlotsPerWeek),
-      demandShare: Math.round(demandShare * 1000) / 1000,
+      demandShare: Math.round((generalBookedPerWeek > 0 ? bookedPerWeek / generalBookedPerWeek : 0) * 1000) / 1000,
       newBookingsPerWeek: round1(newBookingsPerWeek),
       resultingBookedPerWeek: round1(resultingBookedPerWeek),
       resultingOccupancyPct: round1(resultingOccupancyPct),
@@ -226,10 +371,13 @@ async function buildCapacityReport(centerId, options = {}) {
       clients: new Map(), // clientKey → reservas en la bolsa
       slotMap: new Map(),
       weekdayMap: new Map(),
-      bands: newBandAcc(),
+      cells: new Map(), // `${banda}|${clase}` → celda (tipo de clase × franja)
+      slotCells: new Map(), // `${hora}|${clase}` → celda (tipo de clase × hora)
+      clientClasses: new Map(), // clientKey → Map(clase → reservas)
     });
   }
-  const totalBands = newBandAcc();
+  const totalCells = new Map(); // celdas de todas las bolsas no complementarias
+  const totalSlotCells = new Map();
   const ignored = new Map(); // className → count
   const clientMap = new Map(); // key → { bookings, memberships, byPool: Map }
   let totalCapacity = 0;
@@ -275,12 +423,13 @@ async function buildCapacityReport(centerId, options = {}) {
 
       const className = String(c.className || '').trim();
       const bandKey = bandKeyOf(c.classTime);
-      for (const acc of inScope ? [st.bands, totalBands] : [st.bands]) {
-        const band = acc.get(bandKey);
-        if (className) band.classNames.add(className);
-        band.capacity += capacity;
-        band.booked += booked;
-        band.free += Math.max(0, capacity - booked); // una clase sobrereservada no resta huecos
+      const cellKey = `${bandKey}|${className}`;
+      const slotKey = `${c.classTime}|${className}`;
+      addToCell(st.cells, cellKey, { bandKey, className }, capacity, booked);
+      addToCell(st.slotCells, slotKey, { classTime: c.classTime, className }, capacity, booked);
+      if (inScope) {
+        addToCell(totalCells, `${pool.id}|${cellKey}`, { bandKey, className }, capacity, booked);
+        addToCell(totalSlotCells, `${pool.id}|${slotKey}`, { classTime: c.classTime, className }, capacity, booked);
       }
 
       const slot = st.slotMap.get(c.classTime) || { capacity: 0, booked: 0, classNames: new Set() };
@@ -298,7 +447,11 @@ async function buildCapacityReport(centerId, options = {}) {
       for (const a of c.athletes || []) {
         const key = a.aimharderUserId || normalizeName(a.name || '');
         if (!key) continue;
-        const client = clientMap.get(key) || { bookings: 0, scopeBookings: 0, memberships: new Map(), byPool: new Map() };
+        const client = clientMap.get(key) || { bookings: 0, scopeBookings: 0, memberships: new Map(), byPool: new Map(), byClass: new Map() };
+        if (inScope) client.byClass.set(className, (client.byClass.get(className) || 0) + 1);
+        const poolClient = st.clientClasses.get(key) || new Map();
+        poolClient.set(className, (poolClient.get(className) || 0) + 1);
+        st.clientClasses.set(key, poolClient);
         client.bookings += 1;
         if (inScope) client.scopeBookings += 1;
         const m = a.membership || '';
@@ -459,6 +612,12 @@ async function buildCapacityReport(centerId, options = {}) {
   }
   const tariffAvg = tariffClients > 0 ? tariffSum / tariffClients : null;
 
+  // Público propio y reservas generales del centro (solo bolsas no complementarias)
+  const overallSeg = detectSegments(scopeClients.map((c) => c.byClass));
+  const centerGeneralBooked = [...totalCells.values()]
+    .filter((c) => !overallSeg.segments.has(c.className))
+    .reduce((s, c) => s + c.booked, 0);
+
   const pct = (booked, capacity) => (capacity > 0 ? (booked / capacity) * 100 : 0);
 
   const poolBlocks = pools.map((pool) => {
@@ -500,11 +659,14 @@ async function buildCapacityReport(centerId, options = {}) {
         };
       });
 
-    const bandHeadroom = buildBandHeadroom(st.bands, {
+    const poolSeg = detectSegments(st.clientClasses.values());
+    const bandHeadroom = buildBandHeadroom(st.cells.values(), {
       weeks: effectiveWeeks,
-      realAvg: poolRealAvg,
       dispersion,
       activeBookers: poolActive,
+      generalClients: poolSeg.generalClients,
+      segments: poolSeg.segments,
+      limitShareBase: pool.complementary ? null : centerGeneralBooked,
     });
 
     return {
@@ -529,11 +691,15 @@ async function buildCapacityReport(centerId, options = {}) {
       currentLoadPctByTariff: realisticByTariff ? round1((poolActive / realisticByTariff) * 100) : null,
       headroomClientsByTariff: realisticByTariff !== null ? round1(realisticByTariff - poolActive) : null,
       bands: bandHeadroom.bands,
+      cells: bandHeadroom.cells,
+      segments: bandHeadroom.segments,
       effective: bandHeadroom.effective,
       summary: bandHeadroom.summary,
       bySlot,
       byWeekday,
-      newClientsPlan: buildNewClientsPlan(bySlot, bandHeadroom.effective, poolRealAvg),
+      newClientsPlan: buildNewClientsPlan(st.slotCells.values(), bandHeadroom.effective, {
+        generalClients: poolSeg.generalClients, weeks: effectiveWeeks, segments: poolSeg.segments,
+      }),
     };
   });
 
@@ -632,10 +798,10 @@ async function buildCapacityReport(centerId, options = {}) {
   const complementaryPools = poolBlocks
     .filter((b) => b.complementary)
     .map((b) => {
-      const bands = [...state.get(b.id).bands.values()];
-      const capacity = bands.reduce((x, y) => x + y.capacity, 0);
-      const booked = bands.reduce((x, y) => x + y.booked, 0);
-      const free = bands.reduce((x, y) => x + y.free, 0);
+      const cells = [...state.get(b.id).cells.values()];
+      const capacity = cells.reduce((x, y) => x + y.capacity, 0);
+      const booked = cells.reduce((x, y) => x + y.booked, 0);
+      const free = cells.reduce((x, y) => x + y.free, 0);
       return {
         name: b.name,
         weeklySlots: b.weeklySlots,
@@ -653,14 +819,17 @@ async function buildCapacityReport(centerId, options = {}) {
         extraClients: b.effective.headroom !== null && b.effective.headroom !== undefined ? Math.floor(b.effective.headroom) : null,
         limitingBand: b.effective.limitingBand,
         limitingBandOccupancyPct: b.summary.limitingBandOccupancyPct,
+        limitingClass: b.summary.limitingClass,
+        limitingClassOccupancyPct: b.summary.limitingClassOccupancyPct,
       }))
     : [];
 
-  const overallBandHeadroom = buildBandHeadroom(totalBands, {
+  const overallBandHeadroom = buildBandHeadroom(totalCells.values(), {
     weeks: effectiveWeeks,
-    realAvg,
     dispersion,
     activeBookers,
+    generalClients: overallSeg.generalClients,
+    segments: overallSeg.segments,
   });
 
   return {
@@ -696,13 +865,17 @@ async function buildCapacityReport(centerId, options = {}) {
       headroomClientsByTariff: realisticByTariff !== null ? round1(realisticByTariff - activeBookers) : null,
     },
     bands: overallBandHeadroom.bands,
+    cells: overallBandHeadroom.cells,
+    segments: overallBandHeadroom.segments,
     effective: overallBandHeadroom.effective,
     summary: overallBandHeadroom.summary,
     closedDays: closedDates.length,
     closedDates,
     bySlot,
     byWeekday,
-    newClientsPlan: buildNewClientsPlan(bySlot, overallBandHeadroom.effective, realAvg),
+    newClientsPlan: buildNewClientsPlan(totalSlotCells.values(), overallBandHeadroom.effective, {
+      generalClients: overallSeg.generalClients, weeks: effectiveWeeks, segments: overallSeg.segments,
+    }),
   };
 }
 
