@@ -1,6 +1,7 @@
 const jwt = require('jsonwebtoken');
 const ErrorHandler = require('../utils/errorHandler');
 const UserCenterRole = require('../models/UserCenterRole');
+const User = require('../models/User');
 
 // Check if user is authenticated
 const isAuthenticatedUser = async (req, res, next) => {
@@ -30,6 +31,12 @@ const isAuthenticatedUser = async (req, res, next) => {
       id: decodedData.id,
       role: decodedData.role,
     };
+
+    // Un trabajador dado de baja pierde el acceso aunque su sesión siga abierta
+    const account = await User.findById(req.user.id).select('active').lean();
+    if (!account || account.active === false) {
+      return next(new ErrorHandler('Tu cuenta está dada de baja', 401));
+    }
 
     if (!req.user.role && req.user.id) {
       const userCenterRole = await UserCenterRole.findOne({

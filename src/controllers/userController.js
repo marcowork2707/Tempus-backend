@@ -262,6 +262,83 @@ exports.resendInvitation = catchAsyncErrors(async (req, res, next) => {
   });
 });
 
+const DATE_ONLY_RE = /^\d{4}-\d{2}-\d{2}$/;
+const dayKey = (date) => (date ? new Date(date).toISOString().slice(0, 10) : null);
+
+// Dar de baja a un trabajador (Admin only). A diferencia de eliminar, conserva todo
+// lo trabajado: fichajes, turnos hasta el último día, nóminas, horas extra y tareas.
+// - Sus patrones de turno terminan ese día (los que empezaban después se anulan).
+// - Se borran sus cambios de turno y vacaciones POSTERIORES a la baja.
+// - Sus asignaciones a centros quedan inactivas con fecha de fin y ya no puede entrar.
+exports.offboardUser = catchAsyncErrors(async (req, res, next) => {
+  const user = await User.findById(req.params.id);
+  if (!user) return next(new ErrorHandler('User not found', 404));
+  if (String(user._id) === String(req.user.id)) {
+    return next(new ErrorHandler('No puedes darte de baja a ti mismo', 400));
+  }
+
+  const raw = typeof req.body?.endDate === 'string' ? req.body.endDate.trim() : '';
+  if (!DATE_ONLY_RE.test(raw) || Number.isNaN(new Date(raw).getTime())) {
+    return next(new ErrorHandler('Indica el último día trabajado (YYYY-MM-DD)', 400));
+  }
+  const endDate = new Date(raw); // mismo formato con el que se guardan los patrones
+  const endKey = dayKey(endDate);
+  const dayAfter = new Date(endDate.getTime() + 24 * 60 * 60 * 1000);
+  const userId = user._id;
+
+  let patternsEnded = 0;
+  let patternsCancelled = 0;
+  const patterns = await ShiftPattern.find({ user: userId, active: true }).select('startDate endDate').lean();
+  for (const pattern of patterns) {
+    // updateOne: no revalidar patrones antiguos que quizá no cumplan las reglas actuales
+    if (dayKey(pattern.startDate) > endKey) {
+      await ShiftPattern.updateOne({ _id: pattern._id }, { $set: { active: false } });
+      patternsCancelled += 1;
+    } else if (!pattern.endDate || dayKey(pattern.endDate) > endKey) {
+      await ShiftPattern.updateOne({ _id: pattern._id }, { $set: { endDate } });
+      patternsEnded += 1;
+    }
+  }
+
+  const futureOverrides = await ShiftOverride.deleteMany({ user: userId, date: { $gte: dayAfter } });
+  const futureVacations = await VacationRequest.deleteMany({ user: userId, startDate: { $gte: dayAfter } });
+  await VacationConflictRule.updateMany(
+    { $or: [{ primaryUser: userId }, { blockedUser: userId }] },
+    { $set: { active: false } }
+  );
+  await UserCenterRole.updateMany({ user: userId }, { $set: { active: false, endDate } });
+
+  // updateOne y no save(): un usuario antiguo sin DNI u otro dato obligatorio no debe impedir la baja
+  await User.updateOne({ _id: userId }, { $set: { active: false, deactivatedAt: endDate } });
+
+  res.status(200).json({
+    success: true,
+    message: 'Trabajador dado de baja. Su historial se conserva.',
+    summary: {
+      endDate: endKey,
+      patternsEnded,
+      patternsCancelled,
+      futureOverridesRemoved: futureOverrides.deletedCount || 0,
+      futureVacationsRemoved: futureVacations.deletedCount || 0,
+    },
+  });
+});
+
+// Deshacer una baja (Admin only): vuelve a poder entrar y recupera sus centros.
+// Los turnos no se reabren solos: hay que volver a asignárselos.
+exports.reactivateUser = catchAsyncErrors(async (req, res, next) => {
+  const user = await User.findById(req.params.id);
+  if (!user) return next(new ErrorHandler('User not found', 404));
+
+  await UserCenterRole.updateMany(
+    { user: user._id, active: false },
+    { $set: { active: true, endDate: null } }
+  );
+  await User.updateOne({ _id: user._id }, { $set: { active: true, deactivatedAt: null } });
+
+  res.status(200).json({ success: true, message: 'Trabajador reactivado' });
+});
+
 // Delete User (Admin only)
 exports.deleteUser = catchAsyncErrors(async (req, res, next) => {
   const user = await User.findById(req.params.id);

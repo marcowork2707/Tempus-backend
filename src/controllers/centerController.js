@@ -43,7 +43,12 @@ const hasResolvedUser = (record) => Boolean(record?.user && record.user._id);
 const _buildUserCenterScopes = async (userIds) => {
   const scopes = new Map();
   if (!userIds || userIds.length === 0) return scopes;
-  const roles = await UserCenterRole.find({ user: { $in: userIds }, active: true })
+  // Las asignaciones de un trabajador dado de baja (inactivas con fecha de fin) siguen
+  // contando para su historial: centro principal, consolidación de horas y nóminas.
+  const roles = await UserCenterRole.find({
+    user: { $in: userIds },
+    $or: [{ active: true }, { endDate: { $ne: null } }],
+  })
     .populate('center', 'name');
   const seen = new Map();
   for (const r of roles) {
@@ -1129,7 +1134,12 @@ const gatherMonthlyOvertimeSummaries = async ({ centerId, month, userId }) => {
   const coachRole = await Role.findOne({ name: 'coach' });
   if (!coachRole) throw new ErrorHandler('Coach role not found', 404);
 
-  const assignmentFilter = { center: centerId, role: coachRole._id, active: true };
+  // También quien se dio de baja durante (o después de) este periodo: sus horas hasta ese día cuentan.
+  const assignmentFilter = {
+    center: centerId,
+    role: coachRole._id,
+    $or: [{ active: true }, { active: false, endDate: { $gte: queryStart } }],
+  };
   if (userId) assignmentFilter.user = userId;
 
   const assignments = await UserCenterRole.find(assignmentFilter)
@@ -1214,10 +1224,30 @@ const gatherMonthlyOvertimeSummaries = async ({ centerId, month, userId }) => {
   }
   // Días NO laborables oficiales (vacaciones, festivos o marcados no laborables):
   // reducen la jornada teórica de la semana, como en RRHH.
-  const offDatesByUser = new Set();
+  // Con varios centros, un día solo es no laborable si no trabaja en NINGUNO: quitarle el
+  // turno en un centro porque ese día va al otro no reduce su jornada de contrato.
+  const patternCenterById = new Map(patterns.map((p) => [String(p._id), String(p.center?._id || p.center)]));
+  const offCentersByKey = new Map();
+  const workCentersByKey = new Map();
+  const addTo = (map, key, centerKey) => {
+    if (!map.has(key)) map.set(key, new Set());
+    map.get(key).add(centerKey);
+  };
   for (const override of vacationOverrides) {
     if (!override.user?._id) continue;
-    if (override.isOff) offDatesByUser.add(`${override.user._id.toString()}|${formatLocalDateKey(override.date)}`);
+    const key = `${override.user._id.toString()}|${formatLocalDateKey(override.date)}`;
+    addTo(override.isOff ? offCentersByKey : workCentersByKey, key, String(override.center?._id || override.center));
+  }
+  for (const occ of baseOccurrences) {
+    if (getMinutesFromSegments(occ.timeSegments || []) <= 0) continue;
+    const centerKey = patternCenterById.get(String(occ.patternId));
+    if (centerKey) addTo(workCentersByKey, `${occ.userId}|${occ.date}`, centerKey);
+  }
+  const offDatesByUser = new Set();
+  for (const [key, offCenters] of offCentersByKey) {
+    const workCenters = workCentersByKey.get(key) || new Set();
+    const worksElsewhere = [...workCenters].some((c) => !offCenters.has(c));
+    if (!worksElsewhere) offDatesByUser.add(key);
   }
 
   const aggregationMode = center.overtimeSettings?.monthlyAggregationMode || 'positive_only';
@@ -1526,8 +1556,12 @@ exports.getCenterUsers = catchAsyncErrors(async (req, res, next) => {
   const center = await Center.findById(req.params.id);
   if (!center) return next(new ErrorHandler('Center not found', 404));
 
-  const assignments = await UserCenterRole.find({ center: req.params.id })
-    .populate('user', 'name email active')
+  // Por defecto solo el personal en activo; ?includeFormer=true añade a los dados de baja.
+  const includeFormer = String(req.query.includeFormer || '') === 'true';
+  const assignments = await UserCenterRole.find(
+    includeFormer ? { center: req.params.id } : { center: req.params.id, active: { $ne: false } }
+  )
+    .populate('user', 'name email active deactivatedAt')
     .populate('role', 'name');
 
   const scopes = await _buildUserCenterScopes(
@@ -3201,7 +3235,12 @@ const deriveSettlementDecision = ({ generatedMinutes, paidMinutes }) => {
 const findCoachAssignment = async (centerId, userId) => {
   const coachRole = await Role.findOne({ name: 'coach' });
   if (!coachRole) throw new ErrorHandler('Coach role not found', 404);
-  return UserCenterRole.findOne({ center: centerId, user: userId, role: coachRole._id, active: true });
+  return UserCenterRole.findOne({
+    center: centerId,
+    user: userId,
+    role: coachRole._id,
+    $or: [{ active: true }, { endDate: { $ne: null } }], // la bolsa de quien está de baja se puede liquidar
+  });
 };
 
 exports.getCenterOvertimeBank = catchAsyncErrors(async (req, res, next) => {

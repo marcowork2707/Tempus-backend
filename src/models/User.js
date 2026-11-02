@@ -67,6 +67,12 @@ const userSchema = new mongoose.Schema(
       type: Boolean,
       default: true,
     },
+    // Baja del trabajador: último día trabajado. Se conserva todo su historial
+    // (fichajes, turnos hasta ese día, nóminas) pero ya no puede entrar.
+    deactivatedAt: {
+      type: Date,
+      default: null,
+    },
   },
   { timestamps: true }
 );

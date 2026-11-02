@@ -7,6 +7,8 @@ const {
   createUser,
   updateUser,
   deleteUser,
+  offboardUser,
+  reactivateUser,
   assignUserToCenter,
   resendInvitation,
 } = require('../controllers/userController');
@@ -30,6 +32,10 @@ router.put('/:id', authorizeRoles('admin'), updateUser);
 
 // Resend invitation / reset password by invitation
 router.post('/:id/resend-invitation', authorizeRoles('admin'), resendInvitation);
+
+// Dar de baja (conserva el historial) / deshacer la baja
+router.post('/:id/offboard', authorizeRoles('admin'), offboardUser);
+router.post('/:id/reactivate', authorizeRoles('admin'), reactivateUser);
 
 // Delete user
 router.delete('/:id', authorizeRoles('admin'), deleteUser);

@@ -46,6 +46,10 @@ exports.loginUser = catchAsyncErrors(async (req, res, next) => {
     return next(new ErrorHandler('Invalid email or password', 401));
   }
 
+  if (user.active === false) {
+    return next(new ErrorHandler('Tu cuenta está dada de baja. Habla con el administrador si es un error.', 403));
+  }
+
   if (user.invitationStatus === 'pending' || user.mustSetPassword) {
     return next(
       new ErrorHandler(

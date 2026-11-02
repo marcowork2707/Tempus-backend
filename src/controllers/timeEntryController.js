@@ -326,7 +326,10 @@ const getPlannedOccurrencesMap = async (centerId, from, to, userId) => {
 // devuelve los ids de todos sus centros (para ver sus fichajes juntos); si no, null.
 const getPrimaryCenterScope = async (userId, centerId) => {
   if (!userId || !centerId) return null;
-  const roles = await UserCenterRole.find({ user: userId, active: true }).select('center isPrimaryCenter').lean();
+  const roles = await UserCenterRole.find({
+    user: userId,
+    $or: [{ active: true }, { endDate: { $ne: null } }], // también el historial de quien está de baja
+  }).select('center isPrimaryCenter').lean();
   const centerIds = Array.from(new Set(roles.map((r) => String(r.center))));
   if (centerIds.length <= 1) return null;
   const isPrimary = roles.some((r) => String(r.center) === String(centerId) && r.isPrimaryCenter === true);
@@ -574,7 +577,7 @@ exports.getTimeEntries = catchAsyncErrors(async (req, res, next) => {
     const assignment = await UserCenterRole.findOne({
       center: req.query.centerId,
       user: req.query.userId,
-      active: true,
+      $or: [{ active: true }, { endDate: { $ne: null } }], // también quien está de baja
     }).lean();
 
     const effectiveMonth = normalizeEffectiveMonth(req.query.month)
@@ -731,7 +734,11 @@ exports.updateTimeEntry = catchAsyncErrors(async (req, res, next) => {
     if (req.user.role !== 'admin') {
       return next(new ErrorHandler('Solo un administrador puede cambiar el centro de un fichaje', 403));
     }
-    const belongs = await UserCenterRole.findOne({ user: entry.user, center: centerId, active: true });
+    const belongs = await UserCenterRole.findOne({
+      user: entry.user,
+      center: centerId,
+      $or: [{ active: true }, { endDate: { $ne: null } }],
+    });
     if (!belongs) {
       return next(new ErrorHandler('El trabajador no pertenece a ese centro', 400));
     }

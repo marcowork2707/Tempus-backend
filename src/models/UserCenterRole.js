@@ -73,6 +73,9 @@ const userCenterRoleSchema = new mongoose.Schema(
     // Solo tiene sentido en quien trabaja en varios centros; con un único centro
     // se considera principal implícitamente.
     isPrimaryCenter: { type: Boolean, default: false },
+    // Último día de trabajo en el centro (baja). La asignación queda inactiva pero
+    // se conserva para el historial: turnos, fichajes y horas extra hasta ese día.
+    endDate: { type: Date, default: null },
   },
   { timestamps: true }
 );
