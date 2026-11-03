@@ -3478,30 +3478,30 @@ async function getPendingPaymentsRaw(config) {
       expiry: Date.now() + SESSION_TTL_MS,
     });
 
-    const paymentsUrl = `${config.baseUrl}/payments`;
+    // Se pide el endpoint directamente con la sesión, sin abrir /payments: AimHarder a veces
+    // sirve la interfaz nueva, que no hace esta llamada, y antes eso acababa en "0 pagos".
+    // type=-1 = "Todas" (manuales + domiciliaciones), igual que el filtro por defecto de la web.
     const pendingApiUrl = `${config.baseUrl}/api/pendingPayments`;
-    console.log('[AimHarder] Navegando a pagos pendientes:', paymentsUrl);
+    console.log('[AimHarder] Pidiendo pagos pendientes:', pendingApiUrl);
 
-    const pendingResponsePromise = page.waitForResponse(
-      (resp) => resp.url().startsWith(pendingApiUrl),
-      { timeout: 45000 }
-    );
-
-    await page.goto(paymentsUrl, { waitUntil: 'domcontentloaded', timeout: 45000 });
-    await dismissCookies(page);
-
-    let pending = [];
+    const response = await context.request.get(pendingApiUrl, {
+      params: { type: '-1' },
+      headers: { Accept: 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+      timeout: 45000,
+    });
+    const raw = await response.text();
+    let data;
     try {
-      const pendingResponse = await pendingResponsePromise;
-      const raw = await pendingResponse.text();
-      const data = JSON.parse(raw);
-      pending = data.pending || [];
-      console.log(`[AimHarder] /api/pendingPayments devolvió ${pending.length} pagos pendientes`);
-    } catch (e) {
-      console.warn('[AimHarder] No se pudo capturar /api/pendingPayments:', e.message);
+      data = JSON.parse(raw);
+    } catch {
+      throw new Error(`AimHarder no devolvió JSON en /api/pendingPayments (HTTP ${response.status()})`);
+    }
+    if (!data || !Array.isArray(data.pending)) {
+      throw new Error(`Respuesta inesperada de /api/pendingPayments (HTTP ${response.status()})`);
     }
 
-    return pending;
+    console.log(`[AimHarder] /api/pendingPayments devolvió ${data.pending.length} pagos pendientes`);
+    return data.pending;
   } finally {
     await browser.close();
   }
