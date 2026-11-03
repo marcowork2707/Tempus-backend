@@ -17,6 +17,7 @@ const {
   seedAimHarderIntegrationsFromEnv,
 } = require('./src/services/aimharderService');
 const { dispatchPendingWeeklyPlannings } = require('./src/services/weeklyPlanningService');
+const { startTaskReminderScheduler } = require('./src/services/taskReminderScheduler');
 
 // Connect to database
 connectDB();
@@ -54,6 +55,7 @@ app.use('/api/spj', require('./src/routes/spjRoutes'));
 app.use('/api/tfg', require('./src/routes/tfgRoutes'));
 app.use('/api/training', require('./src/routes/trainingRoutes'));
 app.use('/api/messages', require('./src/routes/messageTemplateRoutes'));
+app.use('/api/push', require('./src/routes/pushRoutes'));
 
 // 404 handler
 app.use((req, res) => {
@@ -184,6 +186,7 @@ const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
   console.log(`Environment: ${process.env.NODE_ENV}`);
+  startTaskReminderScheduler();
   seedAimHarderIntegrationsFromEnv().catch((error) => {
     console.error('[AimHarder Seed] Error al sembrar integraciones:', error.message);
   });

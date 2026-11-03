@@ -6642,3 +6642,5 @@ exports.deleteAllCenterIncomesByMonth = catchAsyncErrors(async (req, res, next) 
     deletedCount: result.deletedCount
   });
 });
+
+exports._computeOccurrencesForCenter = _computeOccurrencesForCenter;
