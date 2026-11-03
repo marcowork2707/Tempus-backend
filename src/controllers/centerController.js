@@ -3169,7 +3169,12 @@ exports.upsertCenterPayrollEntry = catchAsyncErrors(async (req, res, next) => {
     return next(new ErrorHandler('netSalary must be a valid number >= 0', 400));
   }
 
-  const assignment = await UserCenterRole.findOne({ center: req.params.id, user: userId, active: true });
+  // Quien está de baja admite nóminas hasta el mes de su baja (para cerrar su último sueldo)
+  const assignment = await UserCenterRole.findOne({
+    center: req.params.id,
+    user: userId,
+    $or: [{ active: true }, { endDate: { $gte: new Date(`${month}-01T00:00:00.000Z`) } }],
+  });
   if (!assignment) {
     return next(new ErrorHandler('User is not assigned to this center', 400));
   }
