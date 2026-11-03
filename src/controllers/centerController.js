@@ -3243,6 +3243,29 @@ const findCoachAssignment = async (centerId, userId) => {
   });
 };
 
+// Saldo real de la bolsa de un trabajador multicentro: el principal más lo que haya
+// quedado en las demás asignaciones (p. ej. deuda liquidada en otro centro antes de
+// marcar el principal). Así nunca se pierde un saldo por estar en otra asignación.
+const _loadOvertimeBankState = async (assignment, bankScope) => {
+  const others = bankScope && bankScope.centerIds.length > 1
+    ? await UserCenterRole.find({
+      _id: { $ne: assignment._id },
+      user: assignment.user,
+      role: assignment.role,
+      center: { $in: bankScope.centerIds },
+    })
+    : [];
+  const leftovers = others.filter((a) => Math.round(Number(a.overtimeBankMinutes || 0)) !== 0);
+  const balanceMinutes = Math.round(Number(assignment.overtimeBankMinutes || 0))
+    + leftovers.reduce((sum, a) => sum + Math.round(Number(a.overtimeBankMinutes || 0)), 0);
+  const lastSettledMonth = [assignment, ...others]
+    .map((a) => a.overtimeBankUpdatedMonth)
+    .filter(Boolean)
+    .sort()
+    .pop() || null;
+  return { balanceMinutes, lastSettledMonth, leftovers };
+};
+
 exports.getCenterOvertimeBank = catchAsyncErrors(async (req, res, next) => {
   const center = await Center.findById(req.params.id).select('_id');
   if (!center) return next(new ErrorHandler('Center not found', 404));
@@ -3264,8 +3287,7 @@ exports.getCenterOvertimeBank = catchAsyncErrors(async (req, res, next) => {
     return next(new ErrorHandler('Las horas extra de este trabajador se gestionan en su centro principal', 400));
   }
 
-  const balanceMinutes = Math.round(Number(assignment.overtimeBankMinutes || 0));
-  const lastSettledMonth = assignment.overtimeBankUpdatedMonth || null;
+  const { balanceMinutes, lastSettledMonth } = await _loadOvertimeBankState(assignment, bankScope);
 
   // Neto real del mes seleccionado (desde fichajes), con signo.
   const { summaries } = await gatherMonthlyOvertimeSummaries({ centerId: req.params.id, month, userId });
@@ -3345,7 +3367,8 @@ exports.settleCenterOvertimeMonth = catchAsyncErrors(async (req, res, next) => {
   const existing = await OvertimeSettlement.findOne({ center: req.params.id, user: userId, month });
   if (existing) return next(new ErrorHandler('Este mes ya está liquidado', 409));
 
-  const lastSettledMonth = assignment.overtimeBankUpdatedMonth || null;
+  const bankState = await _loadOvertimeBankState(assignment, bankScope);
+  const { lastSettledMonth } = bankState;
   if (lastSettledMonth && month <= lastSettledMonth) {
     return next(new ErrorHandler('Las liquidaciones deben hacerse en orden cronológico; ya hay un mes posterior o igual liquidado', 400));
   }
@@ -3354,7 +3377,7 @@ exports.settleCenterOvertimeMonth = catchAsyncErrors(async (req, res, next) => {
   const summary = summaries[0] || null;
   const generatedMinutes = summary ? Math.round(Number(summary.totalDeltaMinutes || 0)) : 0;
 
-  const balanceBeforeMinutes = Math.round(Number(assignment.overtimeBankMinutes || 0));
+  const balanceBeforeMinutes = bankState.balanceMinutes;
   const available = balanceBeforeMinutes + generatedMinutes;
   const maxPayable = Math.max(0, available);
 
@@ -3391,6 +3414,11 @@ exports.settleCenterOvertimeMonth = catchAsyncErrors(async (req, res, next) => {
   assignment.overtimeBankMinutes = balanceAfterMinutes;
   assignment.overtimeBankUpdatedMonth = month;
   await assignment.save();
+  // El saldo de las otras asignaciones ya va incluido en balanceBefore: pasa al principal.
+  await Promise.all(bankState.leftovers.map((a) => {
+    a.overtimeBankMinutes = 0;
+    return a.save();
+  }));
 
   await created.populate('createdBy', 'name email');
 
