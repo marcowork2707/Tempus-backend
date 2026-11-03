@@ -36,6 +36,11 @@ const centerSchema = new mongoose.Schema(
           'Encender aire',
         ],
       },
+      // Se usa cuando el primer turno del trabajador ese día empieza antes de las 8:30
+      openingEarly: {
+        type: [String],
+        default: [],
+      },
       closing: {
         type: [String],
         default: [

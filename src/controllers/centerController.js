@@ -1379,7 +1379,7 @@ exports.updateCenter = catchAsyncErrors(async (req, res, next) => {
 
 // Update Checklist Templates (Admin only)
 exports.updateChecklistTemplates = catchAsyncErrors(async (req, res, next) => {
-  const { openingTasks, closingTasks, dailyTaskKeys, cleaningTasks, generalCleaningTasks } = req.body;
+  const { openingTasks, openingEarlyTasks, closingTasks, dailyTaskKeys, cleaningTasks, generalCleaningTasks } = req.body;
 
   let center = await Center.findById(req.params.id);
 
@@ -1389,6 +1389,12 @@ exports.updateChecklistTemplates = catchAsyncErrors(async (req, res, next) => {
 
   if (openingTasks && Array.isArray(openingTasks)) {
     center.checklistTemplates.opening = openingTasks;
+  }
+
+  if (Array.isArray(openingEarlyTasks)) {
+    center.checklistTemplates.openingEarly = openingEarlyTasks
+      .map((t) => String(t || '').trim())
+      .filter(Boolean);
   }
 
   if (closingTasks && Array.isArray(closingTasks)) {
