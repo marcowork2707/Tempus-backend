@@ -77,6 +77,7 @@ const {
   deleteShiftOverride,
   swapShiftDay,
   getShiftCalendar,
+  getCenterActivityDates,
   getVacationRequests,
   createVacationRequest,
   reviewVacationRequest,
@@ -241,6 +242,7 @@ router.get('/:id/checklists', authorizeRoles('admin'), getCenterChecklists);
 // Read: any authenticated user (controller filters by role)
 router.get('/:id/shift-patterns', getShiftPatterns);
 router.get('/:id/shift-calendar', getShiftCalendar);
+router.get('/:id/activity-dates', getCenterActivityDates);
 // Write: admin only
 router.post('/:id/shift-patterns', authorizeRoles('admin'), createShiftPattern);
 router.put('/:id/shift-patterns/:patternId', authorizeRoles('admin'), updateShiftPattern);

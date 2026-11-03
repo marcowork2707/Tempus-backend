@@ -5987,6 +5987,44 @@ exports.getShiftCalendar = catchAsyncErrors(async (req, res, next) => {
   res.status(200).json({ success: true, occurrences });
 });
 
+// Días en los que alguien del centro tuvo turno de trabajo. Solo devuelve fechas (no quién
+// ni a qué hora), así un coach puede saber cuál fue el último día con actividad del centro
+// aunque su calendario solo le muestre sus propios turnos.
+exports.getCenterActivityDates = catchAsyncErrors(async (req, res, next) => {
+  const { from, to } = req.query;
+  if (!from || !to) {
+    return next(new ErrorHandler('from and to query params (YYYY-MM-DD) are required', 400));
+  }
+  const fromDate = new Date(from);
+  const toDate = new Date(to);
+  const diffDays = (toDate - fromDate) / (24 * 60 * 60 * 1000);
+  if (!(diffDays >= 0 && diffDays <= 92)) {
+    return next(new ErrorHandler('Date range must be between 0 and 92 days', 400));
+  }
+
+  if (req.user.role !== 'admin') {
+    const roleName = await _getRoleNameInCenter(req.user.id, req.params.id);
+    if (!roleName) return next(new ErrorHandler('Unauthorized', 403));
+  }
+
+  const occurrences = await _computeOccurrencesForCenter({
+    centerId: req.params.id,
+    patternFilter: { center: req.params.id, active: true },
+    overrideFilter: {
+      center: req.params.id,
+      date: { $gte: _startOfDay(fromDate), $lte: _startOfDay(toDate) },
+    },
+    fromDate,
+    toDate,
+  });
+
+  const dates = [...new Set(
+    occurrences.filter((occ) => !occ.isOff && !occ.isCleared).map((occ) => occ.date)
+  )].sort();
+
+  res.status(200).json({ success: true, dates });
+});
+
 exports.getCenterRecurringExpenseConcepts = catchAsyncErrors(async (req, res, next) => {
   const center = await Center.findById(req.params.id).select('_id');
   if (!center) return next(new ErrorHandler('Center not found', 404));
