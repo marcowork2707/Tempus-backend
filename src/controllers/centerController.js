@@ -4671,22 +4671,30 @@ async function _assertVacationRangeAlignedWithWorkCycle(centerId, userId, start,
   }
 }
 
+// Las vacaciones son de la persona, no del centro: se marcan en todos sus centros
+// para que no le quede un turno vivo en otro centro esos días.
 async function _syncApprovedVacationOverrides(centerId, request) {
   await ShiftOverride.deleteMany({
-    center: centerId,
     user: request.user,
     vacationRequest: request._id,
   });
+
+  const otherAssignments = await UserCenterRole.find({
+    user: request.user,
+    center: { $ne: centerId },
+    active: true,
+  }).select('center');
+  const centerIds = [String(centerId), ...new Set(otherAssignments.map((a) => String(a.center)))];
 
   let current = new Date(_startOfDay(request.startDate));
   const end = _startOfDay(request.endDate);
 
   while (current <= end) {
     const dateOnly = _startOfDay(current);
-    await ShiftOverride.findOneAndUpdate(
-      { center: centerId, user: request.user, date: dateOnly },
+    for (const targetCenterId of centerIds) await ShiftOverride.findOneAndUpdate(
+      { center: targetCenterId, user: request.user, date: dateOnly },
       {
-        center: centerId,
+        center: targetCenterId,
         user: request.user,
         vacationRequest: request._id,
         date: dateOnly,
@@ -4749,6 +4757,15 @@ async function _backfillVacationRequestsFromOverrides(centerId, reviewedByUserId
     requestsByUser.set(userId, userRequests);
   }
 
+  // Copias de vacaciones pedidas en otro centro del trabajador: ya tienen su solicitud.
+  const unknownRequestIds = [...new Set(overrides
+    .map((o) => (o.vacationRequest ? String(o.vacationRequest) : null))
+    .filter((id) => id && !requestsById.has(id)))];
+  const foreignRequestIds = new Set(unknownRequestIds.length > 0
+    ? (await VacationRequest.find({ _id: { $in: unknownRequestIds }, status: { $in: ['pending', 'approved'] } }).select('_id'))
+      .map((r) => String(r._id))
+    : []);
+
   const linkedOverrideOps = [];
   const pendingByUser = new Map();
 
@@ -4756,7 +4773,7 @@ async function _backfillVacationRequestsFromOverrides(centerId, reviewedByUserId
     const userId = String(override.user);
     const dateValue = startOfDayLocal(override.date);
     const existingRequestId = override.vacationRequest ? String(override.vacationRequest) : null;
-    if (existingRequestId && requestsById.has(existingRequestId)) {
+    if (existingRequestId && (requestsById.has(existingRequestId) || foreignRequestIds.has(existingRequestId))) {
       continue;
     }
 
@@ -5095,7 +5112,6 @@ exports.reviewVacationRequest = catchAsyncErrors(async (req, res, next) => {
   await request.save();
 
   await ShiftOverride.deleteMany({
-    center: req.params.id,
     user: request.user,
     vacationRequest: request._id,
   });
@@ -5121,7 +5137,6 @@ exports.deleteVacationRequest = catchAsyncErrors(async (req, res, next) => {
   }
 
   await ShiftOverride.deleteMany({
-    center: req.params.id,
     user: request.user,
     vacationRequest: request._id,
   });
@@ -5949,6 +5964,22 @@ exports.getShiftCalendar = catchAsyncErrors(async (req, res, next) => {
       });
       otherOccurrences.forEach((occ) => {
         occurrences.push({ ...occ, otherCenter: { id: String(otherCenterId), name: center.name } });
+      });
+    }
+
+    // Si la persona está de vacaciones ese día (en cualquier centro), se muestra un único
+    // bloque de vacaciones (preferentemente el de este centro) y ningún turno.
+    const vacationByUserDay = new Map();
+    occurrences.forEach((occ) => {
+      if (occ.reasonType !== 'vacation') return;
+      const key = `${occ.userId}|${occ.date}`;
+      const current = vacationByUserDay.get(key);
+      if (!current || (current.otherCenter && !occ.otherCenter)) vacationByUserDay.set(key, occ);
+    });
+    if (vacationByUserDay.size > 0) {
+      occurrences = occurrences.filter((occ) => {
+        const kept = vacationByUserDay.get(`${occ.userId}|${occ.date}`);
+        return !kept || kept === occ;
       });
     }
   }
