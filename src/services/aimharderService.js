@@ -4167,7 +4167,134 @@ async function tryExtractMetricFromChartHover(page, chartTitleRegex, monthStr) {
   return null;
 }
 
+// Parámetros de /api/report/activeClients en el orden en que los manda la web de AimHarder.
+const ACTIVE_CLIENTS_REPORT_PARAMS = [
+  'from', 'to', 'membership', 'product', 'categorie', 'seller', 'sellermark', 'initiationCourse',
+  'accountState', 'saleType', 'invitationState', 'paymentMethod', 'sepafile', 'perday', 'grpmemb',
+  'hidepacks', 'sexo', 'cusfields', 'flClausulas', 'showtpvref',
+];
+
+/**
+ * Pide el informe "Clientes activos" directamente al endpoint JSON de AimHarder. No depende de
+ * qué interfaz (antigua o nueva) sirva /reports. Filtros equivalentes al formulario:
+ * tarifa "-3" = "Tarifas de tipo mensual o semanal", accountState 1 = "Cuenta no bloqueada",
+ * hidepacks 1 = "Excluir clientes con el pago de su mensualidad cancelado: Sí".
+ */
+async function fetchActiveClientsFromApi(config, range) {
+  const browser = await chromium.launch({ headless: true, slowMo: 0 });
+  try {
+    const context = await browser.newContext({
+      userAgent:
+        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+    });
+
+    const sessionCache = await getSessionCache(config);
+    if (sessionCache.cookies && sessionCache.expiry && Date.now() < sessionCache.expiry) {
+      await context.addCookies(sessionCache.cookies);
+    }
+
+    const page = await context.newPage();
+    await ensureAuthenticatedSession(page, config);
+
+    await setSessionCache(config, {
+      cookies: await context.cookies(),
+      expiry: Date.now() + SESSION_TTL_MS,
+    });
+
+    const values = {
+      from: range.startIso,
+      to: range.endIso,
+      membership: JSON.stringify(['-3']),
+      accountState: '1',
+      invitationState: '0',
+      grpmemb: '0',
+      hidepacks: '1',
+    };
+    const params = new URLSearchParams();
+    ACTIVE_CLIENTS_REPORT_PARAMS.forEach((key) => params.append(key, values[key] ?? ''));
+
+    const response = await context.request.get(`${config.baseUrl}/api/report/activeClients?${params}`, {
+      headers: { Accept: 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+      timeout: 60000,
+    });
+    const raw = await response.text();
+    let data;
+    try {
+      data = JSON.parse(raw);
+    } catch {
+      throw new Error(`AimHarder no devolvió JSON en /api/report/activeClients (HTTP ${response.status()})`);
+    }
+    if (!data || !Array.isArray(data.result)) {
+      throw new Error(`Respuesta inesperada de /api/report/activeClients (HTTP ${response.status()})`);
+    }
+
+    const normalize = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+    // Varias tarifas llegan separadas por <br>; se quitan las etiquetas igual que hacía
+    // textContent en la tabla antigua, para que las claves de tarifa sigan siendo las mismas.
+    const stripTags = (value) => normalize(String(value || '').replace(/<[^>]*>/g, ''));
+
+    const results = [];
+    const seen = new Set();
+    for (const row of data.result) {
+      const memberName = normalize(row.name);
+      if (!memberName) continue;
+      const client = {
+        memberName,
+        phone: normalize(row.phones),
+        locality: normalize(row.city),
+        activeTariff: stripTags(row.pricings),
+        tariffStartDate: stripTags(row.fromPricings),
+        joinDate: normalize(row.entryDate),
+      };
+      const dedupeKey = `${client.memberName}::${client.phone}::${client.activeTariff}::${client.tariffStartDate}`;
+      if (seen.has(dedupeKey)) continue;
+      seen.add(dedupeKey);
+      results.push(client);
+    }
+
+    console.log(`[AimHarder] /api/report/activeClients devolvió ${data.result.length} filas`);
+    return results;
+  } finally {
+    await browser.close();
+  }
+}
+
 async function getActiveClientsMonthlyReport(centerId, monthStr = null) {
+  const config = await getCenterAimHarderConfig(centerId);
+
+  if (!config.username || !config.password) {
+    throw new Error(
+      `Faltan credenciales de AimHarder para ${config.centerName}. Configura las credenciales en la integración del centro.`
+    );
+  }
+
+  const range = getMonthlyDateRange(monthStr);
+  let clients;
+  try {
+    clients = await fetchActiveClientsFromApi(config, range);
+  } catch (error) {
+    // Si el endpoint falla, se intenta con el formulario de la interfaz antigua.
+    console.warn(`[AimHarder] Endpoint de clientes activos falló (${error.message}); probando con la página de Informes`);
+    return getActiveClientsMonthlyReportFromPage(centerId, monthStr);
+  }
+
+  const excludedClients = clients.filter((client) => shouldExcludeActiveTariff(client.activeTariff));
+  const filteredClients = filterExcludedActiveClients(clients);
+  if (excludedClients.length > 0) {
+    console.log(`[AimHarder] Excluidos ${excludedClients.length} clientes por tarifa con "coach" o "congelacion"`);
+  }
+  console.log(`[AimHarder] Clientes activos detectados (tras exclusiones): ${filteredClients.length}`);
+
+  return {
+    month: range.month,
+    startDate: range.startIso,
+    endDate: range.endIso,
+    clients: filteredClients,
+    tariffSummary: buildActiveTariffSummary(filteredClients),
+  };
+}
+
+async function getActiveClientsMonthlyReportFromPage(centerId, monthStr = null) {
   const config = await getCenterAimHarderConfig(centerId);
 
   if (!config.username || !config.password) {
