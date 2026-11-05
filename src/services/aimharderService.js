@@ -202,6 +202,8 @@ function parseCoachBookingsJson(json) {
     const members = [];
     for (const athlete of Array.isArray(booking.athletes) ? booking.athletes : []) {
       if (!isBookedAthlete(athlete)) continue;
+      // Con falta de asistencia (assist = 0) no hay aviso que anotar. Sin pasar lista vale 1.
+      if (Number(athlete.assist) === 0) continue;
       const memberName = decodeBasicHtmlEntities(collapseSpaces(athlete.name || athlete.realName || athlete.nickname));
       if (!memberName || members.some((m) => m.memberName === memberName)) continue;
 
