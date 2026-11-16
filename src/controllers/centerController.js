@@ -5148,13 +5148,19 @@ exports.reviewVacationRequest = catchAsyncErrors(async (req, res, next) => {
     return next(new ErrorHandler('endDate cannot be earlier than startDate', 400));
   }
 
-  await _assertVacationRangeAlignedWithWorkCycle(
-    requestCenterId,
-    request.user,
-    nextStartDate,
-    nextEndDate,
-    request._id
-  );
+  // Un admin decide por encima de las normas de vacaciones (igual que al crearlas para
+  // otro trabajador); solo se mantiene que no se solape con otra solicitud suya.
+  const isAdminReviewer = req.user.role === 'admin' || roleName === 'admin';
+
+  if (!isAdminReviewer) {
+    await _assertVacationRangeAlignedWithWorkCycle(
+      requestCenterId,
+      request.user,
+      nextStartDate,
+      nextEndDate,
+      request._id
+    );
+  }
 
   const overlapping = await VacationRequest.findOne({
     center: requestCenterId,
@@ -5172,19 +5178,21 @@ exports.reviewVacationRequest = catchAsyncErrors(async (req, res, next) => {
   const nextStatus = status || request.status;
   const nextAttributedYear = _normalizeVacationAttributionYear(attributedYear, nextStartDate);
 
-  if (nextStatus === 'approved') {
-    await _assertVacationConflictRules(requestCenterId, request.user, nextStartDate, nextEndDate, request._id);
-  }
+  if (!isAdminReviewer) {
+    if (nextStatus === 'approved') {
+      await _assertVacationConflictRules(requestCenterId, request.user, nextStartDate, nextEndDate, request._id);
+    }
 
-  await _assertVacationPolicyRules(
-    requestCenterId,
-    request.user,
-    nextStartDate,
-    nextEndDate,
-    nextAttributedYear,
-    request._id,
-    { noticeReferenceDate: request.createdAt }
-  );
+    await _assertVacationPolicyRules(
+      requestCenterId,
+      request.user,
+      nextStartDate,
+      nextEndDate,
+      nextAttributedYear,
+      request._id,
+      { noticeReferenceDate: request.createdAt }
+    );
+  }
 
   request.startDate = nextStartDate;
   request.endDate = nextEndDate;
