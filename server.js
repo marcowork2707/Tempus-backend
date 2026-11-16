@@ -187,6 +187,11 @@ app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
   console.log(`Environment: ${process.env.NODE_ENV}`);
   startTaskReminderScheduler();
+  require('./src/controllers/centerController')._fillCrossCenterVacationOverrides()
+    .then((created) => {
+      if (created > 0) console.log(`[Vacaciones] ${created} días de vacaciones replicados en los otros centros del trabajador`);
+    })
+    .catch((error) => console.error('[Vacaciones] Error al replicar vacaciones entre centros:', error.message));
   seedAimHarderIntegrationsFromEnv().catch((error) => {
     console.error('[AimHarder Seed] Error al sembrar integraciones:', error.message);
   });

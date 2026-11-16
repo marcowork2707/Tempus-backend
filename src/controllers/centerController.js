@@ -4716,6 +4716,65 @@ async function _syncApprovedVacationOverrides(centerId, request) {
   }
 }
 
+// Las solicitudes aprobadas antes de que _syncApprovedVacationOverrides marcase todos los
+// centros solo tienen las vacaciones en el centro donde se pidieron. Aquí se rellenan los
+// días que falten en los demás centros activos del trabajador (sin pisar nada existente).
+// Solo desde noviembre de 2026: los meses anteriores pueden estar ya cerrados en nómina.
+const CROSS_CENTER_VACATION_FROM = new Date('2026-11-01T00:00:00.000Z');
+
+async function _fillCrossCenterVacationOverrides(centerId = null) {
+  const assignmentFilter = { active: true };
+  if (centerId) assignmentFilter.center = centerId;
+  const assignments = await UserCenterRole.find(assignmentFilter).select('user center');
+  const centersByUser = new Map();
+  for (const assignment of assignments) {
+    const key = String(assignment.user);
+    if (!centersByUser.has(key)) centersByUser.set(key, new Set());
+    centersByUser.get(key).add(String(assignment.center));
+  }
+  if (centersByUser.size === 0) return 0;
+
+  const requests = await VacationRequest.find({
+    user: { $in: [...centersByUser.keys()] },
+    status: 'approved',
+    endDate: { $gte: CROSS_CENTER_VACATION_FROM },
+  });
+
+  let created = 0;
+  for (const request of requests) {
+    const targetCenters = [...centersByUser.get(String(request.user))]
+      .filter((targetCenterId) => targetCenterId !== String(request.center));
+    for (const targetCenterId of targetCenters) {
+      let current = new Date(_startOfDay(request.startDate));
+      const end = _startOfDay(request.endDate);
+      while (current <= end) {
+        const dateOnly = _startOfDay(current);
+        const result = await ShiftOverride.updateOne(
+          { center: targetCenterId, user: request.user, date: dateOnly },
+          {
+            $setOnInsert: {
+              center: targetCenterId,
+              user: request.user,
+              vacationRequest: request._id,
+              date: dateOnly,
+              label: 'Vacaciones',
+              isOff: true,
+              reasonType: 'vacation',
+              notes: request.reason,
+            },
+          },
+          { upsert: true }
+        );
+        created += result.upsertedCount || 0;
+        current.setDate(current.getDate() + 1);
+      }
+    }
+  }
+  return created;
+}
+
+exports._fillCrossCenterVacationOverrides = _fillCrossCenterVacationOverrides;
+
 async function _backfillVacationRequestsFromOverrides(centerId, reviewedByUserId = null) {
   const overrides = await ShiftOverride.find({
     center: centerId,
@@ -4889,20 +4948,31 @@ exports.getVacationRequests = catchAsyncErrors(async (req, res, next) => {
     return next(new ErrorHandler('Unauthorized for this center', 403));
   }
 
+  await _fillCrossCenterVacationOverrides(req.params.id);
   await _backfillVacationRequestsFromOverrides(
     req.params.id,
     canManage ? req.user.id : null
   );
 
-  const filter = { center: req.params.id };
+  // Una persona tiene una sola solicitud aunque trabaje en varios centros: se muestran
+  // también las pedidas desde otro centro por quien trabaja en este.
+  const centerUserIds = await UserCenterRole.distinct('user', { center: req.params.id, active: true });
+  const filter = {
+    $or: [
+      { center: req.params.id },
+      { center: { $ne: req.params.id }, user: { $in: centerUserIds } },
+    ],
+  };
   if (canManage) {
     if (req.query.status) filter.status = req.query.status;
     if (req.query.userId) filter.user = req.query.userId;
   } else {
-    filter.$or = [
-      { user: req.user.id },
-      { user: { $ne: req.user.id }, status: 'approved' },
-    ];
+    filter.$and = [{
+      $or: [
+        { user: req.user.id },
+        { user: { $ne: req.user.id }, status: 'approved' },
+      ],
+    }];
   }
 
   const requests = await VacationRequest.find(filter)
@@ -5045,10 +5115,22 @@ exports.createVacationRequest = catchAsyncErrors(async (req, res, next) => {
   });
 });
 
+// La solicitud puede haberse pedido desde otro centro de la misma persona: se acepta si es
+// de este centro o si su trabajador está activo en él.
+async function _findVacationRequestForCenter(requestId, centerId) {
+  const request = await VacationRequest.findById(requestId);
+  if (!request) return null;
+  if (String(request.center) === String(centerId)) return request;
+  const worksHere = await UserCenterRole.exists({ user: request.user, center: centerId, active: true });
+  return worksHere ? request : null;
+}
+
 exports.reviewVacationRequest = catchAsyncErrors(async (req, res, next) => {
   const { status, reviewNotes, startDate, endDate, attributedYear } = req.body;
-  const request = await VacationRequest.findOne({ _id: req.params.requestId, center: req.params.id });
+  const request = await _findVacationRequestForCenter(req.params.requestId, req.params.id);
   if (!request) return next(new ErrorHandler('Vacation request not found', 404));
+  // Reglas y calendario del centro donde se pidió la solicitud.
+  const requestCenterId = String(request.center);
 
   const roleName = await _getRoleNameInCenter(req.user.id, req.params.id);
   if (!_canManageVacationRequests(roleName, req.user.role)) {
@@ -5067,7 +5149,7 @@ exports.reviewVacationRequest = catchAsyncErrors(async (req, res, next) => {
   }
 
   await _assertVacationRangeAlignedWithWorkCycle(
-    req.params.id,
+    requestCenterId,
     request.user,
     nextStartDate,
     nextEndDate,
@@ -5075,7 +5157,7 @@ exports.reviewVacationRequest = catchAsyncErrors(async (req, res, next) => {
   );
 
   const overlapping = await VacationRequest.findOne({
-    center: req.params.id,
+    center: requestCenterId,
     user: request.user,
     _id: { $ne: request._id },
     status: { $in: ['pending', 'approved'] },
@@ -5091,11 +5173,11 @@ exports.reviewVacationRequest = catchAsyncErrors(async (req, res, next) => {
   const nextAttributedYear = _normalizeVacationAttributionYear(attributedYear, nextStartDate);
 
   if (nextStatus === 'approved') {
-    await _assertVacationConflictRules(req.params.id, request.user, nextStartDate, nextEndDate, request._id);
+    await _assertVacationConflictRules(requestCenterId, request.user, nextStartDate, nextEndDate, request._id);
   }
 
   await _assertVacationPolicyRules(
-    req.params.id,
+    requestCenterId,
     request.user,
     nextStartDate,
     nextEndDate,
@@ -5122,7 +5204,7 @@ exports.reviewVacationRequest = catchAsyncErrors(async (req, res, next) => {
   });
 
   if (nextStatus === 'approved') {
-    await _syncApprovedVacationOverrides(req.params.id, request);
+    await _syncApprovedVacationOverrides(requestCenterId, request);
   }
 
   const populated = await VacationRequest.findById(request._id)
@@ -5133,7 +5215,7 @@ exports.reviewVacationRequest = catchAsyncErrors(async (req, res, next) => {
 });
 
 exports.deleteVacationRequest = catchAsyncErrors(async (req, res, next) => {
-  const request = await VacationRequest.findOne({ _id: req.params.requestId, center: req.params.id });
+  const request = await _findVacationRequestForCenter(req.params.requestId, req.params.id);
   if (!request) return next(new ErrorHandler('Vacation request not found', 404));
 
   const roleName = await _getRoleNameInCenter(req.user.id, req.params.id);
