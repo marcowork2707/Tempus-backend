@@ -3088,9 +3088,16 @@ async function getAbsences(dateStr = null, centerId) {
     const navAusencias = await openReservationsDay(page, targetDate, config);
     await saveDebugSnapshot(page, '06_final_schedule');
 
-    const reservationAbsences = navAusencias && navAusencias.bookings
-      ? absencesFromCoachBookings(navAusencias.bookings, targetDate)
-      : await parseReservationsHtml(page, targetDate, navAusencias && navAusencias.scopeHtml);
+    // El JSON de /api/coachBookings es la fuente real del día: si llega, su resultado vale
+    // aunque sea 0 faltas. Los fallbacks de abajo leen la página y, sin abrir el horario,
+    // solo verían las respuestas de /control.
+    if (navAusencias && navAusencias.bookings) {
+      const absences = absencesFromCoachBookings(navAusencias.bookings, targetDate);
+      console.log(`[AimHarder] ${absences.length} ausencias encontradas en /api/coachBookings`);
+      return enrichAbsencesFromDb(absences, config.centerId);
+    }
+
+    const reservationAbsences = await parseReservationsHtml(page, targetDate, navAusencias && navAusencias.scopeHtml);
     if (reservationAbsences.length > 0) {
       console.log(`[AimHarder] ${reservationAbsences.length} ausencias encontradas en Reservas`);
       return enrichAbsencesFromDb(reservationAbsences, config.centerId);
