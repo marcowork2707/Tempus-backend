@@ -1137,7 +1137,44 @@ async function ensureAuthenticatedSession(page, config) {
 // Navegación a Reservas y al día correcto
 // ─────────────────────────────────────────────────────
 
+// Pide el día a /api/coachBookings con la sesión del contexto, SIN abrir /schedule.
+// La página del horario pesa ~600 KB más recursos y AimHarder (tras un balanceador de
+// AWS) devuelve a veces "403 Forbidden" al abrirla desde Railway; la API es una sola
+// petición ligera. Devuelve el JSON del día o null si no sirve.
+async function pedirDiaDirectoAApi(page, config, targetDate) {
+  const dayKey = toAimHarderDayKey(targetDate);
+  try {
+    const response = await page.context().request.get(`${config.baseUrl}/api/coachBookings`, {
+      params: { day: String(dayKey), familyId: '', showCurrent: '1', showCurrentPrev: '2', showCurrentNext: '2' },
+      headers: { Accept: 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+      timeout: 45000,
+    });
+    const raw = await response.text();
+    let data = null;
+    try {
+      data = JSON.parse(raw);
+    } catch {
+      console.warn(`[AimHarder] /api/coachBookings directo no devolvió JSON (HTTP ${response.status()})`);
+      return null;
+    }
+    if (!data || !Array.isArray(data.bookings) || String(data.dayYYYYMMDD || '') !== String(dayKey)) {
+      console.warn(`[AimHarder] /api/coachBookings directo: respuesta inesperada (HTTP ${response.status()}, día ${data && data.dayYYYYMMDD})`);
+      return null;
+    }
+    return data;
+  } catch (error) {
+    console.warn('[AimHarder] /api/coachBookings directo falló:', error.message);
+    return null;
+  }
+}
+
 async function openReservationsDay(page, targetDate, config, snap = async () => {}) {
+  const directo = await pedirDiaDirectoAApi(page, config, targetDate);
+  if (directo) {
+    console.log(`[AimHarder] Día ${toAimHarderDayKey(targetDate)} cargado desde /api/coachBookings sin abrir el horario (${directo.bookings.length} clases)`);
+    return { bookings: directo };
+  }
+
   // Se escucha desde ANTES de abrir la página: así se ve qué petición sirve las
   // reservas del día, que es la que hay que reproducir para otra fecha.
   const erroresJs = [];
@@ -1181,6 +1218,12 @@ async function openReservationsDay(page, targetDate, config, snap = async () => 
       bloques: document.querySelectorAll('.bloqueClase').length,
       texto: (document.body && document.body.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 180),
     })).catch(() => null);
+    if (diag && /403 forbidden/i.test(`${diag.title} ${diag.texto}`)) {
+      throw new Error(
+        'AimHarder ha bloqueado temporalmente el acceso desde el servidor (403 Forbidden). ' +
+        'Vuelve a intentarlo en unos minutos.'
+      );
+    }
     throw new Error(
       `No se encontró el calendario del horario (#weekDays/#clasesDiaSel) en ${page.url()}. ` +
       `Diagnóstico: ${JSON.stringify(diag)}`
@@ -3240,16 +3283,35 @@ async function refreshAndStoreBookingsRange(startDateStr, endDateStr, centerId) 
       expiry: Date.now() + SESSION_TTL_MS,
     });
 
-    await page.goto(`${config.baseUrl}/schedule?adm`, { waitUntil: 'domcontentloaded', timeout: 45000 });
-    await page.waitForTimeout(1200).catch(() => {});
-    await dismissCookies(page);
-    await dismissAimHarderPromos(page);
-    await page.waitForLoadState('networkidle', { timeout: 20000 }).catch(() => {});
-    await page.waitForSelector('#weekDays, #clasesDiaSel', { timeout: 20000 });
+    // El horario solo se abre si la petición directa a la API falla (ver pedirDiaDirectoAApi).
+    let horarioAbierto = false;
+    let errorHorario = null;
+    const abrirHorario = async () => {
+      await page.goto(`${config.baseUrl}/schedule?adm`, { waitUntil: 'domcontentloaded', timeout: 45000 });
+      await page.waitForTimeout(1200).catch(() => {});
+      await dismissCookies(page);
+      await dismissAimHarderPromos(page);
+      await page.waitForLoadState('networkidle', { timeout: 20000 }).catch(() => {});
+      await page.waitForSelector('#weekDays, #clasesDiaSel', { timeout: 20000 });
+      horarioAbierto = true;
+    };
 
     for (const dateStr of dates) {
       try {
-        const result = await pedirDiaAApiCoachBookings(page, new Date(`${dateStr}T12:00:00`));
+        const targetDate = new Date(`${dateStr}T12:00:00`);
+        let result = { ok: true, json: await pedirDiaDirectoAApi(page, config, targetDate) };
+        if (!result.json) {
+          if (errorHorario) throw errorHorario;
+          if (!horarioAbierto) {
+            try {
+              await abrirHorario();
+            } catch (error) {
+              errorHorario = error;
+              throw error;
+            }
+          }
+          result = await pedirDiaAApiCoachBookings(page, targetDate);
+        }
         if (!result.ok || !result.json) {
           failed.push({ date: dateStr, error: result.detalle || 'Respuesta vacía de AimHarder' });
           continue;
