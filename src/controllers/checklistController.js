@@ -87,6 +87,12 @@ exports.getChecklists = catchAsyncErrors(async (req, res, next) => {
     const dateNext = new Date(dateOnly);
     dateNext.setDate(dateNext.getDate() + 1);
     filter.date = { $gte: dateOnly, $lt: dateNext };
+  } else if (req.query.startDate && req.query.endDate) {
+    // Rango [startDate, endDate] por días, con el mismo criterio que `date`
+    const rangeStart = new Date(new Date(req.query.startDate).toISOString().split('T')[0]);
+    const rangeEnd = new Date(new Date(req.query.endDate).toISOString().split('T')[0]);
+    rangeEnd.setDate(rangeEnd.getDate() + 1);
+    filter.date = { $gte: rangeStart, $lt: rangeEnd };
   }
 
   if (req.query.status) {

@@ -4238,20 +4238,21 @@ async function tryExtractMetricFromChartHover(page, chartTitleRegex, monthStr) {
   return null;
 }
 
-// Parámetros de /api/report/activeClients en el orden en que los manda la web de AimHarder.
-const ACTIVE_CLIENTS_REPORT_PARAMS = [
+// Parámetros de los informes de /api/report/* en el orden en que los manda la web de AimHarder
+// (los que no usa un informe van vacíos).
+const AIMHARDER_REPORT_PARAMS = [
   'from', 'to', 'membership', 'product', 'categorie', 'seller', 'sellermark', 'initiationCourse',
   'accountState', 'saleType', 'invitationState', 'paymentMethod', 'sepafile', 'perday', 'grpmemb',
   'hidepacks', 'sexo', 'cusfields', 'flClausulas', 'showtpvref',
 ];
 
 /**
- * Pide el informe "Clientes activos" directamente al endpoint JSON de AimHarder. No depende de
- * qué interfaz (antigua o nueva) sirva /reports. Filtros equivalentes al formulario:
- * tarifa "-3" = "Tarifas de tipo mensual o semanal", accountState 1 = "Cuenta no bloqueada",
- * hidepacks 1 = "Excluir clientes con el pago de su mensualidad cancelado: Sí".
+ * Pide un informe de AimHarder directamente a su endpoint JSON (`/api/report/<nombre>`), con la
+ * sesión del centro. No depende de qué interfaz (antigua o nueva) sirva /reports.
+ * Las definiciones de cada informe (endpoint y filtros) están en `/new-web/assets/main-*.js`.
+ * Devuelve las filas (`result`).
  */
-async function fetchActiveClientsFromApi(config, range) {
+async function fetchAimHarderReportRows(config, endpoint, values) {
   const browser = await chromium.launch({ headless: true, slowMo: 0 });
   try {
     const context = await browser.newContext({
@@ -4272,19 +4273,10 @@ async function fetchActiveClientsFromApi(config, range) {
       expiry: Date.now() + SESSION_TTL_MS,
     });
 
-    const values = {
-      from: range.startIso,
-      to: range.endIso,
-      membership: JSON.stringify(['-3']),
-      accountState: '1',
-      invitationState: '0',
-      grpmemb: '0',
-      hidepacks: '1',
-    };
     const params = new URLSearchParams();
-    ACTIVE_CLIENTS_REPORT_PARAMS.forEach((key) => params.append(key, values[key] ?? ''));
+    AIMHARDER_REPORT_PARAMS.forEach((key) => params.append(key, values[key] ?? ''));
 
-    const response = await context.request.get(`${config.baseUrl}/api/report/activeClients?${params}`, {
+    const response = await context.request.get(`${config.baseUrl}/api/report/${endpoint}?${params}`, {
       headers: { Accept: 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
       timeout: 60000,
     });
@@ -4293,41 +4285,94 @@ async function fetchActiveClientsFromApi(config, range) {
     try {
       data = JSON.parse(raw);
     } catch {
-      throw new Error(`AimHarder no devolvió JSON en /api/report/activeClients (HTTP ${response.status()})`);
+      throw new Error(`AimHarder no devolvió JSON en /api/report/${endpoint} (HTTP ${response.status()})`);
     }
     if (!data || !Array.isArray(data.result)) {
-      throw new Error(`Respuesta inesperada de /api/report/activeClients (HTTP ${response.status()})`);
+      throw new Error(`Respuesta inesperada de /api/report/${endpoint} (HTTP ${response.status()})`);
     }
 
-    const normalize = (value) => String(value || '').replace(/\s+/g, ' ').trim();
-    // Varias tarifas llegan separadas por <br>; se quitan las etiquetas igual que hacía
-    // textContent en la tabla antigua, para que las claves de tarifa sigan siendo las mismas.
-    const stripTags = (value) => normalize(String(value || '').replace(/<[^>]*>/g, ''));
-
-    const results = [];
-    const seen = new Set();
-    for (const row of data.result) {
-      const memberName = normalize(row.name);
-      if (!memberName) continue;
-      const client = {
-        memberName,
-        phone: normalize(row.phones),
-        locality: normalize(row.city),
-        activeTariff: stripTags(row.pricings),
-        tariffStartDate: stripTags(row.fromPricings),
-        joinDate: normalize(row.entryDate),
-      };
-      const dedupeKey = `${client.memberName}::${client.phone}::${client.activeTariff}::${client.tariffStartDate}`;
-      if (seen.has(dedupeKey)) continue;
-      seen.add(dedupeKey);
-      results.push(client);
-    }
-
-    console.log(`[AimHarder] /api/report/activeClients devolvió ${data.result.length} filas`);
-    return results;
+    console.log(`[AimHarder] /api/report/${endpoint} devolvió ${data.result.length} filas`);
+    return data.result;
   } finally {
     await browser.close();
   }
+}
+
+const normalizeReportText = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+// Varias tarifas llegan separadas por <br>; se quitan las etiquetas igual que hacía
+// textContent en la tabla antigua, para que las claves de tarifa sigan siendo las mismas.
+const stripReportTags = (value) => normalizeReportText(String(value || '').replace(/<[^>]*>/g, ''));
+
+/**
+ * Informe "Clientes activos". Filtros equivalentes al formulario:
+ * tarifa "-3" = "Tarifas de tipo mensual o semanal", accountState 1 = "Cuenta no bloqueada",
+ * hidepacks 1 = "Excluir clientes con el pago de su mensualidad cancelado: Sí".
+ */
+async function fetchActiveClientsFromApi(config, range) {
+  const rows = await fetchAimHarderReportRows(config, 'activeClients', {
+    from: range.startIso,
+    to: range.endIso,
+    membership: JSON.stringify(['-3']),
+    accountState: '1',
+    invitationState: '0',
+    grpmemb: '0',
+    hidepacks: '1',
+  });
+
+  const results = [];
+  const seen = new Set();
+  for (const row of rows) {
+    const memberName = normalizeReportText(row.name);
+    if (!memberName) continue;
+    const client = {
+      memberName,
+      phone: normalizeReportText(row.phones),
+      locality: normalizeReportText(row.city),
+      activeTariff: stripReportTags(row.pricings),
+      tariffStartDate: stripReportTags(row.fromPricings),
+      joinDate: normalizeReportText(row.entryDate),
+    };
+    const dedupeKey = `${client.memberName}::${client.phone}::${client.activeTariff}::${client.tariffStartDate}`;
+    if (seen.has(dedupeKey)) continue;
+    seen.add(dedupeKey);
+    results.push(client);
+  }
+  return results;
+}
+
+/**
+ * Informe "Cancelaciones de tarifa", solo trimestral/semestral. Filtros equivalentes al formulario:
+ * "Descartar bonos" = No (hidepacks 0), "Listar clientes que se dieron de alta después de la fecha
+ * desde" = No (grpmemb 0), grupo de tarifas sin filtrar (-1). `pricings` es la tarifa cancelada.
+ */
+async function fetchTariffCancellationsFromApi(config, range) {
+  const rows = await fetchAimHarderReportRows(config, 'cancellations', {
+    from: range.startIso,
+    to: range.endIso,
+    hidepacks: '0',
+    grpmemb: '0',
+    categorie: '-1',
+  });
+
+  const results = [];
+  const seen = new Set();
+  for (const row of rows) {
+    const memberName = normalizeReportText(row.name);
+    const cancelledTariff = stripReportTags(row.pricings);
+    if (!memberName || !cancelledTariff) continue;
+    if (!/(semestral|trimestral)/i.test(cancelledTariff)) continue;
+    const client = {
+      memberName,
+      phone: normalizeReportText(row.phones),
+      cancelledTariff,
+      cancellationDate: normalizeReportText(row.deactivationDate),
+    };
+    const dedupeKey = `${client.memberName}::${client.phone}::${client.cancelledTariff}::${client.cancellationDate}`;
+    if (seen.has(dedupeKey)) continue;
+    seen.add(dedupeKey);
+    results.push(client);
+  }
+  return results;
 }
 
 async function getActiveClientsMonthlyReport(centerId, monthStr = null) {
@@ -4945,6 +4990,18 @@ async function getTariffCancellationRenewals(centerId, referenceDateStr = null, 
   const range = getTermRenewalReportRange(referenceDateStr);
   console.log('[AimHarder] ===== Scraping cancelaciones de tarifa (trimestral/semestral) =====');
   console.log(`[AimHarder] Rango informe: ${range.startIso} -> ${range.endIso}`);
+
+  // Vía principal: el endpoint JSON del informe (la interfaz nueva de Informes ya no tiene el
+  // formulario antiguo). En modo debug se sigue usando la página para poder ver capturas.
+  if (!debug) {
+    try {
+      const clients = await fetchTariffCancellationsFromApi(config, range);
+      console.log(`[AimHarder] ${clients.length} clientes trimestral/semestral detectados (API)`);
+      return { startDate: range.startIso, endDate: range.endIso, clients };
+    } catch (error) {
+      console.warn(`[AimHarder] Endpoint de cancelaciones falló (${error.message}); probando con la página de Informes`);
+    }
+  }
 
   const browser = await chromium.launch({ headless: true, slowMo: 0 });
   try {
