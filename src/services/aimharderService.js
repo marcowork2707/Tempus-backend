@@ -4253,6 +4253,16 @@ const AIMHARDER_REPORT_PARAMS = [
  * Devuelve las filas (`result`).
  */
 async function fetchAimHarderReportRows(config, endpoint, values) {
+  const [rows] = await fetchAimHarderReportBatch(config, [{ endpoint, values }]);
+  return rows;
+}
+
+/**
+ * Igual que fetchAimHarderReportRows pero con varias consultas en la misma sesión de navegador
+ * (un solo login), para no disparar el 403 por volumen de AimHarder. Devuelve un array de filas
+ * por consulta, en el mismo orden.
+ */
+async function fetchAimHarderReportBatch(config, requests) {
   const browser = await chromium.launch({ headless: true, slowMo: 0 });
   try {
     const context = await browser.newContext({
@@ -4273,26 +4283,32 @@ async function fetchAimHarderReportRows(config, endpoint, values) {
       expiry: Date.now() + SESSION_TTL_MS,
     });
 
-    const params = new URLSearchParams();
-    AIMHARDER_REPORT_PARAMS.forEach((key) => params.append(key, values[key] ?? ''));
+    const results = [];
+    for (const [index, { endpoint, values }] of requests.entries()) {
+      // Pausa entre consultas de la misma tanda: AimHarder corta con 429/403 si van seguidas.
+      if (index > 0) await new Promise((resolve) => setTimeout(resolve, 1500));
+      const params = new URLSearchParams();
+      AIMHARDER_REPORT_PARAMS.forEach((key) => params.append(key, values[key] ?? ''));
 
-    const response = await context.request.get(`${config.baseUrl}/api/report/${endpoint}?${params}`, {
-      headers: { Accept: 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
-      timeout: 60000,
-    });
-    const raw = await response.text();
-    let data;
-    try {
-      data = JSON.parse(raw);
-    } catch {
-      throw new Error(`AimHarder no devolvió JSON en /api/report/${endpoint} (HTTP ${response.status()})`);
-    }
-    if (!data || !Array.isArray(data.result)) {
-      throw new Error(`Respuesta inesperada de /api/report/${endpoint} (HTTP ${response.status()})`);
-    }
+      const response = await context.request.get(`${config.baseUrl}/api/report/${endpoint}?${params}`, {
+        headers: { Accept: 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+        timeout: 60000,
+      });
+      const raw = await response.text();
+      let data;
+      try {
+        data = JSON.parse(raw);
+      } catch {
+        throw new Error(`AimHarder no devolvió JSON en /api/report/${endpoint} (HTTP ${response.status()})`);
+      }
+      if (!data || !Array.isArray(data.result)) {
+        throw new Error(`Respuesta inesperada de /api/report/${endpoint} (HTTP ${response.status()})`);
+      }
 
-    console.log(`[AimHarder] /api/report/${endpoint} devolvió ${data.result.length} filas`);
-    return data.result;
+      console.log(`[AimHarder] /api/report/${endpoint} devolvió ${data.result.length} filas`);
+      results.push(data.result);
+    }
+    return results;
   } finally {
     await browser.close();
   }
@@ -4373,6 +4389,119 @@ async function fetchTariffCancellationsFromApi(config, range) {
     results.push(client);
   }
   return results;
+}
+
+/**
+ * Rango del "Sistema stop bajas": del día 25 del mes de referencia al 24 del mes siguiente
+ * (si la fecha es anterior al 25, el ciclo empezó el 25 del mes anterior). Así cada baja sale en
+ * un único ciclo aunque la tarea se arrastre a días posteriores.
+ */
+function getMonthEndCancellationRange(referenceDateStr = null) {
+  const referenceDate = referenceDateStr ? new Date(`${referenceDateStr}T12:00:00`) : new Date();
+  if (Number.isNaN(referenceDate.getTime())) {
+    throw new Error('Fecha de referencia inválida para calcular las bajas');
+  }
+  let year = referenceDate.getFullYear();
+  let month = referenceDate.getMonth();
+  if (referenceDate.getDate() < 25) month -= 1;
+  const startDate = new Date(year, month, 25, 12);
+  const endDate = new Date(year, month + 1, 24, 12);
+  return { startDate, endDate, startIso: toDateString(startDate), endIso: toDateString(endDate) };
+}
+
+// Cancelaciones que no son una baja real: fin de trimestre/semestre (tiene su propia tarea),
+// tarifas internas (coach/congelación), el curso de iniciación ON RAMP y bonos que caducan.
+const NON_RETENTION_TARIFF_RE = /(trimestral|semestral|coach|congelaci|on\s*ramp|\bbono)/i;
+
+/**
+ * "Sistema stop bajas fin de mes": clientes con la baja tramitada, desde el informe
+ * "Cancelaciones de tarifa". Se descartan los cambios de tarifa: si al día siguiente de la baja
+ * el cliente sigue apareciendo en "Clientes activos" (con cualquier tarifa), no se va.
+ */
+async function getMonthEndCancellations(centerId, referenceDateStr = null) {
+  const config = await getCenterAimHarderConfig(centerId);
+  if (!config.username || !config.password) {
+    throw new Error(
+      `Faltan credenciales de AimHarder para ${config.centerName}. Configura las credenciales en la integración del centro.`
+    );
+  }
+
+  const range = getMonthEndCancellationRange(referenceDateStr);
+  console.log(`[AimHarder] Stop bajas ${config.centerName}: ${range.startIso} -> ${range.endIso}`);
+
+  const [rows] = await fetchAimHarderReportBatch(config, [{
+    endpoint: 'cancellations',
+    // hidepacks 1 = "Descartar bonos: Sí" (un bono que caduca no es una baja tramitada)
+    values: { from: range.startIso, to: range.endIso, hidepacks: '1', grpmemb: '0', categorie: '-1' },
+  }]);
+
+  const candidates = new Map();
+  for (const row of rows) {
+    const memberName = normalizeReportText(row.name);
+    const cancelledTariff = stripReportTags(row.pricings);
+    if (!memberName || !cancelledTariff) continue;
+    if (NON_RETENTION_TARIFF_RE.test(cancelledTariff)) continue;
+    const key = row.id ? String(row.id) : memberName;
+    const deactivationYmd = normalizeReportText(row.deactivationDateYYYYMMDD);
+    const previous = candidates.get(key);
+    if (previous) {
+      if (!previous.cancelledTariff.includes(cancelledTariff)) {
+        previous.cancelledTariff = `${previous.cancelledTariff} + ${cancelledTariff}`;
+      }
+      if (deactivationYmd > previous.deactivationYmd) {
+        previous.deactivationYmd = deactivationYmd;
+        previous.cancellationDate = normalizeReportText(row.deactivationDate);
+      }
+      continue;
+    }
+    candidates.set(key, {
+      id: row.id ? String(row.id) : undefined,
+      memberName,
+      firstName: normalizeReportText(row.nom) || undefined,
+      phone: normalizeReportText(row.phones),
+      cancelledTariff,
+      cancellationDate: normalizeReportText(row.deactivationDate),
+      deactivationYmd,
+    });
+  }
+
+  // Cambios de tarifa: ¿sigue activo el día siguiente a su baja?
+  const dayAfter = (ymd) => {
+    const d = new Date(`${ymd}T12:00:00`);
+    d.setDate(d.getDate() + 1);
+    return toDateString(d);
+  };
+  const checkDays = [...new Set([...candidates.values()].filter((c) => c.deactivationYmd).map((c) => dayAfter(c.deactivationYmd)))];
+  let tariffChangesChecked = true;
+  const activeIdsByDay = new Map();
+  if (checkDays.length > 0) {
+    try {
+      const activeLists = await fetchAimHarderReportBatch(config, checkDays.map((day) => ({
+        endpoint: 'activeClients',
+        values: { from: day, to: day, membership: '', accountState: '1', invitationState: '0', grpmemb: '0', hidepacks: '0' },
+      })));
+      checkDays.forEach((day, i) => activeIdsByDay.set(day, new Set(activeLists[i].map((r) => String(r.id)))));
+    } catch (error) {
+      tariffChangesChecked = false;
+      console.warn(`[AimHarder] Stop bajas: no se pudieron comprobar cambios de tarifa (${error.message})`);
+    }
+  }
+
+  const clients = [];
+  let tariffChanges = 0;
+  for (const client of candidates.values()) {
+    const activeIds = client.deactivationYmd ? activeIdsByDay.get(dayAfter(client.deactivationYmd)) : null;
+    if (activeIds && client.id && activeIds.has(client.id)) {
+      tariffChanges += 1;
+      continue;
+    }
+    const { deactivationYmd, ...rest } = client;
+    clients.push(rest);
+  }
+  clients.sort((a, b) => a.memberName.localeCompare(b.memberName, 'es'));
+  console.log(`[AimHarder] Stop bajas: ${clients.length} bajas, ${tariffChanges} cambios de tarifa descartados`);
+
+  return { startDate: range.startIso, endDate: range.endIso, clients, tariffChanges, tariffChangesChecked };
 }
 
 async function getActiveClientsMonthlyReport(centerId, monthStr = null) {
@@ -5919,6 +6048,8 @@ module.exports = {
   setClientMonthlyMetricsManual,
   resetClientMonthlySnapshot,
   getTariffCancellationRenewals,
+  getMonthEndCancellations,
+  getMonthEndCancellationRange,
   getTariffChangeReport,
   getYesterday,
   toDateString,

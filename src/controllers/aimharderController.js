@@ -22,6 +22,7 @@ const {
   setClientMonthlyMetricsManual,
   resetClientMonthlySnapshot,
   getTariffCancellationRenewals,
+  getMonthEndCancellations,
   getTariffChangeReport,
 } = require('../services/aimharderService');
 const { buildCapacityReport, getCapacityRange } = require('../services/capacityReportService');
@@ -682,6 +683,36 @@ exports.getTariffCancellationRenewals = async (req, res) => {
       success: false,
       message: 'Error al obtener cancelaciones de tarifa desde AimHarder.',
       detail: process.env.NODE_ENV === 'development' ? err.message : undefined,
+    });
+  }
+};
+
+/**
+ * GET /api/aimharder/month-end-cancellations?centerId=xxx&date=YYYY-MM-DD
+ * "Sistema stop bajas": clientes con la baja tramitada (del 25 al 24 del mes siguiente),
+ * sin fines de trimestre/semestre, ON RAMP, tarifas coach/congelación ni cambios de tarifa.
+ */
+exports.getMonthEndCancellations = async (req, res) => {
+  try {
+    const { centerId, date } = req.query;
+    if (!centerId) {
+      return res.status(400).json({ success: false, message: 'centerId es obligatorio' });
+    }
+    if (date && !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      return res.status(400).json({ success: false, message: 'Formato de fecha inválido. Usa YYYY-MM-DD' });
+    }
+    const result = await getMonthEndCancellations(centerId, date || null);
+    res.json({ success: true, count: result.clients.length, ...result });
+  } catch (err) {
+    console.error('[AimHarder Controller] Error stop bajas:', err.message);
+    if (err.message.includes('credenciales')) {
+      return res.status(503).json({ success: false, message: err.message });
+    }
+    res.status(500).json({
+      success: false,
+      message: err.message.includes('403')
+        ? 'AimHarder ha bloqueado temporalmente el acceso desde el servidor (403). Vuelve a intentarlo en unos minutos.'
+        : 'Error al obtener las bajas desde AimHarder.',
     });
   }
 };

@@ -19,6 +19,7 @@ const {
   getActiveClientsReport,
   getTariffCancellationRenewals,
   getTariffChanges,
+  getMonthEndCancellations,
   setClientMonthlyMetricsManual,
   resetActiveClientsReport,
   getOccupancyReport,
@@ -54,6 +55,7 @@ router.get('/active-clients-report', isAuthenticatedUser, getActiveClientsReport
 router.delete('/active-clients-report', isAuthenticatedUser, resetActiveClientsReport);
 router.get('/tariff-cancellation-renewals', isAuthenticatedUser, getTariffCancellationRenewals);
 router.get('/tariff-changes', isAuthenticatedUser, getTariffChanges);
+router.get('/month-end-cancellations', isAuthenticatedUser, getMonthEndCancellations);
 router.put('/monthly-metrics-manual', isAuthenticatedUser, setClientMonthlyMetricsManual);
 router.get('/occupancy-report', isAuthenticatedUser, authorizeRoles('admin'), getOccupancyReport);
 router.get('/capacity-report', isAuthenticatedUser, authorizeRoles('admin'), getCapacityReport);
